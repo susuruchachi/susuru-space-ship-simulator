@@ -252,17 +252,37 @@ const ApproachVisualizer = {
     const approachAxisWorld = vecNormalize(
       rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion)
     );
-    const alongDistWorld = vecDot(toTargetWorld, approachAxisWorld);
+
+    // v45: onApproachSideの判定を、ここでの単純な符号チェック
+    // （alongDistWorld < 0）から、ThrusterSolver側のヒステリシス版
+    // (_computeOnApproachSideWithHysteresis)が同一フレーム内で既に
+    // 書き込んだ ship._dockingOnApproachSide を読むだけの形に変更。
+    //
+    // 理由: ThrusterSolverは艦が進入軸をわずかにまたいだだけでの
+    // 判定振動を防ぐため、v23時点からヒステリシスを持たせている
+    // （一度「手前側」と判定されたら、DOCKING_APPROACH_SIDE_EXIT_MARGIN
+    // を明確に下回るまでは「手前側」の判定を維持する）。ところが
+    // この可視化側は単純な符号だけで判定していたため、実際の艦の
+    // 制御（ベジエ追従が続いている）と可視化（予定航路が消える）が
+    // 食い違い、「進入軸の座標的に目的地を過ぎた位置にいると予定
+    // 航路が出なくなる」という不具合として現れていた。
+    //
+    // 呼び出し順（index.html）はShipController.update→
+    // ApproachVisualizer.updateなので、この時点でship.
+    // _dockingOnApproachSideは今フレーム分の判定が既に済んでいる。
+    // ここで改めてヒステリシス関数を呼ぶと状態を二重に動かして
+    // しまうため、書き込み済みの値を読むだけにする。
+    const onApproachSide = ship._dockingOnApproachSide !== false;
 
     // 艦が目的地の奥側に出てしまっている間は、通常フェーズのベジエ
     // 経路そのものが使われない（ThrusterSolver側もフォールバック
     // する）ため、可視化上も経路を引かない。
-    if (alongDistWorld < 0) return;
+    if (!onApproachSide) return;
 
     const rawVirtualTargetPos = ThrusterSolver._computeVirtualApproachTarget(
       target,
       approachAxisWorld,
-      alongDistWorld
+      ship.position
     );
     // v43: ThrusterSolver側（_buildDesiredForAutoDocking）と同じ迂回
     // 判定をここでも通す。実際に艦が辿る経路（迂回点経由になりうる）と
