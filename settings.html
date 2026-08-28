@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>設定 - 宇宙船シミュレーター</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #05070c;
+    color: #dfefff;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    min-height: 100vh;
+  }
+  .settings-wrap {
+    max-width: 480px;
+    margin: 0 auto;
+    padding: 24px 20px 100px;
+  }
+  h1 {
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    border-bottom: 1px solid rgba(255,255,255,0.15);
+    padding-bottom: 12px;
+  }
+  section {
+    margin-top: 28px;
+  }
+  h2 {
+    font-size: 13px;
+    color: #9fd8ff;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 12px;
+  }
+  .option-grid {
+    display: grid;
+    gap: 10px;
+  }
+  .option-card {
+    display: block;
+    padding: 14px 16px;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.12);
+    cursor: pointer;
+  }
+  .option-card.selected {
+    border-color: #6cc3ff;
+    background: rgba(108,195,255,0.1);
+  }
+  .option-card .title { font-size: 14px; font-weight: 600; }
+  .option-card .desc { font-size: 12px; color: #9fb3c8; margin-top: 4px; line-height: 1.5; }
+
+  .option-card input { display: none; }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.12);
+  }
+  .toggle-row .label { font-size: 14px; }
+  .toggle-row .sub { font-size: 12px; color: #9fb3c8; margin-top: 2px; }
+
+  switch-fake {
+    display: inline-block;
+    width: 40px;
+    height: 22px;
+    border-radius: 11px;
+    background: rgba(255,255,255,0.15);
+    position: relative;
+  }
+
+  .footer-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 16px 20px;
+    background: rgba(5,7,12,0.9);
+    border-top: 1px solid rgba(255,255,255,0.12);
+    display: flex;
+    gap: 12px;
+  }
+  .btn {
+    flex: 1;
+    padding: 14px;
+    border-radius: 10px;
+    border: none;
+    font-size: 14px;
+    font-weight: 600;
+    text-align: center;
+    text-decoration: none;
+    display: block;
+  }
+  .btn-primary {
+    background: #3a8fd6;
+    color: #fff;
+  }
+  .btn-secondary {
+    background: rgba(255,255,255,0.08);
+    color: #dfefff;
+    border: 1px solid rgba(255,255,255,0.2);
+  }
+</style>
+</head>
+<body>
+
+<div class="settings-wrap">
+  <h1>宇宙船シミュレーター 設定</h1>
+
+  <section>
+    <h2>艦種選択</h2>
+    <div class="option-grid" id="shipClassOptions"></div>
+  </section>
+
+  <section>
+    <h2>艦船建造</h2>
+    <a class="option-card" id="shipBuilderLink" href="ship-builder.html">
+      <div class="title">3Dモデルをインポート</div>
+      <div class="desc">GLBまたはOBJ+MTLファイルを読み込み、向き・スケール・位置を調整して選択中の艦種に割り当てます。</div>
+    </a>
+  </section>
+
+  <section>
+    <h2>速度キャップ演出モード</h2>
+    <div class="option-grid">
+      <label class="option-card" data-value="hard-cap">
+        <input type="radio" name="speedCapMode" value="hard-cap">
+        <div class="title">ハードキャップ（物理整合）</div>
+        <div class="desc">最高速到達時、加速度をゼロにして噴射エフェクトも弱める。実際の物理挙動に近い演出。</div>
+      </label>
+      <label class="option-card" data-value="soft-glow">
+        <input type="radio" name="speedCapMode" value="soft-glow">
+        <div class="title">ソフトグロー（演出優先）</div>
+        <div class="desc">速度は頭打ちになるが、噴射エフェクトは全開のまま出続ける。「全力加速してるのに伸びない」迫力重視の演出。</div>
+      </label>
+    </div>
+  </section>
+
+  <section>
+    <h2>表示</h2>
+    <div class="toggle-row" id="debugHudToggle">
+      <div>
+        <div class="label">デバッグHUD表示</div>
+        <div class="sub">速度・エンジン出力などの数値を画面左上に表示</div>
+      </div>
+      <switch-fake id="debugHudSwitch"></switch-fake>
+    </div>
+  </section>
+
+  <section>
+    <h2>RCS（逆噴射含む姿勢制御スラスター）出力上限</h2>
+    <div class="toggle-row" style="flex-direction: column; align-items: stretch; gap: 10px;">
+      <div>
+        <div class="label">主機推力に対する最大出力比率</div>
+        <div class="sub">RCS単体の最大出力を「主機の合計最大推力の何%まで」に制限します。100%なら制限なし（艦種プリセット通り）。</div>
+      </div>
+      <div style="display:flex; align-items:center; gap: 12px;">
+        <input type="range" id="rcsCapSlider" min="1" max="100" step="1" style="flex:1;">
+        <div id="rcsCapLabel" style="width: 48px; text-align: right; font-size: 13px; color: #9fd8ff;">100%</div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="footer-bar">
+  <a class="btn btn-secondary" href="index.html">キャンセル</a>
+  <a class="btn btn-primary" id="applyBtn" href="#">この設定でゲームを開始</a>
+</div>
+
+<script src="01-state-and-config.js"></script>
+<script>
+// =============================================================
+// settings.html 用スクリプト
+// localStorage永続化対応。ページを開いた瞬間にloadPersistedSettings()
+// で前回の選択内容を読み込み、それを初期選択状態にする。これにより
+// 「設定画面を開くたびにリセットされる」問題を解消している。
+// index.html側も同じキー(SETTINGS_STORAGE_KEY)を読み書きするため、
+// ゲーム内で設定を変えた場合もここに反映される。
+// =============================================================
+
+const persisted = loadPersistedSettings();
+// 保存値が不正（過去バージョンの艦種キーが残っている等）な場合に
+// 備え、存在確認の上でフォールバックする
+let selectedClass = ShipClassPresets[persisted.shipClass] ? persisted.shipClass : 'rocket';
+// UI上は必ずhard-cap/soft-glowのどちらかを選択させる（「艦のデフォルトに
+// 従う」という第三の状態はUIでは表現しない、v01時点の簡易仕様）。
+// 保存値がnull（未選択）の場合は艦種プリセットのデフォルトを表示する。
+let selectedCapMode = persisted.speedCapMode || ShipClassPresets[selectedClass].speedCapMode;
+let debugHudOn = persisted.showDebugHud;
+let rcsThrustCapRatio = persisted.rcsThrustCapRatio ?? 1.0;
+
+function renderShipClassOptions() {
+  const wrap = document.getElementById('shipClassOptions');
+  wrap.innerHTML = '';
+
+  for (const [key, preset] of Object.entries(ShipClassPresets)) {
+    const card = document.createElement('label');
+    card.className = 'option-card';
+    card.dataset.value = key;
+    const mainThruster = preset.thrusters.find((t) => t.id === 'main');
+    const mainThrustDisplay = mainThruster ? mainThruster.maxThrust.toLocaleString() : '—';
+    card.innerHTML = `
+      <input type="radio" name="shipClass" value="${key}">
+      <div class="title">${preset.label}</div>
+      <div class="desc">
+        質量 ${preset.mass.toLocaleString()} / 主機推力 ${mainThrustDisplay} /
+        最大角速度 ${preset.maxAngularSpeed} rad/s / 最高速 ${preset.maxSpeed}
+      </div>
+    `;
+    card.addEventListener('click', () => selectShipClass(key));
+    wrap.appendChild(card);
+  }
+  selectShipClass(selectedClass);
+}
+
+function selectShipClass(key) {
+  selectedClass = key;
+  document.querySelectorAll('#shipClassOptions .option-card').forEach((el) => {
+    el.classList.toggle('selected', el.dataset.value === key);
+  });
+  updateShipBuilderLink();
+}
+
+// 艦船建造画面は「今設定画面で選んでいる艦種」向けに開きたいので、
+// リンクのクエリパラメータを選択変更のたびに同期する
+function updateShipBuilderLink() {
+  const link = document.getElementById('shipBuilderLink');
+  if (link) link.href = `ship-builder.html?class=${encodeURIComponent(selectedClass)}`;
+}
+
+function initCapModeOptions() {
+  document.querySelectorAll('.option-card[data-value]').forEach((el) => {
+    if (el.closest('#shipClassOptions')) return; // 艦種カードは除外
+    el.addEventListener('click', () => selectCapMode(el.dataset.value));
+  });
+  selectCapMode(selectedCapMode);
+}
+
+function selectCapMode(value) {
+  selectedCapMode = value;
+  document.querySelectorAll('input[name="speedCapMode"]').forEach((input) => {
+    input.checked = (input.value === value);
+    input.closest('.option-card').classList.toggle('selected', input.value === value);
+  });
+}
+
+function initDebugToggle() {
+  const row = document.getElementById('debugHudToggle');
+  const sw = document.getElementById('debugHudSwitch');
+  const paint = () => { sw.style.background = debugHudOn ? '#3a8fd6' : 'rgba(255,255,255,0.15)'; };
+  row.addEventListener('click', () => {
+    debugHudOn = !debugHudOn;
+    paint();
+  });
+  paint();
+}
+
+function initRcsCapSlider() {
+  const slider = document.getElementById('rcsCapSlider');
+  const label = document.getElementById('rcsCapLabel');
+
+  const paint = () => {
+    const percent = Math.round(rcsThrustCapRatio * 100);
+    slider.value = String(percent);
+    label.textContent = `${percent}%`;
+  };
+
+  slider.addEventListener('input', () => {
+    rcsThrustCapRatio = Number(slider.value) / 100;
+    label.textContent = `${slider.value}%`;
+  });
+
+  paint();
+}
+
+function initApplyButton() {
+  const btn = document.getElementById('applyBtn');
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+
+    savePersistedSettings({
+      shipClass: selectedClass,
+      speedCapMode: selectedCapMode,
+      showDebugHud: debugHudOn,
+      rcsThrustCapRatio: rcsThrustCapRatio,
+    });
+
+    const params = new URLSearchParams();
+    params.set('class', selectedClass);
+    params.set('speedCapMode', selectedCapMode);
+    params.set('debugHud', debugHudOn ? '1' : '0');
+    location.href = `index.html?${params.toString()}`;
+  });
+}
+
+renderShipClassOptions();
+updateShipBuilderLink();
+initCapModeOptions();
+initDebugToggle();
+initRcsCapSlider();
+initApplyButton();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>艦船建造 - 宇宙船シミュレーター</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #05070c;
+    color: #dfefff;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    height: 100%;
+    overflow: hidden;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* -----------------------------------------------------------
+     レイアウト: 上部バー / 3Dビューポート(可変) / 下部操作パネル
+     モバイル(縦持ち)を主眼に、パネルは下からスライドする形。
+  ----------------------------------------------------------- */
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+
+  .topbar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-bottom: 1px solid rgba(255,255,255,0.12);
+    background: rgba(8,11,18,0.9);
+    z-index: 5;
+  }
+  .topbar h1 {
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0;
+  }
+  .topbar .classBadge {
+    font-size: 11px;
+    color: #9fd8ff;
+    background: rgba(108,195,255,0.12);
+    border: 1px solid rgba(108,195,255,0.3);
+    padding: 3px 8px;
+    border-radius: 999px;
+  }
+  .link-back {
+    font-size: 12px;
+    color: #9fb3c8;
+    text-decoration: none;
+    padding: 6px 8px;
+  }
+
+  .viewport-wrap {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  #viewportCanvas { display: block; width: 100%; height: 100%; touch-action: none; }
+
+  .viewport-hint {
+    position: absolute;
+    top: 10px;
+    left: 12px;
+    font-size: 11px;
+    color: rgba(223,239,255,0.55);
+    pointer-events: none;
+    line-height: 1.5;
+  }
+
+  .empty-state {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 14px;
+    padding: 24px;
+    text-align: center;
+  }
+  .empty-state.hidden { display: none; }
+  .empty-state .icon {
+    font-size: 40px;
+    opacity: 0.6;
+  }
+  .empty-state p {
+    margin: 0;
+    font-size: 13px;
+    color: #9fb3c8;
+    max-width: 320px;
+    line-height: 1.6;
+  }
+
+  .dropzone {
+    border: 2px dashed rgba(108,195,255,0.4);
+    border-radius: 14px;
+    padding: 22px 26px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    background: rgba(108,195,255,0.05);
+  }
+  .dropzone.dragover {
+    border-color: #6cc3ff;
+    background: rgba(108,195,255,0.14);
+  }
+
+  .format-tabs {
+    display: flex;
+    gap: 8px;
+  }
+  .format-tab {
+    padding: 7px 14px;
+    border-radius: 999px;
+    font-size: 12px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.14);
+    cursor: pointer;
+  }
+  .format-tab.selected {
+    background: rgba(108,195,255,0.16);
+    border-color: #6cc3ff;
+    color: #6cc3ff;
+  }
+
+  .file-slots {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+    max-width: 300px;
+  }
+  .file-slot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.12);
+    font-size: 12px;
+  }
+  .file-slot .slot-label { color: #9fb3c8; flex: 0 0 auto; }
+  .file-slot .slot-value {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+    color: #dfefff;
+  }
+  .file-slot.optional .slot-label::after {
+    content: '（任意）';
+    color: rgba(159,179,200,0.6);
+    font-size: 10px;
+  }
+  .file-slot button {
+    flex: 0 0 auto;
+    font-size: 11px;
+    padding: 5px 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.2);
+    background: rgba(255,255,255,0.06);
+    color: #dfefff;
+  }
+
+  .btn-load {
+    margin-top: 4px;
+    padding: 11px 22px;
+    border-radius: 10px;
+    border: none;
+    font-size: 13px;
+    font-weight: 600;
+    background: #3a8fd6;
+    color: #fff;
+  }
+  .btn-load:disabled {
+    background: rgba(255,255,255,0.1);
+    color: rgba(255,255,255,0.35);
+  }
+
+  .status-line {
+    font-size: 11px;
+    color: #9fd8ff;
+    min-height: 14px;
+  }
+  .status-line.error { color: #ff8a8a; }
+
+  /* -----------------------------------------------------------
+     下部の調整パネル
+  ----------------------------------------------------------- */
+  .adjust-panel {
+    flex: 0 0 auto;
+    max-height: 46vh;
+    overflow-y: auto;
+    background: rgba(8,11,18,0.95);
+    border-top: 1px solid rgba(255,255,255,0.12);
+    padding: 14px 16px calc(14px + env(safe-area-inset-bottom, 0px));
+    display: none;
+  }
+  .adjust-panel.visible { display: block; }
+
+  .adjust-section { margin-bottom: 18px; }
+  .adjust-section:last-child { margin-bottom: 0; }
+  .adjust-section h2 {
+    font-size: 11px;
+    color: #9fd8ff;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: 0 0 10px;
+  }
+
+  .axis-row {
+    display: grid;
+    grid-template-columns: 22px 1fr 56px;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .axis-row .axis-label {
+    font-size: 12px;
+    font-weight: 700;
+    color: #6cc3ff;
+    text-align: center;
+  }
+  .axis-row input[type="range"] { width: 100%; }
+  .axis-row .axis-value {
+    font-size: 12px;
+    text-align: right;
+    color: #9fb3c8;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .quick-rot-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }
+  .quick-rot-row button {
+    flex: 1 1 auto;
+    min-width: 70px;
+    padding: 8px 6px;
+    font-size: 11px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.16);
+    background: rgba(255,255,255,0.05);
+    color: #dfefff;
+  }
+  .quick-rot-row button:active { background: rgba(108,195,255,0.18); }
+
+  .scale-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .scale-row input[type="range"] { flex: 1; }
+  .scale-row .scale-value {
+    width: 56px;
+    text-align: right;
+    font-size: 12px;
+    color: #9fb3c8;
+    font-variant-numeric: tabular-nums;
+  }
+  .scale-presets {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .scale-presets button {
+    flex: 1;
+    padding: 6px;
+    font-size: 11px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.16);
+    background: rgba(255,255,255,0.05);
+    color: #dfefff;
+  }
+
+  .reset-link {
+    font-size: 11px;
+    color: #ff9d9d;
+    background: none;
+    border: none;
+    padding: 0;
+    text-decoration: underline;
+  }
+
+  .footer-bar {
+    flex: 0 0 auto;
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+    background: rgba(5,7,12,0.95);
+    border-top: 1px solid rgba(255,255,255,0.12);
+    display: flex;
+    gap: 12px;
+  }
+  .btn {
+    flex: 1;
+    padding: 13px;
+    border-radius: 10px;
+    border: none;
+    font-size: 13px;
+    font-weight: 600;
+    text-align: center;
+    text-decoration: none;
+    display: block;
+  }
+  .btn-primary { background: #3a8fd6; color: #fff; }
+  .btn-primary:disabled { background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.35); }
+  .btn-secondary {
+    background: rgba(255,255,255,0.08);
+    color: #dfefff;
+    border: 1px solid rgba(255,255,255,0.2);
+  }
+  .btn-danger {
+    background: rgba(255,80,80,0.12);
+    color: #ff9d9d;
+    border: 1px solid rgba(255,80,80,0.3);
+  }
+
+  input[type="file"] { display: none; }
+</style>
+</head>
+<body>
+
+<div id="app">
+
+  <div class="topbar">
+    <a class="link-back" href="settings.html">&lt; 設定へ戻る</a>
+    <h1>艦船建造</h1>
+    <div class="classBadge" id="classBadge">--</div>
+  </div>
+
+  <div style="text-align:right; font-size:10px; color:rgba(159,179,200,0.5); padding:2px 14px 0;" id="buildVersionLine"></div>
+
+  <div class="viewport-wrap">
+    <canvas id="viewportCanvas"></canvas>
+    <div class="viewport-hint" id="viewportHint">ドラッグ: 視点回転 / ピンチ・ホイール: ズーム</div>
+
+    <div class="empty-state" id="emptyState">
+      <div class="icon">🛰️</div>
+      <div class="format-tabs">
+        <div class="format-tab selected" data-format="glb" id="tabGlb">GLB</div>
+        <div class="format-tab" data-format="obj" id="tabObj">OBJ + MTL</div>
+      </div>
+
+      <div id="glbSlots" class="file-slots">
+        <div class="file-slot">
+          <div class="slot-label">GLBファイル</div>
+          <div class="slot-value" id="glbFileName">未選択</div>
+          <button id="pickGlbBtn" type="button">選択</button>
+        </div>
+      </div>
+
+      <div id="objSlots" class="file-slots" style="display:none;">
+        <div class="file-slot">
+          <div class="slot-label">OBJファイル</div>
+          <div class="slot-value" id="objFileName">未選択</div>
+          <button id="pickObjBtn" type="button">選択</button>
+        </div>
+        <div class="file-slot optional">
+          <div class="slot-label">MTLファイル</div>
+          <div class="slot-value" id="mtlFileName">未選択</div>
+          <button id="pickMtlBtn" type="button">選択</button>
+        </div>
+        <div class="file-slot optional">
+          <div class="slot-label">テクスチャ画像</div>
+          <div class="slot-value" id="texFileName">0個選択</div>
+          <button id="pickTexBtn" type="button">選択</button>
+        </div>
+      </div>
+
+      <p>ファイルをドラッグ&ドロップするか、上のボタンで選択してください。<br>MTLがテクスチャ画像を参照している場合は、テクスチャ画像もあわせて選択してください。</p>
+
+      <button class="btn-load" id="loadModelBtn" disabled>モデルを読み込む</button>
+      <div class="status-line" id="statusLine"></div>
+    </div>
+  </div>
+
+  <div class="adjust-panel" id="adjustPanel">
+    <div class="adjust-section">
+      <h2>回転</h2>
+      <div class="axis-row">
+        <div class="axis-label">X</div>
+        <input type="range" id="rotX" min="-180" max="180" step="1" value="0">
+        <div class="axis-value" id="rotXVal">0°</div>
+      </div>
+      <div class="axis-row">
+        <div class="axis-label">Y</div>
+        <input type="range" id="rotY" min="-180" max="180" step="1" value="0">
+        <div class="axis-value" id="rotYVal">0°</div>
+      </div>
+      <div class="axis-row">
+        <div class="axis-label">Z</div>
+        <input type="range" id="rotZ" min="-180" max="180" step="1" value="0">
+        <div class="axis-value" id="rotZVal">0°</div>
+      </div>
+      <div class="quick-rot-row">
+        <button data-quick="yaw180">Y+180°（前後反転）</button>
+        <button data-quick="pitch90">X+90°（縦→横）</button>
+        <button data-quick="pitchm90">X-90°</button>
+        <button data-quick="roll90">Z+90°</button>
+      </div>
+    </div>
+
+    <div class="adjust-section">
+      <h2>スケール（原寸に対する倍率）</h2>
+      <div class="scale-row">
+        <input type="range" id="scaleSlider" min="-3" max="3" step="0.01" value="0">
+        <div class="scale-value" id="scaleVal">×1.00</div>
+      </div>
+      <div class="scale-presets">
+        <button data-preset-scale="autofit">自動フィット</button>
+        <button data-preset-scale="1">×1</button>
+        <button data-preset-scale="0.1">×0.1</button>
+        <button data-preset-scale="10">×10</button>
+      </div>
+    </div>
+
+    <div class="adjust-section">
+      <h2>位置オフセット（艦の重心からのズレ補正）</h2>
+      <div class="axis-row">
+        <div class="axis-label">X</div>
+        <input type="range" id="offX" min="-20" max="20" step="0.1" value="0">
+        <div class="axis-value" id="offXVal">0.0</div>
+      </div>
+      <div class="axis-row">
+        <div class="axis-label">Y</div>
+        <input type="range" id="offY" min="-20" max="20" step="0.1" value="0">
+        <div class="axis-value" id="offYVal">0.0</div>
+      </div>
+      <div class="axis-row">
+        <div class="axis-label">Z</div>
+        <input type="range" id="offZ" min="-20" max="20" step="0.1" value="0">
+        <div class="axis-value" id="offZVal">0.0</div>
+      </div>
+    </div>
+
+    <div class="adjust-section">
+      <button class="reset-link" id="resetAdjustBtn" type="button">回転・スケール・位置をリセット</button>
+    </div>
+
+    <div class="adjust-section">
+      <button class="reset-link" id="replaceModelBtn" type="button">別のモデルに差し替える</button>
+    </div>
+
+    <div class="adjust-section">
+      <button class="reset-link" id="removeModelBtn" type="button" style="color:#ff9d9d;">このモデルを削除して仮メッシュに戻す</button>
+    </div>
+  </div>
+
+  <div class="footer-bar" id="footerBar" style="display:none;">
+    <a class="btn btn-secondary" href="settings.html">キャンセル</a>
+    <button class="btn btn-primary" id="saveBtn">この艦種にモデルを保存</button>
+  </div>
+
+</div>
+
+<input type="file" id="glbFileInput" accept=".glb,.gltf">
+<input type="file" id="objFileInput" accept=".obj">
+<input type="file" id="mtlFileInput" accept=".mtl">
+<input type="file" id="texFileInput" accept="image/*" multiple>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/MTLLoader.js"></script>
+<script src="01-state-and-config.js"></script>
+<script src="09-ship-builder.js"></script>
+</body>
+</html>

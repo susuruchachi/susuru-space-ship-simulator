@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>宇宙船シミュレーター v39</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background: #000;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  canvas { display: block; touch-action: none; }
+
+  #hud-root {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+  }
+  /* #hud-root > * は直下の子要素に一律pointer-events:autoを
+     付ける意図だったが、.hud-touch-controls（全画面inset:0の
+     透明ラッパー）もこの直下の子であるため、CSS詳細度の関係で
+     後述の「.hud-touch-controls { pointer-events: none; }」が
+     このIDセレクタを含むルールに負けて上書きされてしまい、
+     ラッパー自体が画面全体でクリック/タッチを奪っていた
+     （報告のあったBOOST・ドラッグ操作が根本的に効かない原因）。
+     ラッパーだけは対象から明示的に除外する。 */
+  #hud-root > *:not(.hud-touch-controls) { pointer-events: auto; }
+
+  .hud-touch-controls {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+  }
+  .hud-touch-controls > * { pointer-events: auto; }
+
+  /* v27: 画面右下に小さく薄字でバージョン名を表示する。
+     #hud-rootの外に置き、pointer-events:noneでタッチ操作を
+     一切妨げないようにする（BOOST等のタッチ領域と重ならない
+     右下隅だが、念のため）。 */
+  #version-label {
+    position: fixed;
+    right: 8px;
+    bottom: 4px;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.28);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    pointer-events: none;
+    z-index: 9999;
+    user-select: none;
+  }
+
+  .stick-move, .stick-look {
+    position: fixed;
+    bottom: 32px;
+    width: 96px;
+    height: 96px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.25);
+    touch-action: none;
+  }
+  /* v04: stick-moveは左右+上下ストレイフ専用パッド（前後は
+     throttle-leverに分離）。throttle-lever(56px) + roll-buttons(56px)
+     ぶん右へ寄せる。以前はroll系ボタンとthrottle-leverの位置を
+     連動して調整しておらず、throttle-lever追加時にboth共に
+     left:32pxのまま縦方向で重なるバグがあった（報告：「前後レバーと
+     ロールボタンが重なる」）ため、下部操作系を左から
+     throttle-lever → roll-left/right(縦積み) → stick-move の
+     横並びで明示的にレイアウトし直した */
+  .stick-move { left: 220px; }
+  .stick-look { right: 32px; }
+
+  /* v04: スロットルレバー（前進後進）。離しても値を保持する
+     「保持型」レバー。stick-move/stick-lookのようなバネ戻り式
+     ジョイスティックとは挙動が異なるため専用のドラッグ処理を
+     02-input.js側に持つ */
+  .throttle-lever {
+    position: fixed;
+    left: 32px;
+    bottom: 32px;
+    width: 56px;
+    height: 172px;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.25);
+    touch-action: none;
+  }
+  .throttle-lever::before {
+    /* 中央=ゼロ推力の目安線 */
+    content: '';
+    position: absolute;
+    left: 4px;
+    right: 4px;
+    top: 50%;
+    height: 1px;
+    background: rgba(255,255,255,0.3);
+    transform: translateY(-0.5px);
+  }
+  .throttle-lever-handle {
+    position: absolute;
+    left: 4px;
+    right: 4px;
+    height: 28px;
+    border-radius: 6px;
+    background: rgba(109,184,255,0.55);
+    border: 1px solid rgba(159,216,255,0.8);
+    top: 50%;
+    transform: translateY(-50%);
+  }
+  .throttle-lever-label {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -20px;
+    text-align: center;
+    font-size: 11px;
+    color: #9fd8ff;
+  }
+
+  /* v04: throttle-leverの右隣（left:100px〜156px）に縦積み配置。
+     以前はbottom:148pxの横並び前提の位置（left:32px/96px）のままで、
+     throttle-lever(bottom:32px〜204px)と丸ごと重なっていた */
+  .btn-roll-left, .btn-roll-right {
+    position: fixed;
+    left: 100px;
+    width: 56px;
+    height: 40px;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.1);
+    border: 1px solid rgba(255,255,255,0.25);
+    color: #cfe8ff;
+    font-size: 11px;
+    touch-action: none;
+  }
+  .btn-roll-left { bottom: 122px; }
+  .btn-roll-right { bottom: 76px; }
+
+  .btn-boost {
+    position: fixed;
+    right: 32px;
+    bottom: 148px;
+    width: 96px;
+    height: 40px;
+    border-radius: 8px;
+    background: rgba(255,140,0,0.18);
+    border: 1px solid rgba(255,160,60,0.45);
+    color: #ffd9a0;
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    touch-action: none;
+  }
+
+  .hud-debug-panel {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    padding: 8px 12px;
+    background: rgba(0,0,0,0.4);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 6px;
+    color: #9fd8ff;
+    font-size: 12px;
+    line-height: 1.6;
+    pointer-events: none;
+  }
+
+  .hud-settings-link {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    padding: 8px 14px;
+    background: rgba(0,0,0,0.4);
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 6px;
+    color: #dfefff;
+    font-size: 13px;
+    text-decoration: none;
+  }
+
+  .hud-camera-controls {
+    position: fixed;
+    top: 56px;
+    right: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+  }
+  .btn-camera-mode {
+    padding: 8px 14px;
+    background: rgba(0,0,0,0.4);
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 6px;
+    color: #dfefff;
+    font-size: 13px;
+  }
+  .camera-preset-panel {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+    width: 132px;
+  }
+  .camera-preset-panel button {
+    width: 40px;
+    height: 32px;
+    border-radius: 6px;
+    background: rgba(0,0,0,0.4);
+    border: 1px solid rgba(255,255,255,0.2);
+    color: #cfe8ff;
+    font-size: 12px;
+  }
+
+  .hud-damping-toggle,
+  .hud-retro-damping-toggle {
+    padding: 8px 14px;
+    background: rgba(0,0,0,0.4);
+    border: 1px solid rgba(108,195,255,0.4);
+    border-radius: 6px;
+    color: #9fd8ff;
+    font-size: 12px;
+    text-align: left;
+  }
+  .hud-damping-toggle.is-off,
+  .hud-retro-damping-toggle.is-off {
+    border-color: rgba(255,255,255,0.2);
+    color: rgba(255,255,255,0.5);
+  }
+
+  /* -----------------------------------------------------------
+     v09: サイドメニュー（横スライドパネル）
+     スマホの狭い横幅でも常設ボタンが並びきらないため、自動制動/
+     自動操船/目的地座標入力をここにまとめて収納する。
+     タブは画面左端中央に常時表示。パネルはタブの右に隠れており、
+     is-openクラスが付くとtransformでスライドインする。
+  ----------------------------------------------------------- */
+  .hud-side-menu {
+    position: fixed;
+    top: 168px;
+    left: 0;
+    display: flex;
+    align-items: flex-start;
+    z-index: 20;
+  }
+  .side-menu-tab {
+    width: 36px;
+    height: 56px;
+    border-radius: 0 8px 8px 0;
+    background: rgba(0,0,0,0.55);
+    border: 1px solid rgba(108,195,255,0.4);
+    border-left: none;
+    color: #9fd8ff;
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+  .side-menu-panel {
+    width: 220px;
+    max-height: min(50vh, 300px);
+    overflow-y: auto;
+    padding: 14px;
+    margin-left: -1px;
+    background: rgba(0,0,0,0.55);
+    border: 1px solid rgba(108,195,255,0.4);
+    border-radius: 0 10px 10px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    pointer-events: none;
+  }
+  .hud-side-menu.is-open .side-menu-panel {
+    transform: translateX(0);
+    pointer-events: auto;
+  }
+  .side-menu-section-title {
+    color: rgba(159,216,255,0.6);
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    margin-top: 6px;
+  }
+  .side-menu-section-title:first-child {
+    margin-top: 0;
+  }
+  .side-menu-panel button {
+    padding: 8px 12px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(108,195,255,0.4);
+    border-radius: 6px;
+    color: #9fd8ff;
+    font-size: 12px;
+    text-align: left;
+  }
+  .side-menu-panel .btn-docking-toggle.is-on {
+    border-color: #6cc3ff;
+    background: rgba(108,195,255,0.18);
+    color: #dfefff;
+  }
+  .side-menu-panel .btn-docking-toggle.is-disabled {
+    border-color: rgba(255,255,255,0.15);
+    color: rgba(255,255,255,0.35);
+  }
+  .docking-coord-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .docking-coord-row label {
+    width: 14px;
+    color: #9fd8ff;
+    font-size: 12px;
+  }
+  .docking-coord-row input {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 8px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(108,195,255,0.4);
+    border-radius: 6px;
+    color: #dfefff;
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+
+<div id="hud-root"></div>
+<div id="version-label"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/MTLLoader.js"></script>
+
+<script src="01-state-and-config.js"></script>
+<script src="02-input.js"></script>
+<script src="03-thruster-solver.js"></script>
+<script src="04-flight-physics.js"></script>
+<script src="05-ship-controller.js"></script>
+<script src="06-hud.js"></script>
+<script src="07-engine-fx.js"></script>
+<script src="08-camera.js"></script>
+<script src="10-docking-platform.js"></script>
+
+<script>
+// =============================================================
+// メインエントリポイント
+// =============================================================
+
+let renderer, scene, camera;
+let clock;
+
+function initScene() {
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x000005);
+
+  camera = new THREE.PerspectiveCamera(
+    60, window.innerWidth / window.innerHeight, 0.1, 100000
+  );
+
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  document.body.appendChild(renderer.domElement);
+
+  // 簡易的な星空（背景の目印。本格的なワープ演出は後続バージョンで拡張）
+  const starGeo = new THREE.BufferGeometry();
+  const starCount = 4000;
+  const positions = new Float32Array(starCount * 3);
+  for (let i = 0; i < starCount; i++) {
+    positions[i * 3 + 0] = (Math.random() - 0.5) * 20000;
+    positions[i * 3 + 1] = (Math.random() - 0.5) * 20000;
+    positions[i * 3 + 2] = (Math.random() - 0.5) * 20000;
+  }
+  starGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const starMat = new THREE.PointsMaterial({ color: 0xffffff, size: 1.2 });
+  scene.add(new THREE.Points(starGeo, starMat));
+
+  const ambient = new THREE.AmbientLight(0x334455, 0.6);
+  scene.add(ambient);
+  const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+  sun.position.set(500, 300, 200);
+  scene.add(sun);
+
+  window.addEventListener('resize', onResize);
+}
+
+function onResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+// v01時点では仮の箱メッシュ。実艦モデル(GLB/OBJ)は艦船建造画面
+// (ship-builder.html)で保存されていればそちらに差し替える
+function createPlaceholderShipMesh(classKey) {
+  const sizeByClass = {
+    rocket: { x: 2, y: 2, z: 8 },
+    cruiser: { x: 12, y: 8, z: 60 },
+    battleship: { x: 24, y: 18, z: 140 },
+  };
+  const s = sizeByClass[classKey] ?? sizeByClass.rocket;
+  const geo = new THREE.BoxGeometry(s.x, s.y, s.z);
+  const mat = new THREE.MeshStandardMaterial({ color: 0x6688aa, metalness: 0.4, roughness: 0.5 });
+  return new THREE.Mesh(geo, mat);
+}
+
+// -------------------------------------------------------------
+// 保存済みモデル(spaceSimShipModel:<classKey>)の読み込みと差し替え
+//
+// spawnPlayerShip()はThree.jsオブジェクトを同期的に要求する一方、
+// GLB/OBJの読み込みは非同期になるため、艦の「見た目のルート」は
+// 常にTHREE.Group（shipVisualRoot）とし、
+//   shipVisualRoot
+//     └ placeholderMesh（起動直後は表示、モデル読み込み完了で除去）
+//     └ modelCorrectionGroup（ship-builder.htmlと同じ役割。
+//         保存された回転/スケール/位置オフセットをここに適用し、
+//         その子として実際に読み込んだモデルを追加する）
+// という2段構成にする。ShipController._syncMesh()はshipVisualRoot
+// のquaternion/positionを毎フレーム直接上書きするだけなので、
+// 内部構造をこの後から差し替えても物理・操作系には影響しない。
+// -------------------------------------------------------------
+function createShipVisualRoot(classKey) {
+  const root = new THREE.Group();
+  const placeholder = createPlaceholderShipMesh(classKey);
+  root.add(placeholder);
+
+  const correction = new THREE.Group();
+  root.add(correction);
+
+  root.userData.placeholderMesh = placeholder;
+  root.userData.correctionGroup = correction;
+  return root;
+}
+
+async function loadSavedShipModelInto(root, classKey) {
+  const saved = await loadShipModelData(classKey);
+  if (!saved) return; // 保存が無ければ箱のまま
+
+  const toRad = (d) => (d * Math.PI) / 180;
+  const applyAdjust = (obj) => {
+    obj.rotation.set(
+      toRad(saved.adjust.rotationDeg.x),
+      toRad(saved.adjust.rotationDeg.y),
+      toRad(saved.adjust.rotationDeg.z)
+    );
+    obj.scale.setScalar(saved.adjust.scale);
+    obj.position.set(saved.adjust.offset.x, saved.adjust.offset.y, saved.adjust.offset.z);
+  };
+
+  const onLoaded = (loadedObject) => {
+    // 読み込みが成功した時点で初めて箱を消す。読み込み失敗時は
+    // 箱のまま操縦できる状態を維持し、無操作の艦にならないようにする
+    const placeholder = root.userData.placeholderMesh;
+    if (placeholder) {
+      root.remove(placeholder);
+    }
+    root.userData.correctionGroup.add(loadedObject);
+    applyAdjust(root.userData.correctionGroup);
+  };
+
+  try {
+    if (saved.format === 'glb') {
+      fetch(saved.glbDataUrl)
+        .then((r) => r.arrayBuffer())
+        .then((buf) => {
+          const manager = new THREE.LoadingManager();
+          const loader = new THREE.GLTFLoader(manager);
+          loader.textureLoader = new THREE.TextureLoader(manager);
+          loader.parse(buf, '', (gltf) => onLoaded(gltf.scene), (err) => {
+            console.warn(`艦モデル(${classKey})のGLB読み込みに失敗しました。仮メッシュのままにします。`, err);
+          });
+        })
+        .catch((err) => console.warn(`艦モデル(${classKey})のGLB読み込みに失敗しました。仮メッシュのままにします。`, err));
+    } else if (saved.format === 'obj') {
+      const finish = (materials) => {
+        const objLoader = new THREE.OBJLoader();
+        if (materials) {
+          materials.preload();
+          objLoader.setMaterials(materials);
+        }
+        const objGroup = objLoader.parse(saved.objText);
+        onLoaded(objGroup);
+      };
+
+      if (!saved.mtlText) {
+        finish(null);
+      } else {
+        const texMap = saved.textures || {};
+        const manager = new THREE.LoadingManager();
+        manager.setURLModifier((url) => {
+          const baseName = url.split('/').pop().split('\\').pop();
+          return texMap[baseName] || url;
+        });
+        const mtlLoader = new THREE.MTLLoader(manager);
+        const materials = mtlLoader.parse(saved.mtlText, '');
+        finish(materials);
+      }
+    }
+  } catch (err) {
+    console.warn(`艦モデル(${classKey})の読み込みに失敗しました。仮メッシュのままにします。`, err);
+  }
+}
+
+function initGame() {
+  const params = new URLSearchParams(location.search);
+  const persisted = loadPersistedSettings();
+
+  // 優先順位: URLパラメータ（settings.htmlの「開始」ボタンから明示指定）
+  // → localStorage（前回の設定）→ コード内デフォルト
+  const requestedClass = params.get('class') || persisted.shipClass || 'rocket';
+  // 保存値・URLパラメータどちらも不正な艦種キーの可能性があるため、
+  // 存在確認の上でフォールバックする（createShipState()の例外を防ぐ）
+  const shipClass = ShipClassPresets[requestedClass] ? requestedClass : 'rocket';
+
+  const mesh = createShipVisualRoot(shipClass);
+  scene.add(mesh);
+  loadSavedShipModelInto(mesh, shipClass);
+
+  const ship = ShipController.spawnPlayerShip(shipClass, mesh, { x: 0, y: 0, z: 0 });
+
+  const capParam = params.get('speedCapMode');
+  const effectiveCapMode =
+    (capParam === SpeedCapMode.HARD_CAP || capParam === SpeedCapMode.SOFT_GLOW)
+      ? capParam
+      : persisted.speedCapMode; // null であればship側デフォルトに従う（getEffectiveSpeedCapMode参照）
+  if (effectiveCapMode) {
+    State.settings.speedCapModeOverride = effectiveCapMode;
+  }
+
+  const debugHudParam = params.get('debugHud');
+  State.settings.showDebugHud =
+    debugHudParam !== null ? debugHudParam === '1' : persisted.showDebugHud;
+
+  // cameraMode / autoDampingEnabled / retroDampingEnabled は
+  // settings.htmlを経由せず、ゲーム内のHUDボタンで直接切り替える運用
+  // （切り替えた瞬間にsavePersistedSettings()で保存され、次回起動時に
+  // ここで復元される）
+  State.settings.cameraMode = persisted.cameraMode ?? 'chase';
+  State.settings.autoDampingEnabled = persisted.autoDampingEnabled ?? true;
+  // v10: 並進制動（逆噴射用SRC）専用トグル。自動姿勢制動とは独立に
+  // 永続化・復元する。
+  State.settings.retroDampingEnabled = persisted.retroDampingEnabled ?? true;
+  // v08: RCS最大出力の主機推力に対する上限比率。settings.htmlのみで
+  // 変更する運用（ゲーム内HUDには専用UIを設けない）。
+  State.settings.rcsThrustCapRatio = persisted.rcsThrustCapRatio ?? 1.0;
+
+  // v08: 入港（オートドッキング）目的地の復元。settings.htmlを
+  // 経由せず、HUDの「ここを目的地として保存」ボタンで設定・
+  // localStorageへ永続化される（cameraMode等と同じ運用）。
+  State.dockingTarget = loadDockingTarget();
+
+  // このセッションで確定した設定をlocalStorageへ書き戻す。
+  // これにより、settings.htmlを次に開いたときも「前回選んだ内容」が
+  // 初期選択状態として反映される（以前は毎回コード内デフォルトに
+  // リセットされていた）。
+  savePersistedSettings({
+    shipClass,
+    speedCapMode: effectiveCapMode ?? null,
+    showDebugHud: State.settings.showDebugHud,
+    cameraMode: State.settings.cameraMode,
+    autoDampingEnabled: State.settings.autoDampingEnabled,
+    retroDampingEnabled: State.settings.retroDampingEnabled,
+    rcsThrustCapRatio: State.settings.rcsThrustCapRatio,
+  });
+
+  const hudRoot = document.getElementById('hud-root');
+  // 呼び出し順が重要: HUD.init()が先にタッチスティック用のDOM要素
+  // （.stick-move / .stick-look等）を生成しないと、InputSystem.init()の
+  // querySelectorが要素を見つけられずタッチ入力が一切バインドされない
+  // （バグとして報告：「タッチ操作が効かない」）
+  HUD.init(hudRoot);
+  InputSystem.init(hudRoot);
+  EngineFx.init(scene);
+  CameraSystem.init(renderer.domElement);
+  DockingPlatform.init(scene);
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05); // タブ切り替え等の大ジャンプ対策
+
+  ShipController.update(dt);
+  EngineFx.update(dt);
+  CameraSystem.update(camera);
+  DockingPlatform.update();
+
+  HUD.update();
+  renderer.render(scene, camera);
+}
+
+initScene();
+initGame();
+clock = new THREE.Clock();
+
+// v27: 右下バージョン表示。GAME_VERSION定数（01-state-and-config.js）を
+// そのままテキストに反映するだけなので、他の画面（settings.html等）
+// でも同じ要素id・定数を使えば流用できる。
+const versionLabelEl = document.getElementById('version-label');
+if (versionLabelEl) versionLabelEl.textContent = GAME_VERSION;
+
+animate();
+</script>
+
+</body>
+</html>
