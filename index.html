@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>宇宙船シミュレーター v41</title>
+<title>宇宙船シミュレーター v42</title>
 <style>
   html, body {
     margin: 0;
@@ -169,17 +169,28 @@
     pointer-events: none;
   }
 
-  .hud-top-right-row {
+  /* v42: 設定リンク・進入軸トグル（上段）と航路/航跡トグル（下段）を
+     縦に積むための外側コンテナ。右端揃え（設定・進入軸ボタンの
+     右端と、その下の航路/航跡ボタンの右端を揃える）にすることで
+     「進入軸ボタンの下」という位置関係を作る。 */
+  .hud-top-right-col {
     position: fixed;
     top: 12px;
     right: 12px;
-    left: 12px; /* v41: ボタンが3つに増えたため、折り返し時に右端で
-                   詰まらないよう左端まで確保する */
+    left: 12px; /* 折り返し時に右端で詰まらないよう左端まで確保する */
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end; /* 各行を右端に揃える */
+    gap: 8px;
+  }
+
+  .hud-top-right-row {
     display: flex;
     flex-direction: row-reverse; /* 設定ボタンを右端(従来位置)に保つ */
     flex-wrap: wrap;
     justify-content: flex-start; /* row-reverse下でのflex-start=右詰め */
     gap: 8px;
+    width: 100%;
   }
 
   .hud-settings-link {
@@ -194,8 +205,10 @@
   }
 
   /* v40: 進入軸・目的地ゲートの表示/非表示トグル。
-     v41: 予定航路トグルも同じクラスで並べる（.hud-top-right-rowで
-     row-reverse配置、狭い画面ではflex-wrapで折り返す）。 */
+     v41: 予定航路トグルも同じクラスを使う。
+     v42: 上段（進入軸）・下段（航路/航跡）の2行構成になった
+     （.hud-top-right-col参照、各行はrow-reverse配置で右詰め、
+     狭い画面ではflex-wrapで折り返す）。 */
   .btn-approach-guides-toggle {
     padding: 8px 14px;
     background: rgba(0,0,0,0.4);

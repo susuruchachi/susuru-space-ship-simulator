@@ -56,19 +56,34 @@ const HUD = {
     this._debugEl = el;
   },
 
+  // v42: 「航路トグル（航跡もまとめて対象になった）を、進入軸トグルの
+  // 真下に置きたい」という要望への対応。従来は設定リンク・進入軸・
+  // 航路の3つを1本のrow-reverse行に横並びさせていたが、それだと
+  // 「進入軸の下」という位置関係を作れないため、上段（設定＋進入軸の
+  // 横並び）と下段（航路/航跡トグル、進入軸ボタンの真下に配置）の
+  // 2段構成に変更する。
   _buildSettingsLink(domRoot) {
-    const row = document.createElement('div');
-    row.className = 'hud-top-right-row';
-    domRoot.appendChild(row);
+    const col = document.createElement('div');
+    col.className = 'hud-top-right-col';
+    domRoot.appendChild(col);
+
+    const topRow = document.createElement('div');
+    topRow.className = 'hud-top-right-row';
+    col.appendChild(topRow);
 
     const link = document.createElement('a');
     link.className = 'hud-settings-link';
     link.href = 'settings.html';
     link.textContent = '⚙ 設定';
-    row.appendChild(link);
+    topRow.appendChild(link);
 
-    this._buildApproachGuidesToggle(row);
-    this._buildRouteLineToggle(row);
+    this._buildApproachGuidesToggle(topRow);
+
+    const bottomRow = document.createElement('div');
+    bottomRow.className = 'hud-top-right-row hud-top-right-row-secondary';
+    col.appendChild(bottomRow);
+
+    this._buildRouteLineToggle(bottomRow);
   },
 
   // -----------------------------------------------------------
@@ -106,6 +121,9 @@ const HUD = {
   // v41: 予定航路（艦がこれから辿る経路の線、ApproachVisualizer.
   // _updateRoute参照）専用の表示/非表示トグル。進入軸・目的地ゲート
   // （showApproachGuides）とは独立に切り替えられるよう別ボタンにする。
+  // v42: 自動航行の実際の航跡線（暗いオレンジ、ApproachVisualizer.
+  // _updateTrailLine参照）も同じフラグ・同じボタンで一括切り替えの
+  // 対象にした（予定航路とセットで表示/非表示したいという要望）。
   // -----------------------------------------------------------
   _buildRouteLineToggle(domRoot) {
     const btn = document.createElement('button');
@@ -114,7 +132,7 @@ const HUD = {
 
     const refresh = () => {
       const on = State.settings.showRouteLine !== false;
-      btn.textContent = on ? '〰 航路: ON' : '〰 航路: OFF';
+      btn.textContent = on ? '〰 航路/航跡: ON' : '〰 航路/航跡: OFF';
       btn.classList.toggle('is-off', !on);
     };
 

@@ -5,7 +5,7 @@
 
 // v27: 画面右下のバージョン表示・<title>で共通して使うバージョン名。
 // リリースのたびにここだけ書き換えれば全画面に反映される。
-const GAME_VERSION = 'v41';
+const GAME_VERSION = 'v42';
 
 // -------------------------------------------------------------
 // 速度制限モード
@@ -233,6 +233,8 @@ const State = {
     showApproachGuides: true,
     // v41: 予定航路（艦がこれから辿る経路の線）専用の表示/非表示。
     // showApproachGuidesとは独立にON/OFFできる。
+    // v42: 自動航行の実際の航跡線（オレンジより暗い色）も同じフラグで
+    // 一括表示/非表示にする（予定航路とセットで切り替えたいという要望）。
     showRouteLine: true,
     rcsThrustCapRatio: 1.0,
   },
@@ -355,7 +357,7 @@ const DEFAULT_PERSISTED_SETTINGS = {
   cameraMode: 'chase', // 'chase'（追従）| 'orbit'（自由視点）
   rcsThrustCapRatio: 1.0, // v08: RCS最大出力の主機推力に対する上限比率（1.0=無制限）
   showApproachGuides: true, // v40: 進入軸・目的地ゲートの可視化表示/非表示
-  showRouteLine: true, // v41: 予定航路の線の表示/非表示（showApproachGuidesとは独立）
+  showRouteLine: true, // v41: 予定航路の線の表示/非表示（showApproachGuidesとは独立）。v42: 自動航行の航跡線もこのフラグで一括表示/非表示
 };
 
 // 保存されている設定を読み込む。localStorageが使えない環境

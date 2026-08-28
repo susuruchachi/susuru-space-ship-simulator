@@ -1,6 +1,6 @@
 // =============================================================
 // 11-approach-visualizer.js
-// 進入軸・予定航路の可視化（距離2000まで50間隔）
+// 進入軸・予定航路・自動航行の航跡の可視化（距離2000まで50間隔）
 //
 // 表示するもの:
 //   1) 進入軸: 目的地(target.position)から進入方向
@@ -15,10 +15,18 @@
 //      から2000先まで1本の線として描画する（点は打たない）。
 //      艦が動くたびに毎フレーム再構築する（ベジエは艦の現在位置・
 //      向きに依存するため、静的にキャッシュできない）。
-//      表示/非表示は進入軸・ターミナルとは独立の
-//      State.settings.showRouteLine。
+//   3) v42: 自動航行の航跡: ship.autoDockingEnabledがtrueの間、
+//      実際に艦が通った位置を一定間隔で記録し、暗いオレンジの線
+//      として描画する（予定航路の明るいオレンジと見分けやすい
+//      よう暗めの色にする）。自動航行がOFFになっても記録済みの
+//      航跡はそのまま残し、目的地が変わった（新しい目的地を保存
+//      した）時点でクリアする。
+//   予定航路と航跡はセットで扱いたいという要望のため、2)と3)は
+//   両方とも State.settings.showRouteLine で一括に表示/非表示する
+//   （進入軸・目的地ゲートとは独立）。
 //
-// State.dockingTarget が無い間はどちらも描画しない。
+// State.dockingTarget が無い間は3種とも描画しない（航跡のみ、
+// 記録済みの点列は目的地が消えても保持し、再設定時に備える）。
 // =============================================================
 
 const ApproachVisualizer = {
@@ -29,9 +37,20 @@ const ApproachVisualizer = {
   // ここで一括して1/4に縮小する。
   POINT_SCALE: 0.25,
 
+  // v42: 自動航行の航跡を記録する間隔（ワールド距離）。予定航路の
+  // MARKER_INTERVALと揃える必要はないが、細かすぎると点数が
+  // 増えすぎるため50に合わせる。
+  TRAIL_MIN_SPACING: 50,
+  // 航跡点の保持上限（メモリ・描画コスト対策。長時間の自動航行でも
+  // 無制限に増え続けないようにする）。
+  TRAIL_MAX_POINTS: 4000,
+
   _axisGroup: null,   // 進入軸: 点+線をまとめたグループ（静的）
   _routeGroup: null,  // 予定航路: 線のみ（動的、毎フレーム再構築）
+  _trailLine: null,   // 自動航行の航跡: 線のみ（動的、点が増えるたび再構築）
+  _trailPoints: [],   // 記録済みの航跡の頂点列（ワールド座標）
   _axisKey: null, // 進入軸を再構築すべきか判定するための目的地シグネチャ
+  _trailTargetKey: null, // 航跡をクリアすべきか判定するための目的地シグネチャ
 
   init(scene) {
     this._scene = scene;
@@ -47,11 +66,15 @@ const ApproachVisualizer = {
       this._updateAxis(target);
     }
 
+    this._recordTrail(target);
+
     const routeVisible = !!target && State.settings.showRouteLine !== false;
     if (!routeVisible) {
       this._clearRoute();
+      this._clearTrailLine();
     } else {
       this._updateRoute(target);
+      this._updateTrailLine();
     }
   },
 
@@ -68,6 +91,13 @@ const ApproachVisualizer = {
     this._scene.remove(this._routeGroup);
     this._disposeGroup(this._routeGroup);
     this._routeGroup = null;
+  },
+
+  _clearTrailLine() {
+    if (!this._trailLine) return;
+    this._scene.remove(this._trailLine);
+    this._disposeGroup(this._trailLine);
+    this._trailLine = null;
   },
 
   // -----------------------------------------------------------
@@ -137,6 +167,59 @@ const ApproachVisualizer = {
     const marker = new THREE.Mesh(new THREE.SphereGeometry(baseSize * this.POINT_SCALE, 6, 6), mat);
     marker.position.set(pos.x, pos.y, pos.z);
     return marker;
+  },
+
+  // -----------------------------------------------------------
+  // v42: 自動航行の航跡を記録する。
+  //   - 目的地が変わった（新しく保存し直した）ら過去の航跡は
+  //     意味を失うのでクリアする。
+  //   - 目的地が無くなった（未設定に戻った）場合も同様にクリアする。
+  //   - ship.autoDockingEnabledがtrueの間だけ、直近記録点から
+  //     TRAIL_MIN_SPACING以上離れたタイミングで点を追加する
+  //     （毎フレーム記録すると点が密集しすぎるため）。
+  // -----------------------------------------------------------
+  _recordTrail(target) {
+    const key = target
+      ? `${target.position.x},${target.position.y},${target.position.z},`
+        + `${target.quaternion.x},${target.quaternion.y},${target.quaternion.z},${target.quaternion.w}`
+      : null;
+    if (key !== this._trailTargetKey) {
+      this._trailPoints = [];
+      this._trailTargetKey = key;
+    }
+
+    const ship = State.ship;
+    const autoOn = !!(ship && ship.autoDockingEnabled && target);
+    if (!autoOn) return;
+
+    const pos = { x: ship.position.x, y: ship.position.y, z: ship.position.z };
+    const last = this._trailPoints[this._trailPoints.length - 1];
+    if (last) {
+      const d = vecLength({ x: pos.x - last.x, y: pos.y - last.y, z: pos.z - last.z });
+      if (d < this.TRAIL_MIN_SPACING) return;
+    }
+
+    this._trailPoints.push(pos);
+    if (this._trailPoints.length > this.TRAIL_MAX_POINTS) {
+      this._trailPoints.shift();
+    }
+  },
+
+  // 記録済みの航跡点列から線を再構築する。予定航路（明るいオレンジ
+  // 0xffaa33）より暗いオレンジにして見分けやすくする。
+  _updateTrailLine() {
+    this._clearTrailLine();
+    if (this._trailPoints.length < 2) return;
+
+    const geo = new THREE.BufferGeometry().setFromPoints(
+      this._trailPoints.map((p) => new THREE.Vector3(p.x, p.y, p.z))
+    );
+    const mat = new THREE.LineBasicMaterial({ color: 0xaa6600, transparent: true, opacity: 0.75 });
+    const line = new THREE.Line(geo, mat);
+    line.userData.isTrailLine = true;
+
+    this._scene.add(line);
+    this._trailLine = line;
   },
 
   // -----------------------------------------------------------
