@@ -786,7 +786,9 @@ const ThrusterSolver = {
   // あることもinFinalApproachの条件に追加する（onAxisForFinalApproach、
   // _buildDesiredForAutoDocking参照）。満たさない間はheadingHold
   // （その場で速度を殺しつつ姿勢/位置を合わせる）のまま留まる。
-  DOCKING_FINAL_APPROACH_LATERAL_READY_OFFSET: 8.0, // この横ズレ(進入軸に垂直な距離)以内でないと最終進入へ入れない
+  //
+  // v45: 許容値を指定値(√3/2)へ変更。
+  DOCKING_FINAL_APPROACH_LATERAL_READY_OFFSET: Math.sqrt(3) / 2, // この横ズレ(進入軸に垂直な距離)以内でないと最終進入へ入れない（≈0.866）
 
   // v20: 「距離200に入った瞬間に姿勢が目的地方向→進入軸方向へ
   // 一気に切り替わり、大きく旋回してしまう」という報告への対応。
@@ -1388,15 +1390,53 @@ const ThrusterSolver = {
   // その固定点を一度通り過ぎると、点は艦から見て後方に来てしまい、
   // 並進側の接近方向(approachDirLocal)が後ろ向きに反転、艦を
   // その固定点（＝実距離500の場所）へ押し戻し続けていた。
-  // 対策: オフセットの上限をalongDistWorld（艦から見た、進入軸に
-  // 沿った目的地までの残り距離）でクランプする。艦が近づいて
-  // alongDistWorldがDOCKING_VIRTUAL_TARGET_OFFSETを下回ったら、
-  // 仮想ウェイポイントのオフセットもそれに合わせて縮め、常に
-  // 「艦の現在位置とtarget.positionの間」に留める。これにより
-  // 仮想ウェイポイントが艦の後方へ回り込むことがなくなり、
-  // 距離が縮むにつれて滑らかに本物のtarget.positionへ収束する。
-  _computeVirtualApproachTarget(target, approachAxisWorld, alongDistWorld) {
-    const offset = clamp(alongDistWorld, 0, this.DOCKING_VIRTUAL_TARGET_OFFSET);
+  // 対策(v39時点): オフセットの上限をalongDistWorld（艦から見た、
+  // 進入軸に沿った目的地までの残り距離）でクランプする。
+  //
+  // v45: 「距離500を切ろうというあたり(560等)から、船があらぬ方向を
+  // 向こうとして制御を失ったようになる」という報告への対応。
+  //
+  // 原因: v39の対策は「艦の位置を進入軸へ投影した点」と実質的に
+  // 同じ計算になっていた（offset=alongDistWorldとすると、
+  // target.position - axis*alongDistWorldは艦位置の軸投影点に
+  // 一致する）。艦が進入軸から大きく横にズレている状態でこれが
+  // 起こると、仮想ウェイポイントが常に「艦のちょうど真横」に
+  // 来続けてしまい、艦がどれだけ前進してもウェイポイントが
+  // 追いかけてくる形になる。真横の目標を追いかけようとする艦は
+  // 目標方向がほぼ90°で頭打ちになり、旋回してもなお真横を
+  // 向き続けよう（あるいは真横を追い越すと今度は後方の同じ点へ
+  // 引き戻されよう）とするため、いつまでも姿勢が収束しない
+  // （「あらぬ方向を向いて制御を失ったよう」に見える不具合の
+  // 原因）。合成データでの検証で、横ズレが大きいほどこの現象が
+  // 顕著になり、軸上（横ズレ0）では発生しないことを確認済み
+  // （＝v39が想定していた「軸上を直進中に固定点を追い越す」
+  // ケースだけをたまたま正しく解決し、横ズレがあるケースを
+  // 壊していた）。
+  //
+  // 対策: クランプの基準を、艦位置の軸投影(alongDistWorld)ではなく
+  // 艦から目的地までの直線距離(distance)に変更する。これにより
+  // 「艦位置をそのまま投影した点」には決してならず、横ズレが
+  // あっても仮想ウェイポイントが真横に張り付くことはない。
+  // また下限を0ではなくDOCKING_FINAL_APPROACH_DISTANCE（距離200）に
+  // 変更した。理由は、distanceがこの値を下回った時点で艦は既に
+  // inFinalApproachZone（v44）に入っており、以降は
+  // _buildDesiredForAutoDocking側でheadingHold/inFinalApproachの
+  // どちらかが必ず成立してこの仮想ウェイポイント（およびそれを
+  // 使うベジエ追従）自体が使われなくなるため、下限をtarget.position
+  // そのもの（0）まで縮める意味がなく、縮め続けるとtarget.positionを
+  // 追い越して艦の真後ろに回り込む区間が生じてしまうため。
+  _computeVirtualApproachTarget(target, approachAxisWorld, shipPosition) {
+    const toTargetWorld = {
+      x: target.position.x - shipPosition.x,
+      y: target.position.y - shipPosition.y,
+      z: target.position.z - shipPosition.z,
+    };
+    const distance = vecLength(toTargetWorld);
+    const offset = clamp(
+      distance,
+      this.DOCKING_FINAL_APPROACH_DISTANCE,
+      this.DOCKING_VIRTUAL_TARGET_OFFSET
+    );
     return this._computeAxisOffsetPoint(target, approachAxisWorld, offset);
   },
 
@@ -1971,7 +2011,7 @@ const ThrusterSolver = {
     const virtualApproachTargetPos = this._computeVirtualApproachTarget(
       target,
       approachAxisWorld,
-      alongDistWorld
+      ship.position
     );
 
     // v43: 「艦の現在位置→仮想ウェイポイント」の直線が距離200
