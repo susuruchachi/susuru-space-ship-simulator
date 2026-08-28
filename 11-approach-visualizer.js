@@ -1,30 +1,37 @@
 // =============================================================
 // 11-approach-visualizer.js
-// 進入軸・予定航路の可視化（距離2000まで50間隔でマーカー表示）
+// 進入軸・予定航路の可視化（距離2000まで50間隔）
 //
 // 表示するもの:
-//   1) 進入軸マーカー: 目的地(target.position)から進入方向
-//      (approachAxisWorld、艦が来る側)へ50間隔で2000まで並べた点。
-//      目的地の位置・姿勢が変わらない限り再構築不要な静的な列。
-//   2) 予定航路マーカー: 艦が実際にこれから辿ろうとしている経路
+//   1) 進入軸: 目的地(target.position)から進入方向
+//      (approachAxisWorld、艦が来る側)へ2000まで伸びる線と、
+//      50間隔で並べた点の両方。目的地の位置・姿勢が変わらない
+//      限り再構築不要な静的な表示。
+//      表示/非表示は State.settings.showApproachGuides
+//      （目的地ゲート=DockingPlatformとも共通）。
+//   2) 予定航路: 艦が実際にこれから辿ろうとしている経路
 //      （ThrusterSolverの通常フェーズと同じベジエ曲線＋仮想
-//      ウェイポイント以降は進入軸に沿った直線）上を、艦の現在位置
-//      からの弧長ベースで50間隔・2000まで並べた点。艦が動くたびに
-//      毎フレーム再構築する（ベジエは艦の現在位置・向きに依存する
-//      ため、静的にキャッシュできない）。
+//      ウェイポイント以降は進入軸に沿った直線）を、艦の現在位置
+//      から2000先まで1本の線として描画する（点は打たない）。
+//      艦が動くたびに毎フレーム再構築する（ベジエは艦の現在位置・
+//      向きに依存するため、静的にキャッシュできない）。
+//      表示/非表示は進入軸・ターミナルとは独立の
+//      State.settings.showRouteLine。
 //
-// State.dockingTarget が無い間は何も描画しない。表示/非表示は
-// State.settings.showApproachGuides（06-hud.jsのトグルボタンで
-// 切り替え、localStorageにも永続化）で制御する。
+// State.dockingTarget が無い間はどちらも描画しない。
 // =============================================================
 
 const ApproachVisualizer = {
   MARKER_INTERVAL: 50,
   MARKER_RANGE: 2000,
+  // v41: 「点は1/4の大きさでいい」という要望への対応。v40時点の
+  // サイズ(isMajor時3.2/3.0、それ以外1.8/1.6)をベースサイズとし、
+  // ここで一括して1/4に縮小する。
+  POINT_SCALE: 0.25,
 
-  _axisGroup: null,
-  _routeGroup: null,
-  _axisKey: null, // 進入軸マーカーを再構築すべきか判定するための目的地シグネチャ
+  _axisGroup: null,   // 進入軸: 点+線をまとめたグループ（静的）
+  _routeGroup: null,  // 予定航路: 線のみ（動的、毎フレーム再構築）
+  _axisKey: null, // 進入軸を再構築すべきか判定するための目的地シグネチャ
 
   init(scene) {
     this._scene = scene;
@@ -32,16 +39,20 @@ const ApproachVisualizer = {
 
   update() {
     const target = State.dockingTarget;
-    const visible = State.settings.showApproachGuides !== false;
 
-    if (!target || !visible) {
+    const axisVisible = !!target && State.settings.showApproachGuides !== false;
+    if (!axisVisible) {
       this._clearAxis();
-      this._clearRoute();
-      return;
+    } else {
+      this._updateAxis(target);
     }
 
-    this._updateAxisMarkers(target);
-    this._updateRouteMarkers(target);
+    const routeVisible = !!target && State.settings.showRouteLine !== false;
+    if (!routeVisible) {
+      this._clearRoute();
+    } else {
+      this._updateRoute(target);
+    }
   },
 
   _clearAxis() {
@@ -60,11 +71,12 @@ const ApproachVisualizer = {
   },
 
   // -----------------------------------------------------------
-  // 進入軸マーカー（静的）: 目的地の位置・姿勢が変わっていなければ
+  // 進入軸（静的）: 目的地の位置・姿勢が変わっていなければ
   // 再構築しない。DockingPlatform._buildGateMeshと同じ方針で、
   // 目的地のシグネチャ文字列を比較して無駄な再生成を避ける。
+  // 線1本(0〜2000)と、50間隔の点群の両方をグループにまとめる。
   // -----------------------------------------------------------
-  _updateAxisMarkers(target) {
+  _updateAxis(target) {
     const key = `${target.position.x},${target.position.y},${target.position.z},`
       + `${target.quaternion.x},${target.quaternion.y},${target.quaternion.z},${target.quaternion.w}`;
     if (this._axisGroup && this._axisKey === key) return;
@@ -76,7 +88,9 @@ const ApproachVisualizer = {
     );
 
     const group = new THREE.Group();
-    group.userData.isApproachAxisMarkers = true;
+    group.userData.isApproachAxis = true;
+
+    group.add(this._buildAxisLine(target.position, approachAxisWorld));
 
     const count = Math.floor(this.MARKER_RANGE / this.MARKER_INTERVAL);
     for (let i = 1; i <= count; i++) {
@@ -86,7 +100,7 @@ const ApproachVisualizer = {
         y: target.position.y - approachAxisWorld.y * dist,
         z: target.position.z - approachAxisWorld.z * dist,
       };
-      group.add(this._buildAxisMarker(pos, dist));
+      group.add(this._buildAxisPoint(pos, dist));
     }
 
     this._scene.add(group);
@@ -94,22 +108,39 @@ const ApproachVisualizer = {
     this._axisKey = key;
   },
 
-  // 進入軸マーカー1個分: 小さな十字（艦から見やすいよう進入軸に
-  // 垂直な平面上に置く）と、100区切りごとに距離ラベル用の色を変える
-  _buildAxisMarker(pos, dist) {
+  // 進入軸の線: target.positionから進入方向へMARKER_RANGE分
+  // 伸ばした1本の直線。
+  _buildAxisLine(targetPos, approachAxisWorld) {
+    const start = { x: targetPos.x, y: targetPos.y, z: targetPos.z };
+    const end = {
+      x: targetPos.x - approachAxisWorld.x * this.MARKER_RANGE,
+      y: targetPos.y - approachAxisWorld.y * this.MARKER_RANGE,
+      z: targetPos.z - approachAxisWorld.z * this.MARKER_RANGE,
+    };
+    const geo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(start.x, start.y, start.z),
+      new THREE.Vector3(end.x, end.y, end.z),
+    ]);
+    const mat = new THREE.LineBasicMaterial({ color: 0x66aaff, transparent: true, opacity: 0.35 });
+    return new THREE.Line(geo, mat);
+  },
+
+  // 進入軸の点1個分。100区切りごとに大きめ・明るめにして距離の
+  // 目安にする。v41でベースサイズをPOINT_SCALE倍に縮小。
+  _buildAxisPoint(pos, dist) {
     const isMajor = dist % 100 === 0;
     const color = isMajor ? 0x66aaff : 0x336688;
-    const size = isMajor ? 3.2 : 1.8;
+    const baseSize = isMajor ? 3.2 : 1.8;
     const opacity = isMajor ? 0.65 : 0.35;
 
     const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity });
-    const marker = new THREE.Mesh(new THREE.SphereGeometry(size, 6, 6), mat);
+    const marker = new THREE.Mesh(new THREE.SphereGeometry(baseSize * this.POINT_SCALE, 6, 6), mat);
     marker.position.set(pos.x, pos.y, pos.z);
     return marker;
   },
 
   // -----------------------------------------------------------
-  // 予定航路マーカー（動的）: 毎フレーム再構築。
+  // 予定航路（動的）: 毎フレーム再構築。線のみ（点は打たない）。
   //
   // ThrusterSolverの通常フェーズと同じ考え方で経路を求める:
   //   - onApproachSideがfalse（艦が目的地の奥側にいる）間は経路を
@@ -118,9 +149,9 @@ const ApproachVisualizer = {
   //   - 手前側にいる間は、仮想ウェイポイント（v39の距離クランプ込み）
   //     へ向かうベジエを構築し、その先（仮想ウェイポイントから
   //     target.positionまで）は進入軸に沿った直線として繋げる。
-  //     ベジエ+直線の全長に沿って弧長ベースで50間隔にマーカーを打つ。
+  //     ベジエ+直線をつないだ1本の折れ線として2000まで描画する。
   // -----------------------------------------------------------
-  _updateRouteMarkers(target) {
+  _updateRoute(target) {
     this._clearRoute();
 
     const ship = State.ship;
@@ -163,25 +194,28 @@ const ApproachVisualizer = {
       distanceToVirtual
     );
 
-    const points = this._sampleRoutePoints(bezier, virtualTargetPos, approachAxisWorld, target.position);
+    const points = this._sampleRoutePolyline(bezier, virtualTargetPos, approachAxisWorld);
+    if (points.length < 2) return;
 
-    const group = new THREE.Group();
-    group.userData.isRouteMarkers = true;
-    for (const p of points) {
-      group.add(this._buildRouteMarker(p.pos, p.dist));
-    }
+    const geo = new THREE.BufferGeometry().setFromPoints(
+      points.map((p) => new THREE.Vector3(p.x, p.y, p.z))
+    );
+    const mat = new THREE.LineBasicMaterial({ color: 0xffaa33, transparent: true, opacity: 0.7 });
+    const line = new THREE.Line(geo, mat);
+    line.userData.isRouteLine = true;
 
-    this._scene.add(group);
-    this._routeGroup = group;
+    this._scene.add(line);
+    this._routeGroup = line;
   },
 
   // ベジエ(P0=艦位置 -> P3=仮想ウェイポイント)を弧長ベースで
-  // MARKER_INTERVAL間隔にサンプリングし、曲線が尽きた後は
-  // 仮想ウェイポイントからtarget.positionへの直線を進入軸方向に
-  // 延長してMARKER_RANGEまで埋める。
-  _sampleRoutePoints(bezier, virtualTargetPos, approachAxisWorld, realTargetPos) {
+  // MARKER_INTERVAL間隔にサンプリングした頂点列を返し、曲線が
+  // 尽きた後は仮想ウェイポイントから進入軸方向へ延長した頂点を
+  // 足してMARKER_RANGEまで埋める。折れ線描画用の頂点列そのもの
+  // （点オブジェクトは作らない）。
+  _sampleRoutePolyline(bezier, virtualTargetPos, approachAxisWorld) {
     const SEGMENTS = 48;
-    const result = [];
+    const result = [{ x: bezier.p0.x, y: bezier.p0.y, z: bezier.p0.z }];
 
     let prev = bezier.p0;
     let accumulated = 0;
@@ -201,12 +235,9 @@ const ApproachVisualizer = {
         const remain = nextMarkerAt - accumulated;
         const segT = segLen > 1e-6 ? remain / segLen : 0;
         result.push({
-          pos: {
-            x: prev.x + (point.x - prev.x) * segT,
-            y: prev.y + (point.y - prev.y) * segT,
-            z: prev.z + (point.z - prev.z) * segT,
-          },
-          dist: nextMarkerAt,
+          x: prev.x + (point.x - prev.x) * segT,
+          y: prev.y + (point.y - prev.y) * segT,
+          z: prev.z + (point.z - prev.z) * segT,
         });
         nextMarkerAt += this.MARKER_INTERVAL;
       }
@@ -218,16 +249,13 @@ const ApproachVisualizer = {
 
     // ベジエ終端（仮想ウェイポイント）以降、まだMARKER_RANGEに
     // 達していなければ進入軸に沿った直線（仮想ウェイポイント->
-    // target.position、さらにその先も同じ方向）でマーカーを埋める。
+    // target.position、さらにその先も同じ方向）で頂点を延長する。
     while (nextMarkerAt <= this.MARKER_RANGE) {
       const remain = nextMarkerAt - bezierLength;
       result.push({
-        pos: {
-          x: virtualTargetPos.x + approachAxisWorld.x * remain,
-          y: virtualTargetPos.y + approachAxisWorld.y * remain,
-          z: virtualTargetPos.z + approachAxisWorld.z * remain,
-        },
-        dist: nextMarkerAt,
+        x: virtualTargetPos.x + approachAxisWorld.x * remain,
+        y: virtualTargetPos.y + approachAxisWorld.y * remain,
+        z: virtualTargetPos.z + approachAxisWorld.z * remain,
       });
       nextMarkerAt += this.MARKER_INTERVAL;
     }
@@ -235,25 +263,12 @@ const ApproachVisualizer = {
     return result;
   },
 
-  // 航路マーカー1個分: 進入軸マーカーと区別できるよう暖色系にする
-  _buildRouteMarker(pos, dist) {
-    const isMajor = dist % 100 === 0;
-    const color = isMajor ? 0xffaa33 : 0xaa7733;
-    const size = isMajor ? 3.0 : 1.6;
-    const opacity = isMajor ? 0.7 : 0.4;
-
-    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity });
-    const marker = new THREE.Mesh(new THREE.SphereGeometry(size, 6, 6), mat);
-    marker.position.set(pos.x, pos.y, pos.z);
-    return marker;
-  },
-
-  _disposeGroup(group) {
-    group.traverse((obj) => {
-      if (obj.geometry) obj.geometry.dispose();
-      if (obj.material) {
-        if (Array.isArray(obj.material)) obj.material.forEach((m) => m.dispose());
-        else obj.material.dispose();
+  _disposeGroup(obj) {
+    obj.traverse((o) => {
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) {
+        if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
+        else o.material.dispose();
       }
     });
   },

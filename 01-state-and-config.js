@@ -5,7 +5,7 @@
 
 // v27: 画面右下のバージョン表示・<title>で共通して使うバージョン名。
 // リリースのたびにここだけ書き換えれば全画面に反映される。
-const GAME_VERSION = 'v40';
+const GAME_VERSION = 'v41';
 
 // -------------------------------------------------------------
 // 速度制限モード
@@ -223,11 +223,17 @@ const State = {
     // 0.5 なら「RCS単体のmaxThrustが主機maxThrustの50%相当を超える
     // 場合、その50%相当で頭打ち」という形でクランプする
     // （03-thruster-solver.js の _effectiveMaxThrust() 参照）。
-    // v40: 進入軸・予定航路の可視化マーカー（DockingPlatformの
-    // 目的地ゲートも含めてまとめて）の表示/非表示。06-hud.jsの
-    // 設定ボタン横のトグルボタンで切り替え、cameraMode等と同じく
-    // localStorageへ永続化する。
+    // v40: 進入軸マーカー・目的地ゲート（DockingPlatform）の表示/
+    // 非表示。06-hud.jsの設定ボタン横のトグルボタンで切り替え、
+    // cameraMode等と同じくlocalStorageへ永続化する。
+    // v41: 「進路の線の表示非表示は、ターミナル・進入軸とは別に
+    // したい」という要望への対応で、予定航路の表示/非表示は
+    // showRouteLineへ分離した（このフラグは以後、進入軸＋目的地
+    // ゲート専用）。
     showApproachGuides: true,
+    // v41: 予定航路（艦がこれから辿る経路の線）専用の表示/非表示。
+    // showApproachGuidesとは独立にON/OFFできる。
+    showRouteLine: true,
     rcsThrustCapRatio: 1.0,
   },
 
@@ -348,7 +354,8 @@ const DEFAULT_PERSISTED_SETTINGS = {
   retroDampingEnabled: true, // v10: 並進制動（逆噴射でのX/Y速度キャンセル）専用トグル
   cameraMode: 'chase', // 'chase'（追従）| 'orbit'（自由視点）
   rcsThrustCapRatio: 1.0, // v08: RCS最大出力の主機推力に対する上限比率（1.0=無制限）
-  showApproachGuides: true, // v40: 進入軸・予定航路の可視化マーカー表示/非表示
+  showApproachGuides: true, // v40: 進入軸・目的地ゲートの可視化表示/非表示
+  showRouteLine: true, // v41: 予定航路の線の表示/非表示（showApproachGuidesとは独立）
 };
 
 // 保存されている設定を読み込む。localStorageが使えない環境

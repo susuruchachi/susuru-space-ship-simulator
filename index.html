@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>宇宙船シミュレーター v40</title>
+<title>宇宙船シミュレーター v41</title>
 <style>
   html, body {
     margin: 0;
@@ -173,8 +173,12 @@
     position: fixed;
     top: 12px;
     right: 12px;
+    left: 12px; /* v41: ボタンが3つに増えたため、折り返し時に右端で
+                   詰まらないよう左端まで確保する */
     display: flex;
     flex-direction: row-reverse; /* 設定ボタンを右端(従来位置)に保つ */
+    flex-wrap: wrap;
+    justify-content: flex-start; /* row-reverse下でのflex-start=右詰め */
     gap: 8px;
   }
 
@@ -186,10 +190,12 @@
     color: #dfefff;
     font-size: 13px;
     text-decoration: none;
+    white-space: nowrap;
   }
 
-  /* v40: 進入軸・予定航路・目的地ゲートの表示/非表示トグル。
-     設定ボタンの左隣に並べる（.hud-top-right-rowでrow-reverse配置）。 */
+  /* v40: 進入軸・目的地ゲートの表示/非表示トグル。
+     v41: 予定航路トグルも同じクラスで並べる（.hud-top-right-rowで
+     row-reverse配置、狭い画面ではflex-wrapで折り返す）。 */
   .btn-approach-guides-toggle {
     padding: 8px 14px;
     background: rgba(0,0,0,0.4);
@@ -197,6 +203,7 @@
     border-radius: 6px;
     color: #ffd9a0;
     font-size: 13px;
+    white-space: nowrap;
   }
   .btn-approach-guides-toggle.is-off {
     border-color: rgba(255,255,255,0.2);
@@ -568,9 +575,11 @@ function initGame() {
   // v10: 並進制動（逆噴射用SRC）専用トグル。自動姿勢制動とは独立に
   // 永続化・復元する。
   State.settings.retroDampingEnabled = persisted.retroDampingEnabled ?? true;
-  // v40: 進入軸・予定航路の可視化マーカー表示/非表示。cameraMode等と
+  // v40: 進入軸・目的地ゲートの可視化表示/非表示。cameraMode等と
   // 同じくゲーム内HUDのトグルボタンで直接切り替え、その場で永続化する運用。
   State.settings.showApproachGuides = persisted.showApproachGuides ?? true;
+  // v41: 予定航路の線の表示/非表示。showApproachGuidesとは別トグル。
+  State.settings.showRouteLine = persisted.showRouteLine ?? true;
   // v08: RCS最大出力の主機推力に対する上限比率。settings.htmlのみで
   // 変更する運用（ゲーム内HUDには専用UIを設けない）。
   State.settings.rcsThrustCapRatio = persisted.rcsThrustCapRatio ?? 1.0;
@@ -593,6 +602,7 @@ function initGame() {
     retroDampingEnabled: State.settings.retroDampingEnabled,
     rcsThrustCapRatio: State.settings.rcsThrustCapRatio,
     showApproachGuides: State.settings.showApproachGuides,
+    showRouteLine: State.settings.showRouteLine,
   });
 
   const hudRoot = document.getElementById('hud-root');

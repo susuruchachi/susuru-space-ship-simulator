@@ -68,18 +68,19 @@ const HUD = {
     row.appendChild(link);
 
     this._buildApproachGuidesToggle(row);
+    this._buildRouteLineToggle(row);
   },
 
   // -----------------------------------------------------------
-  // v40: 進入軸マーカー・予定航路マーカー・目的地ゲート（
-  // DockingPlatform）をまとめて表示/非表示するトグルボタン。
-  // 設定ボタンの左隣に配置する（呼び出し元の.hud-top-right-row参照）。
-  // ApproachVisualizer.update()側はState.settings.showApproachGuides
-  // を毎フレーム参照するだけなので、ここではフラグの反転と永続化
-  // （cameraMode等と同じ運用）のみを行う。
-  // DockingPlatform（目的地ゲート）の表示/非表示もこのフラグに
-  // 統一する。以前はState.dockingTargetの有無だけで常時表示
-  // だったが、進入軸・航路と合わせて一括で隠せるようにする。
+  // v40: 進入軸（点+線）・目的地ゲート（DockingPlatform）を
+  // まとめて表示/非表示するトグルボタン。設定ボタンの左隣に配置する
+  // （呼び出し元の.hud-top-right-row、row-reverseで右から順に並ぶ）。
+  // ApproachVisualizer.update()・DockingPlatform.update()側は
+  // State.settings.showApproachGuidesを毎フレーム参照するだけなので、
+  // ここではフラグの反転と永続化（cameraMode等と同じ運用）のみを行う。
+  //
+  // v41: 予定航路の線はshowRouteLine（別トグル、_buildRouteLineToggle）
+  // に分離したため、このボタンの対象は進入軸＋目的地ゲートのみになった。
   // -----------------------------------------------------------
   _buildApproachGuidesToggle(domRoot) {
     const btn = document.createElement('button');
@@ -88,13 +89,38 @@ const HUD = {
 
     const refresh = () => {
       const on = State.settings.showApproachGuides !== false;
-      btn.textContent = on ? '🛰 誘導表示: ON' : '🛰 誘導表示: OFF';
+      btn.textContent = on ? '🛰 進入軸: ON' : '🛰 進入軸: OFF';
       btn.classList.toggle('is-off', !on);
     };
 
     btn.addEventListener('click', () => {
       State.settings.showApproachGuides = !(State.settings.showApproachGuides !== false);
       savePersistedSettings({ showApproachGuides: State.settings.showApproachGuides });
+      refresh();
+    });
+
+    refresh();
+  },
+
+  // -----------------------------------------------------------
+  // v41: 予定航路（艦がこれから辿る経路の線、ApproachVisualizer.
+  // _updateRoute参照）専用の表示/非表示トグル。進入軸・目的地ゲート
+  // （showApproachGuides）とは独立に切り替えられるよう別ボタンにする。
+  // -----------------------------------------------------------
+  _buildRouteLineToggle(domRoot) {
+    const btn = document.createElement('button');
+    btn.className = 'btn-approach-guides-toggle';
+    domRoot.appendChild(btn);
+
+    const refresh = () => {
+      const on = State.settings.showRouteLine !== false;
+      btn.textContent = on ? '〰 航路: ON' : '〰 航路: OFF';
+      btn.classList.toggle('is-off', !on);
+    };
+
+    btn.addEventListener('click', () => {
+      State.settings.showRouteLine = !(State.settings.showRouteLine !== false);
+      savePersistedSettings({ showRouteLine: State.settings.showRouteLine });
       refresh();
     });
 
