@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>宇宙船シミュレーター v39</title>
+<title>宇宙船シミュレーター v40</title>
 <style>
   html, body {
     margin: 0;
@@ -169,10 +169,16 @@
     pointer-events: none;
   }
 
-  .hud-settings-link {
+  .hud-top-right-row {
     position: fixed;
     top: 12px;
     right: 12px;
+    display: flex;
+    flex-direction: row-reverse; /* 設定ボタンを右端(従来位置)に保つ */
+    gap: 8px;
+  }
+
+  .hud-settings-link {
     padding: 8px 14px;
     background: rgba(0,0,0,0.4);
     border: 1px solid rgba(255,255,255,0.2);
@@ -180,6 +186,21 @@
     color: #dfefff;
     font-size: 13px;
     text-decoration: none;
+  }
+
+  /* v40: 進入軸・予定航路・目的地ゲートの表示/非表示トグル。
+     設定ボタンの左隣に並べる（.hud-top-right-rowでrow-reverse配置）。 */
+  .btn-approach-guides-toggle {
+    padding: 8px 14px;
+    background: rgba(0,0,0,0.4);
+    border: 1px solid rgba(255,170,51,0.4);
+    border-radius: 6px;
+    color: #ffd9a0;
+    font-size: 13px;
+  }
+  .btn-approach-guides-toggle.is-off {
+    border-color: rgba(255,255,255,0.2);
+    color: rgba(255,255,255,0.5);
   }
 
   .hud-camera-controls {
@@ -346,6 +367,7 @@
 <script src="07-engine-fx.js"></script>
 <script src="08-camera.js"></script>
 <script src="10-docking-platform.js"></script>
+<script src="11-approach-visualizer.js"></script>
 
 <script>
 // =============================================================
@@ -546,6 +568,9 @@ function initGame() {
   // v10: 並進制動（逆噴射用SRC）専用トグル。自動姿勢制動とは独立に
   // 永続化・復元する。
   State.settings.retroDampingEnabled = persisted.retroDampingEnabled ?? true;
+  // v40: 進入軸・予定航路の可視化マーカー表示/非表示。cameraMode等と
+  // 同じくゲーム内HUDのトグルボタンで直接切り替え、その場で永続化する運用。
+  State.settings.showApproachGuides = persisted.showApproachGuides ?? true;
   // v08: RCS最大出力の主機推力に対する上限比率。settings.htmlのみで
   // 変更する運用（ゲーム内HUDには専用UIを設けない）。
   State.settings.rcsThrustCapRatio = persisted.rcsThrustCapRatio ?? 1.0;
@@ -567,6 +592,7 @@ function initGame() {
     autoDampingEnabled: State.settings.autoDampingEnabled,
     retroDampingEnabled: State.settings.retroDampingEnabled,
     rcsThrustCapRatio: State.settings.rcsThrustCapRatio,
+    showApproachGuides: State.settings.showApproachGuides,
   });
 
   const hudRoot = document.getElementById('hud-root');
@@ -579,6 +605,7 @@ function initGame() {
   EngineFx.init(scene);
   CameraSystem.init(renderer.domElement);
   DockingPlatform.init(scene);
+  ApproachVisualizer.init(scene);
 }
 
 function animate() {
@@ -589,6 +616,7 @@ function animate() {
   EngineFx.update(dt);
   CameraSystem.update(camera);
   DockingPlatform.update();
+  ApproachVisualizer.update();
 
   HUD.update();
   renderer.render(scene, camera);

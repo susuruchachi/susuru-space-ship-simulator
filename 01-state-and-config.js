@@ -5,7 +5,7 @@
 
 // v27: 画面右下のバージョン表示・<title>で共通して使うバージョン名。
 // リリースのたびにここだけ書き換えれば全画面に反映される。
-const GAME_VERSION = 'v39';
+const GAME_VERSION = 'v40';
 
 // -------------------------------------------------------------
 // 速度制限モード
@@ -223,6 +223,11 @@ const State = {
     // 0.5 なら「RCS単体のmaxThrustが主機maxThrustの50%相当を超える
     // 場合、その50%相当で頭打ち」という形でクランプする
     // （03-thruster-solver.js の _effectiveMaxThrust() 参照）。
+    // v40: 進入軸・予定航路の可視化マーカー（DockingPlatformの
+    // 目的地ゲートも含めてまとめて）の表示/非表示。06-hud.jsの
+    // 設定ボタン横のトグルボタンで切り替え、cameraMode等と同じく
+    // localStorageへ永続化する。
+    showApproachGuides: true,
     rcsThrustCapRatio: 1.0,
   },
 
@@ -343,6 +348,7 @@ const DEFAULT_PERSISTED_SETTINGS = {
   retroDampingEnabled: true, // v10: 並進制動（逆噴射でのX/Y速度キャンセル）専用トグル
   cameraMode: 'chase', // 'chase'（追従）| 'orbit'（自由視点）
   rcsThrustCapRatio: 1.0, // v08: RCS最大出力の主機推力に対する上限比率（1.0=無制限）
+  showApproachGuides: true, // v40: 進入軸・予定航路の可視化マーカー表示/非表示
 };
 
 // 保存されている設定を読み込む。localStorageが使えない環境

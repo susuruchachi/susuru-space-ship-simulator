@@ -17,6 +17,10 @@
 //
 // 戦艦級（幅24 x 高さ18 x 全長140、01-state-and-config.js参照）が
 // 余裕を持って収まるよう、内寸は幅・高さともに戦艦級の外形+マージン。
+//
+// v40: State.settings.showApproachGuides（06-hud.jsのトグルボタン）が
+// falseの間は、進入軸・予定航路マーカー（11-approach-visualizer.js）
+// と合わせてこのゲートも非表示にする。
 // =============================================================
 
 const DockingPlatform = {
@@ -34,8 +38,13 @@ const DockingPlatform = {
 
   update() {
     const target = State.dockingTarget;
+    // v40: 進入軸・予定航路マーカー（ApproachVisualizer）と表示状態を
+    // 統一する。State.settings.showApproachGuidesがfalseの間は
+    // 目的地ゲートも含めて誘導表示を一括で隠す（06-hud.jsの
+    // トグルボタン参照）。
+    const visible = State.settings.showApproachGuides !== false;
 
-    if (!target) {
+    if (!target || !visible) {
       if (this._group) {
         this._scene.remove(this._group);
         this._disposeGroup(this._group);

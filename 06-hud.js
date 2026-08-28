@@ -57,11 +57,48 @@ const HUD = {
   },
 
   _buildSettingsLink(domRoot) {
+    const row = document.createElement('div');
+    row.className = 'hud-top-right-row';
+    domRoot.appendChild(row);
+
     const link = document.createElement('a');
     link.className = 'hud-settings-link';
     link.href = 'settings.html';
     link.textContent = '⚙ 設定';
-    domRoot.appendChild(link);
+    row.appendChild(link);
+
+    this._buildApproachGuidesToggle(row);
+  },
+
+  // -----------------------------------------------------------
+  // v40: 進入軸マーカー・予定航路マーカー・目的地ゲート（
+  // DockingPlatform）をまとめて表示/非表示するトグルボタン。
+  // 設定ボタンの左隣に配置する（呼び出し元の.hud-top-right-row参照）。
+  // ApproachVisualizer.update()側はState.settings.showApproachGuides
+  // を毎フレーム参照するだけなので、ここではフラグの反転と永続化
+  // （cameraMode等と同じ運用）のみを行う。
+  // DockingPlatform（目的地ゲート）の表示/非表示もこのフラグに
+  // 統一する。以前はState.dockingTargetの有無だけで常時表示
+  // だったが、進入軸・航路と合わせて一括で隠せるようにする。
+  // -----------------------------------------------------------
+  _buildApproachGuidesToggle(domRoot) {
+    const btn = document.createElement('button');
+    btn.className = 'btn-approach-guides-toggle';
+    domRoot.appendChild(btn);
+
+    const refresh = () => {
+      const on = State.settings.showApproachGuides !== false;
+      btn.textContent = on ? '🛰 誘導表示: ON' : '🛰 誘導表示: OFF';
+      btn.classList.toggle('is-off', !on);
+    };
+
+    btn.addEventListener('click', () => {
+      State.settings.showApproachGuides = !(State.settings.showApproachGuides !== false);
+      savePersistedSettings({ showApproachGuides: State.settings.showApproachGuides });
+      refresh();
+    });
+
+    refresh();
   },
 
   // -----------------------------------------------------------
