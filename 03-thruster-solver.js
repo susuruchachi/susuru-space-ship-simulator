@@ -726,6 +726,49 @@ const ThrusterSolver = {
   // 充てる。
   DOCKING_VIRTUAL_TARGET_OFFSET: 500.0,
 
+  // v43: 「進入軸に乗って、正しい方向から入るまで距離200
+  // (DOCKING_FINAL_APPROACH_DISTANCE)に入らないようにしてほしい。
+  // 出口側から接近するなど、仮想ウェイポイントへ直線で向かうと
+  // その途中で距離200圏内をかすめてしまう場合は、距離500以上の
+  // 範囲を通って迂回してほしい」という要望への対応。
+  //
+  // 背景: 通常フェーズは艦の現在位置から仮想ウェイポイント
+  // （_computeVirtualApproachTarget、進入軸上・target.positionの
+  // 手前側）へ、姿勢はベジエ先読み、並進はほぼ直線的に向かう
+  // （_buildApproachBezierのP3・approachTargetWorldとも同じ
+  // 仮想ウェイポイントを終点にする）。艦がまだ進入軸から大きく
+  // 外れた位置（特に出口側寄り、target.positionを挟んで仮想
+  // ウェイポイントの反対側に近い位置）にいると、艦の現在位置→
+  // 仮想ウェイポイントを結ぶ直線そのものがtarget.positionのすぐ
+  // 脇（距離200未満）を通ってしまうことがある。これだと「正しい
+  // 進入方向・正しい姿勢が整う前に距離200圏内（最終進入ゾーン）へ
+  // 入ってしまう」ことになり、意図しない角度で最終進入フェーズへ
+  // 突入しかねない。
+  //
+  // 対策: 通常フェーズが実際に目指す先（仮想ウェイポイント、
+  // _computeVirtualApproachTarget）を確定した直後、艦の現在位置
+  // からその点までの直線がtarget.positionにDOCKING_FINAL_APPROACH_
+  // DISTANCE未満まで接近するかを判定する
+  // （_computeApproachAvoidanceWaypoint内、点と線分の最短距離）。
+  // 接近する場合は、target.positionを中心に半径
+  // DOCKING_AVOIDANCE_DETOUR_RADIUS（500、DOCKING_VIRTUAL_TARGET_
+  // OFFSETと同じ値=仮想ウェイポイントと同じ「安全な距離」の目安）
+  // 以上離れた迂回点を経由目標として1つ差し込む。迂回点は艦の
+  // 現在の横方向オフセット（進入軸に対する垂直成分）の延長線上に
+  // 置くことで、「今いる側へさらに膨らんでから回り込む」自然な
+  // 迂回になる（ゴーアラウンドの中心選びと同じ考え方）。
+  //
+  // 迂回中はship._dockingAvoidanceWaypointにフレームをまたいで
+  // キャッシュし、艦が実際にそこへ十分近づくか、直線が再び安全に
+  // なるまで維持する（ヒステリシス、_computeApproachAvoidanceWaypoint
+  // 参照）。姿勢用ベジエ・並進のどちらも同じeffectiveTarget.position
+  // を参照する既存構造（v30）にそのまま乗せるため、
+  // _buildDesiredForAutoDocking側の変更は仮想ウェイポイント算出
+  // 直後に1箇所差し込むだけで済む。
+  DOCKING_AVOIDANCE_DETOUR_RADIUS: 500.0, // 迂回点はtarget.positionからこの距離以上離す
+  DOCKING_AVOIDANCE_ARRIVAL_RADIUS: 80.0, // 迂回点からこの距離まで近づいたら本来の仮想ウェイポイントへ切り替える
+  DOCKING_AVOIDANCE_EXIT_MARGIN: 40.0, // 迂回不要と判定するための余裕（200ちょうどではなく+40の240を安全側の基準にし、境界での往復を防ぐ）
+
   // v20: 「距離200に入った瞬間に姿勢が目的地方向→進入軸方向へ
   // 一気に切り替わり、大きく旋回してしまう」という報告への対応。
   // 従来は距離200を境に姿勢の目標方向を瞬時に切り替えていたが、
@@ -1339,6 +1382,110 @@ const ThrusterSolver = {
   },
 
   // -----------------------------------------------------------
+  // v43: 点pointと線分(segStart-segEnd)の最短距離を返す。
+  // 迂回判定（艦の現在位置→仮想ウェイポイントの直線がtarget.
+  // positionにどれだけ接近するか）専用の汎用ヘルパー。
+  // -----------------------------------------------------------
+  _pointToSegmentDistance(point, segStart, segEnd) {
+    const seg = { x: segEnd.x - segStart.x, y: segEnd.y - segStart.y, z: segEnd.z - segStart.z };
+    const segLenSq = seg.x * seg.x + seg.y * seg.y + seg.z * seg.z;
+    const toPoint = { x: point.x - segStart.x, y: point.y - segStart.y, z: point.z - segStart.z };
+    // segLenSqがほぼ0（始点=終点）なら単純に始点との距離を返す。
+    const t = segLenSq > 1e-8 ? clamp(vecDot(toPoint, seg) / segLenSq, 0, 1) : 0;
+    const closest = {
+      x: segStart.x + seg.x * t,
+      y: segStart.y + seg.y * t,
+      z: segStart.z + seg.z * t,
+    };
+    return vecLength({ x: point.x - closest.x, y: point.y - closest.y, z: point.z - closest.z });
+  },
+
+  // -----------------------------------------------------------
+  // v43: 艦の現在位置からrawWaypoint（本来の仮想ウェイポイント、
+  // または再アプローチウェイポイント）へ直行する直線が、target.
+  // positionにDOCKING_FINAL_APPROACH_DISTANCE未満まで接近する場合、
+  // 迂回点を挟んで返す。安全なら（あるいは既に迂回点へ十分近づいた
+  // 後、直行しても安全なら）rawWaypointをそのまま返す。
+  //
+  // 迂回点はtarget.positionを中心に、
+  //   - 進入軸(approachAxisWorld)に垂直な平面上、艦の現在位置の
+  //     横方向オフセット（進入軸に対する垂直成分）の向きを延長
+  //   - 艦の横方向オフセットがほぼ0（ほぼ真後ろ・真正面から
+  //     接近している）場合は、進入軸に対して適当な垂直方向
+  //     （ワールド上方向とapproachAxisWorldの外積、それも縮退
+  //     するなら任意の垂直方向）を使う
+  // に、半径DOCKING_AVOIDANCE_DETOUR_RADIUSの点を置く。
+  //
+  // ヒステリシス: 一度迂回を開始したら、艦がDOCKING_AVOIDANCE_
+  // ARRIVAL_RADIUS以内へ実際に近づくまでは同じ迂回点を維持する
+  // （毎フレーム直線判定が safe/unsafe を跨いで迂回点が動き続け、
+  // 艦がどこにも定まらず振動する事態を防ぐ）。
+  // -----------------------------------------------------------
+  _computeApproachAvoidanceWaypoint(ship, target, approachAxisWorld, rawWaypoint) {
+    const cached = ship._dockingAvoidanceWaypoint;
+    if (cached) {
+      const distToCached = vecLength({
+        x: ship.position.x - cached.x,
+        y: ship.position.y - cached.y,
+        z: ship.position.z - cached.z,
+      });
+      if (distToCached > this.DOCKING_AVOIDANCE_ARRIVAL_RADIUS) {
+        // まだ迂回点に到達していない間は、直線が再度安全かどうかに
+        // 関わらず同じ迂回点へ向かい続ける（振動防止）。
+        return cached;
+      }
+      // 迂回点に十分近づいた。以後は毎フレームの安全判定に戻す
+      // （下記へ続く。再び危険と判定されれば新しい迂回点を張る）。
+      ship._dockingAvoidanceWaypoint = null;
+    }
+
+    const clearance = this._pointToSegmentDistance(target.position, ship.position, rawWaypoint);
+    const safeDistance = this.DOCKING_FINAL_APPROACH_DISTANCE + this.DOCKING_AVOIDANCE_EXIT_MARGIN;
+    if (clearance >= safeDistance) {
+      return rawWaypoint;
+    }
+
+    // 艦の現在位置を進入軸へ投影し、横方向オフセット（進入軸に垂直な
+    // 成分）を取り出す。
+    const toShipWorld = {
+      x: ship.position.x - target.position.x,
+      y: ship.position.y - target.position.y,
+      z: ship.position.z - target.position.z,
+    };
+    const alongComp = vecDot(toShipWorld, approachAxisWorld);
+    const lateral = {
+      x: toShipWorld.x - approachAxisWorld.x * alongComp,
+      y: toShipWorld.y - approachAxisWorld.y * alongComp,
+      z: toShipWorld.z - approachAxisWorld.z * alongComp,
+    };
+    const lateralLen = vecLength(lateral);
+
+    let lateralDirWorld;
+    if (lateralLen > 1e-3) {
+      lateralDirWorld = vecScale(lateral, 1 / lateralLen);
+    } else {
+      // 艦がほぼ進入軸の真上（横ズレがない）にいる特異ケース。
+      // 進入軸に垂直などれかの方向を使えれば十分なので、ワールド
+      // 上方向との外積を試し、それも縮退する（進入軸がほぼ真上/
+      // 真下を向く艦種向けの姿勢）ならワールドX軸で代用する。
+      const upWorld = { x: 0, y: 1, z: 0 };
+      const fallback = vecCross(upWorld, approachAxisWorld);
+      const fallbackLen = vecLength(fallback);
+      lateralDirWorld = fallbackLen > 1e-3
+        ? vecScale(fallback, 1 / fallbackLen)
+        : { x: 1, y: 0, z: 0 };
+    }
+
+    const waypoint = {
+      x: target.position.x + lateralDirWorld.x * this.DOCKING_AVOIDANCE_DETOUR_RADIUS,
+      y: target.position.y + lateralDirWorld.y * this.DOCKING_AVOIDANCE_DETOUR_RADIUS,
+      z: target.position.z + lateralDirWorld.z * this.DOCKING_AVOIDANCE_DETOUR_RADIUS,
+    };
+    ship._dockingAvoidanceWaypoint = waypoint;
+    return waypoint;
+  },
+
+  // -----------------------------------------------------------
   // v30: ゴーアラウンド旋回円を、オーバーシュート検知フレームの
   // 艦の位置・進行方向から一度だけ構築する。
   //
@@ -1807,8 +1954,28 @@ const ThrusterSolver = {
       approachAxisWorld,
       alongDistWorld
     );
+
+    // v43: 「艦の現在位置→仮想ウェイポイント」の直線が距離200
+    // (DOCKING_FINAL_APPROACH_DISTANCE)未満までtarget.positionへ
+    // 接近してしまう場合、その直線経路自体を迂回点経由に差し替える
+    // （DOCKING_AVOIDANCE_DETOUR_RADIUS定数群のコメント参照）。
+    // onApproachSide=falseの間（奥側に出てしまっている・再アプローチ
+    // 中）はここでは扱わない。そちらは_computeHeadingTargetDirWorldの
+    // 再アプローチ/ゴーアラウンド分岐と並進側のship._dockingReapproaching
+    // 分岐がそれぞれ専用の経路（進入軸手前側のウェイポイント）へ
+    // 既に迂回しているため、二重に迂回ロジックを重ねる必要がない。
+    const effectiveApproachTargetPos = onApproachSide
+      ? this._computeApproachAvoidanceWaypoint(ship, target, approachAxisWorld, virtualApproachTargetPos)
+      : virtualApproachTargetPos;
+    // onApproachSideがfalseへ落ちた（奥側に出た）場合は迂回状態も
+    // リセットしておく。再度手前側に戻った際、古い迂回点に引っ張られ
+    // ないようにするため。
+    if (!onApproachSide) {
+      ship._dockingAvoidanceWaypoint = null;
+    }
+
     const effectiveTarget = onApproachSide
-      ? { position: virtualApproachTargetPos, quaternion: target.quaternion }
+      ? { position: effectiveApproachTargetPos, quaternion: target.quaternion }
       : target;
     const toEffectiveTargetWorld = {
       x: effectiveTarget.position.x - ship.position.x,

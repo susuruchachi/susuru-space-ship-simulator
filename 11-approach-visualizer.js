@@ -229,10 +229,11 @@ const ApproachVisualizer = {
   //   - onApproachSideがfalse（艦が目的地の奥側にいる）間は経路を
   //     引かない（この状況はThrusterSolver側も目的地の方角への
   //     単純フォールバックに切り替わり、艦自身がベジエに沿わないため）。
-  //   - 手前側にいる間は、仮想ウェイポイント（v39の距離クランプ込み）
-  //     へ向かうベジエを構築し、その先（仮想ウェイポイントから
-  //     target.positionまで）は進入軸に沿った直線として繋げる。
-  //     ベジエ+直線をつないだ1本の折れ線として2000まで描画する。
+  //   - 手前側にいる間は、仮想ウェイポイント（v39の距離クランプ、
+  //     v43の迂回判定込み）へ向かうベジエを構築し、その先
+  //     （仮想ウェイポイントからtarget.positionまで）は進入軸に
+  //     沿った直線として繋げる。ベジエ+直線をつないだ1本の折れ線
+  //     として2000まで描画する。
   // -----------------------------------------------------------
   _updateRoute(target) {
     this._clearRoute();
@@ -258,10 +259,22 @@ const ApproachVisualizer = {
     // する）ため、可視化上も経路を引かない。
     if (alongDistWorld < 0) return;
 
-    const virtualTargetPos = ThrusterSolver._computeVirtualApproachTarget(
+    const rawVirtualTargetPos = ThrusterSolver._computeVirtualApproachTarget(
       target,
       approachAxisWorld,
       alongDistWorld
+    );
+    // v43: ThrusterSolver側（_buildDesiredForAutoDocking）と同じ迂回
+    // 判定をここでも通す。実際に艦が辿る経路（迂回点経由になりうる）と
+    // 表示上の予定航路を一致させるため。同一フレーム内で既に
+    // ShipController.update経由（index.htmlの呼び出し順）で一度
+    // 判定済みの状態(ship._dockingAvoidanceWaypoint)をそのまま読む
+    // だけなので、ここで呼んでも二重に状態が動くことはない。
+    const virtualTargetPos = ThrusterSolver._computeApproachAvoidanceWaypoint(
+      ship,
+      target,
+      approachAxisWorld,
+      rawVirtualTargetPos
     );
     const virtualTarget = { position: virtualTargetPos, quaternion: target.quaternion };
     const distanceToVirtual = vecLength({
