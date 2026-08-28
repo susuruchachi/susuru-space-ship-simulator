@@ -769,6 +769,25 @@ const ThrusterSolver = {
   DOCKING_AVOIDANCE_ARRIVAL_RADIUS: 80.0, // 迂回点からこの距離まで近づいたら本来の仮想ウェイポイントへ切り替える
   DOCKING_AVOIDANCE_EXIT_MARGIN: 40.0, // 迂回不要と判定するための余裕（200ちょうどではなく+40の240を安全側の基準にし、境界での往復を防ぐ）
 
+  // v44: 「最終進入の突入条件に、進入軸上にいることを追加してほしい」
+  // という要望への対応。
+  //
+  // 従来のinFinalApproachは距離200(DOCKING_FINAL_APPROACH_DISTANCE)と
+  // 姿勢(headingReadyForFinalApproach)のみで判定しており、位置が
+  // 進入軸からどれだけ横にズレていても、姿勢さえ整えば最終進入
+  // フェーズへ入れてしまっていた。通常は仮想ウェイポイント(v30)・
+  // 迂回(v43)のおかげで距離200へ到達する頃には自然と軸上に収束して
+  // いるはずだが、再アプローチ/ゴーアラウンド中に本物のtarget.
+  // positionへの実距離がたまたま200を切るケース（v44で別途対応）
+  // などでは、位置が軸から大きくズレたまま最終進入に入りかねない。
+  //
+  // 対策: 艦から目的地への実ベクトル(toTargetWorld)を進入軸に投影し、
+  // 軸に垂直な横方向オフセットの大きさを求め、これがこの値以下で
+  // あることもinFinalApproachの条件に追加する（onAxisForFinalApproach、
+  // _buildDesiredForAutoDocking参照）。満たさない間はheadingHold
+  // （その場で速度を殺しつつ姿勢/位置を合わせる）のまま留まる。
+  DOCKING_FINAL_APPROACH_LATERAL_READY_OFFSET: 8.0, // この横ズレ(進入軸に垂直な距離)以内でないと最終進入へ入れない
+
   // v20: 「距離200に入った瞬間に姿勢が目的地方向→進入軸方向へ
   // 一気に切り替わり、大きく旋回してしまう」という報告への対応。
   // 従来は距離200を境に姿勢の目標方向を瞬時に切り替えていたが、
@@ -1996,6 +2015,20 @@ const ThrusterSolver = {
     const headingReadyForFinalApproach =
       headingErrorFromAxis <= this.DOCKING_FINAL_APPROACH_HEADING_READY_ANGLE;
 
+    // v44: 進入軸上にいるか（横方向オフセットが十分小さいか）を
+    // 最終進入の突入条件に追加する。toTargetWorld（本物のtarget.
+    // positionまでの実ベクトル）を進入軸へ投影し、軸に垂直な
+    // 成分の長さを見る（DOCKING_FINAL_APPROACH_LATERAL_READY_OFFSET
+    // のコメント参照）。
+    const alongDistForAxisCheck = vecDot(toTargetWorld, approachAxisWorld);
+    const lateralFromAxis = {
+      x: toTargetWorld.x - approachAxisWorld.x * alongDistForAxisCheck,
+      y: toTargetWorld.y - approachAxisWorld.y * alongDistForAxisCheck,
+      z: toTargetWorld.z - approachAxisWorld.z * alongDistForAxisCheck,
+    };
+    const onAxisForFinalApproach =
+      vecLength(lateralFromAxis) <= this.DOCKING_FINAL_APPROACH_LATERAL_READY_OFFSET;
+
     // v31: 「アプローチ中に仮想ウェイポイントへ向かいながら姿勢も
     // 進入軸へ揃えていき、距離200到達と同時に位置・姿勢とも
     // 進入軸上に乗っている」という設計を踏まえ、最終進入ゾーンへの
@@ -2005,23 +2038,44 @@ const ThrusterSolver = {
     // _computeOnApproachSideWithHysteresis内で既に再アプローチ/
     // ゴーアラウンド専用ロジックへ切り替わっており、そちらが
     // 姿勢制御を引き継ぐため、ここでinFinalApproachZoneがtrueに
-    // なっても実害はない。また実際の姿勢固定(inFinalApproach)には
-    // 引き続きheadingReadyForFinalApproach（船首が進入軸に
-    // 実際に揃っていること）を要求するため、船首が逆を向いた
-    // ままのオーバーシュート直後に姿勢固定してしまうことはない
-    // （揃うまではheadingHold＝姿勢調整中のまま留まる）。
-    const inFinalApproachZone = distance <= this.DOCKING_FINAL_APPROACH_DISTANCE;
-    const inFinalApproach = inFinalApproachZone && headingReadyForFinalApproach;
+    // なっても実害はない。
+    //
+    // v44: 「再アプローチ/ゴーアラウンドが、距離500を目指す仮想
+    // ウェイポイント機能と喧嘩している」という報告への対応。
+    // 従来はinFinalApproachZoneがonApproachSideを見ていなかったため、
+    // 再アプローチ/ゴーアラウンド中（onApproachSide=false、まだ
+    // 進入軸の手前側に戻り切れていない）でも、本物のtarget.position
+    // への実距離がたまたま200を切ると最終進入ゾーンへ入ってしまい、
+    // headingHold/inFinalApproachが再アプローチ・ゴーアラウンドの
+    // 経路制御を上書きしてしまうことがあった。再アプローチ/
+    // ゴーアラウンドを明確に優先させるため、これらの最中
+    // （ship._dockingReapproaching=true）は最終進入ゾーンの判定
+    // 自体を無効化する。再アプローチウェイポイントに到達し
+    // onApproachSideが再びtrueに戻ってから、改めて通常の距離判定に
+    // 従う。
+    //
+    // また実際の姿勢固定(inFinalApproach)には引き続き
+    // headingReadyForFinalApproach（船首が進入軸に実際に揃っている
+    // こと）に加え、onAxisForFinalApproach（位置も進入軸上に
+    // 乗っていること）を要求するため、姿勢や位置が整わないまま
+    // 最終進入フェーズに入ってしまうことはない（揃うまでは
+    // headingHold＝その場で速度を殺しつつ調整中のまま留まる）。
+    const inFinalApproachZone =
+      distance <= this.DOCKING_FINAL_APPROACH_DISTANCE && !ship._dockingReapproaching;
+    const inFinalApproach =
+      inFinalApproachZone && headingReadyForFinalApproach && onAxisForFinalApproach;
     // v29: 次フレームの_computeOnApproachSideWithHysteresis呼び出しが
     // 「直前フレームで最終進入フェーズに入っていたか」を参照できる
     // よう、このフレームで確定したinFinalApproachをship側に記録する。
     // ここでの代入は次回呼び出し時に読まれる（今回のonApproachSide
     // 判定は既にこの直前で完了済みなので、今回の判定には影響しない）。
     ship._dockingWasInFinalApproach = inFinalApproach;
-    // 最終進入ゾーンに入っているのに姿勢がまだ整っていない：
-    // その場で回頭を優先し、前進はDOCKING_HEADING_HOLD_FORWARD_DAMPING
-    // まで絞る（完全停止ではなく、多少は近づきながら合わせる）。
-    const headingHold = inFinalApproachZone && !headingReadyForFinalApproach;
+    // 最終進入ゾーンに入っているのに姿勢または位置（進入軸上か）が
+    // まだ整っていない：その場で回頭・位置合わせを優先し、前進は
+    // DOCKING_HEADING_HOLD_FORWARD_DAMPINGまで絞る（完全停止では
+    // なく、多少は近づきながら合わせる）。
+    const headingHold =
+      inFinalApproachZone && !(headingReadyForFinalApproach && onAxisForFinalApproach);
 
     // 目的方向への単位ベクトル（勢い殺しモードの判定、姿勢ブレンドの
     // 奥側フォールバックで使う。安全装置である勢い殺し判定は本物の
