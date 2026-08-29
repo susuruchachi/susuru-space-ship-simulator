@@ -225,21 +225,27 @@ const ApproachVisualizer = {
   // -----------------------------------------------------------
   // 予定航路（動的）: 毎フレーム再構築。線のみ（点は打たない）。
   //
-  // ThrusterSolverの通常フェーズと同じ考え方で経路を求める:
-  //   - onApproachSideがfalse（艦が目的地の奥側にいる）間は経路を
-  //     引かない（この状況はThrusterSolver側も目的地の方角への
-  //     単純フォールバックに切り替わり、艦自身がベジエに沿わないため）。
-  //   - 手前側にいる間は、仮想ウェイポイント（v39の距離クランプ、
-  //     v43の迂回判定込み）へ向かうベジエを構築し、その先
-  //     （仮想ウェイポイントからtarget.positionまで）は進入軸に
-  //     沿った直線として繋げる。ベジエ+直線をつないだ1本の折れ線
-  //     として2000まで描画する。
+  // v46: ThrusterSolverの自動ドッキングがベジエ主体の単一ロジック
+  // から、明示的なフェーズ（ship._dockingPhase）のステートマシンに
+  // 再設計されたのに合わせ、可視化側もフェーズごとの「今まさに
+  // 艦が目指している点」を単純な折れ線でつなぐ方式に変更した。
+  //   - cruise/approach/adjust: 艦の現在位置 → 仕想WP（迂回点経由の
+  //     場合は迂回点も経由）→ target.position の折れ線
+  //   - brake300/brake250: 前後には進まないフェーズなので、艦の
+  //     現在位置から進入軸への垂線の足（＝軸上の同じdistanceの点）
+  //     → target.position
+  //   - final_approach: 艦の現在位置 → target.position の直線
+  //   - tunnel/overshoot: 艦の現在位置から進入軸に沿った直線
+  //     （tunnelは目的地方向、overshootは奥側へ抜ける方向）
+  //   - docked: 経路なし
+  // いずれも「進入軸沿いの直線部分」はtarget.positionを越えて
+  // MARKER_RANGEまで延長する（_extendAlongAxis参照）。
   // -----------------------------------------------------------
   _updateRoute(target) {
     this._clearRoute();
 
     const ship = State.ship;
-    if (!ship) return;
+    if (!ship || !ship.autoDockingEnabled) return;
 
     const toTargetWorld = {
       x: target.position.x - ship.position.x,
@@ -253,65 +259,99 @@ const ApproachVisualizer = {
       rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion)
     );
 
-    // v45: onApproachSideの判定を、ここでの単純な符号チェック
-    // （alongDistWorld < 0）から、ThrusterSolver側のヒステリシス版
-    // (_computeOnApproachSideWithHysteresis)が同一フレーム内で既に
-    // 書き込んだ ship._dockingOnApproachSide を読むだけの形に変更。
-    //
-    // 理由: ThrusterSolverは艦が進入軸をわずかにまたいだだけでの
-    // 判定振動を防ぐため、v23時点からヒステリシスを持たせている
-    // （一度「手前側」と判定されたら、DOCKING_APPROACH_SIDE_EXIT_MARGIN
-    // を明確に下回るまでは「手前側」の判定を維持する）。ところが
-    // この可視化側は単純な符号だけで判定していたため、実際の艦の
-    // 制御（ベジエ追従が続いている）と可視化（予定航路が消える）が
-    // 食い違い、「進入軸の座標的に目的地を過ぎた位置にいると予定
-    // 航路が出なくなる」という不具合として現れていた。
-    //
-    // 呼び出し順（index.html）はShipController.update→
-    // ApproachVisualizer.updateなので、この時点でship.
-    // _dockingOnApproachSideは今フレーム分の判定が既に済んでいる。
-    // ここで改めてヒステリシス関数を呼ぶと状態を二重に動かして
-    // しまうため、書き込み済みの値を読むだけにする。
-    const onApproachSide = ship._dockingOnApproachSide !== false;
+    const phase = ship._dockingPhase || 'cruise';
+    let points = null;
 
-    // 艦が目的地の奥側に出てしまっている間は、通常フェーズのベジエ
-    // 経路そのものが使われない（ThrusterSolver側もフォールバック
-    // する）ため、可視化上も経路を引かない。
-    if (!onApproachSide) return;
+    switch (phase) {
+      case 'cruise':
+      case 'approach':
+      case 'adjust': {
+        const params = ThrusterSolver._getDockingParams(target);
+        const lateralVec = {
+          x: toTargetWorld.x - approachAxisWorld.x * vecDot(toTargetWorld, approachAxisWorld),
+          y: toTargetWorld.y - approachAxisWorld.y * vecDot(toTargetWorld, approachAxisWorld),
+          z: toTargetWorld.z - approachAxisWorld.z * vecDot(toTargetWorld, approachAxisWorld),
+        };
+        const lateral = vecLength(lateralVec);
 
-    const rawVirtualTargetPos = ThrusterSolver._computeVirtualApproachTarget(
-      target,
-      approachAxisWorld,
-      ship.position
-    );
-    // v43: ThrusterSolver側（_buildDesiredForAutoDocking）と同じ迂回
-    // 判定をここでも通す。実際に艦が辿る経路（迂回点経由になりうる）と
-    // 表示上の予定航路を一致させるため。同一フレーム内で既に
-    // ShipController.update経由（index.htmlの呼び出し順）で一度
-    // 判定済みの状態(ship._dockingAvoidanceWaypoint)をそのまま読む
-    // だけなので、ここで呼んでも二重に状態が動くことはない。
-    const virtualTargetPos = ThrusterSolver._computeApproachAvoidanceWaypoint(
-      ship,
-      target,
-      approachAxisWorld,
-      rawVirtualTargetPos
-    );
-    const virtualTarget = { position: virtualTargetPos, quaternion: target.quaternion };
-    const distanceToVirtual = vecLength({
-      x: virtualTargetPos.x - ship.position.x,
-      y: virtualTargetPos.y - ship.position.y,
-      z: virtualTargetPos.z - ship.position.z,
-    });
+        // v46: _computeAvoidanceWaypointは進入軸上の固定中間地点を
+        // 返すだけになった（ThrusterSolver._runApproachPhase参照）。
+        // 経由させるかどうかの判定も同じロジックをここで再現する:
+        // 艦がまだその固定地点よりtargetから遠い側にいる間だけ経由。
+        const shipAlong = -vecDot(
+          { x: ship.position.x - target.position.x, y: ship.position.y - target.position.y, z: ship.position.z - target.position.z },
+          approachAxisWorld
+        );
+        const avoidanceAlong = params.VIRTUAL_WAYPOINT_OFFSET + params.AVOIDANCE_RADIUS;
+        const needsAvoidance =
+          phase !== 'cruise' && lateral > 1e-3 && shipAlong > avoidanceAlong + 1e-3;
 
-    const bezier = ThrusterSolver._buildApproachBezier(
-      ship,
-      virtualTarget,
-      approachAxisWorld,
-      distanceToVirtual
-    );
+        const virtualWP = ThrusterSolver._computeVirtualWaypoint(target, approachAxisWorld, distance, params);
+        const waypoints = [{ x: ship.position.x, y: ship.position.y, z: ship.position.z }];
+        if (needsAvoidance) {
+          waypoints.push(ThrusterSolver._computeAvoidanceWaypoint(ship, target, approachAxisWorld, params));
+        }
+        waypoints.push(virtualWP);
+        points = waypoints;
+        points = points.concat(this._extendAlongAxis(virtualWP, approachAxisWorld, -1));
+        break;
+      }
+      case 'return_to_axis': {
+        // ThrusterSolver._runReturnToAxisPhaseと同じく、進入軸上の
+        // 固定中間地点をそのまま経由先とする。
+        const params = ThrusterSolver._getDockingParams(target);
+        const returnTarget = ThrusterSolver._computeAvoidanceWaypoint(ship, target, approachAxisWorld, params);
+        points = [
+          { x: ship.position.x, y: ship.position.y, z: ship.position.z },
+          returnTarget,
+        ];
+        points = points.concat(this._extendAlongAxis(returnTarget, approachAxisWorld, -1));
+        break;
+      }
+      case 'brake300':
+      case 'brake250': {
+        const alongDist = vecDot(toTargetWorld, approachAxisWorld);
+        const axisPointAtSameDistance = {
+          x: target.position.x - approachAxisWorld.x * alongDist,
+          y: target.position.y - approachAxisWorld.y * alongDist,
+          z: target.position.z - approachAxisWorld.z * alongDist,
+        };
+        points = [
+          { x: ship.position.x, y: ship.position.y, z: ship.position.z },
+          axisPointAtSameDistance,
+          { x: target.position.x, y: target.position.y, z: target.position.z },
+        ];
+        points = points.concat(this._extendAlongAxis(target.position, approachAxisWorld, -1));
+        break;
+      }
+      case 'final_approach': {
+        points = [
+          { x: ship.position.x, y: ship.position.y, z: ship.position.z },
+          { x: target.position.x, y: target.position.y, z: target.position.z },
+        ];
+        points = points.concat(this._extendAlongAxis(target.position, approachAxisWorld, -1));
+        break;
+      }
+      case 'tunnel': {
+        points = [{ x: ship.position.x, y: ship.position.y, z: ship.position.z }]
+          .concat(this._extendAlongAxis(ship.position, approachAxisWorld, -1));
+        break;
+      }
+      case 'overshoot': {
+        // 奥側へ抜けていく方向は、tunnelと同じ進入軸マイナス方向
+        // （target側へ向かい、さらに通り抜けた先へ進み続ける）。
+        // approachAxisWorldは「target→艦が来る側(手前側)」を向く
+        // ベクトルなので、奥へ進む向きは-approachAxisWorld＝dirSign=-1。
+        points = [{ x: ship.position.x, y: ship.position.y, z: ship.position.z }]
+          .concat(this._extendAlongAxis(ship.position, approachAxisWorld, -1));
+        break;
+      }
+      case 'docked':
+      default:
+        return;
+    }
 
-    const points = this._sampleRoutePolyline(bezier, virtualTargetPos, approachAxisWorld);
-    if (points.length < 2) return;
+    if (!points || points.length < 2) return;
 
     const geo = new THREE.BufferGeometry().setFromPoints(
       points.map((p) => new THREE.Vector3(p.x, p.y, p.z))
@@ -324,59 +364,19 @@ const ApproachVisualizer = {
     this._routeGroup = line;
   },
 
-  // ベジエ(P0=艦位置 -> P3=仮想ウェイポイント)を弧長ベースで
-  // MARKER_INTERVAL間隔にサンプリングした頂点列を返し、曲線が
-  // 尽きた後は仮想ウェイポイントから進入軸方向へ延長した頂点を
-  // 足してMARKER_RANGEまで埋める。折れ線描画用の頂点列そのもの
-  // （点オブジェクトは作らない）。
-  _sampleRoutePolyline(bezier, virtualTargetPos, approachAxisWorld) {
-    const SEGMENTS = 48;
-    const result = [{ x: bezier.p0.x, y: bezier.p0.y, z: bezier.p0.z }];
-
-    let prev = bezier.p0;
-    let accumulated = 0;
-    let nextMarkerAt = this.MARKER_INTERVAL;
-    let bezierLength = 0;
-
-    for (let i = 1; i <= SEGMENTS; i++) {
-      const t = i / SEGMENTS;
-      const point = ThrusterSolver._evalBezier(bezier, t);
-      const segLen = vecLength({
-        x: point.x - prev.x,
-        y: point.y - prev.y,
-        z: point.z - prev.z,
-      });
-
-      while (nextMarkerAt <= accumulated + segLen && nextMarkerAt <= this.MARKER_RANGE) {
-        const remain = nextMarkerAt - accumulated;
-        const segT = segLen > 1e-6 ? remain / segLen : 0;
-        result.push({
-          x: prev.x + (point.x - prev.x) * segT,
-          y: prev.y + (point.y - prev.y) * segT,
-          z: prev.z + (point.z - prev.z) * segT,
-        });
-        nextMarkerAt += this.MARKER_INTERVAL;
-      }
-
-      accumulated += segLen;
-      prev = point;
-    }
-    bezierLength = accumulated;
-
-    // ベジエ終端（仮想ウェイポイント）以降、まだMARKER_RANGEに
-    // 達していなければ進入軸に沿った直線（仮想ウェイポイント->
-    // target.position、さらにその先も同じ方向）で頂点を延長する。
-    while (nextMarkerAt <= this.MARKER_RANGE) {
-      const remain = nextMarkerAt - bezierLength;
-      result.push({
-        x: virtualTargetPos.x + approachAxisWorld.x * remain,
-        y: virtualTargetPos.y + approachAxisWorld.y * remain,
-        z: virtualTargetPos.z + approachAxisWorld.z * remain,
-      });
-      nextMarkerAt += this.MARKER_INTERVAL;
-    }
-
-    return result;
+  // fromPointから進入軸に沿ってMARKER_RANGE分だけ延長した終点を
+  // 1点だけ返す（線分は始点fromPointと合わせて呼び出し側で作る）。
+  // approachAxisWorldは「target→艦が来る側(手前側)」を向く単位
+  // ベクトルなので、dirSign=-1でtarget方向（さらにその先の出口
+  // 側）、dirSign=+1でその逆（艦の背後）へ延長する。tunnel/
+  // overshootはどちらもtarget方向へ向かい続ける動きのため-1を渡す
+  // （cruise/approach/adjust/brake系のtarget方向延長と同じ向き）。
+  _extendAlongAxis(fromPoint, approachAxisWorld, dirSign) {
+    return [{
+      x: fromPoint.x + approachAxisWorld.x * this.MARKER_RANGE * dirSign,
+      y: fromPoint.y + approachAxisWorld.y * this.MARKER_RANGE * dirSign,
+      z: fromPoint.z + approachAxisWorld.z * this.MARKER_RANGE * dirSign,
+    }];
   },
 
   _disposeGroup(obj) {

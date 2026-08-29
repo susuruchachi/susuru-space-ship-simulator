@@ -22,16 +22,16 @@ const FlightPhysics = {
   //   dt: デルタタイム(秒)
   // -----------------------------------------------------------
   step(ship, input, dt) {
-    // v18: 自動操船中、目的地までの距離が1未満かつ現在速度も1未満に
-    // なったら「到着」とみなし、スラスターを一切使わず艦をシステム
-    // 側で目的地の位置・姿勢へ完全固定する（速度・角速度もゼロに
-    // 落とす）。_lockHeadingIfWithinTolerance（03-thruster-solver.js）
-    // と同じ「オートパイロットの補助機能として状態へ直接介入する」
-    // 考え方の延長で、位置についても最終的にはスラスター制御に
-    // 頼らずロックする。これ以降は通常のソルバー/積分処理を
-    // 一切通さないため、以後の手動入力・自動制御力は無視される
-    // （自動操船をOFFにすれば通常の物理へ復帰する）。
-    if (this._tryLockAtDockingArrival(ship)) return;
+    // v46: 自動操船の入港判定・固定はThrusterSolver側のステート
+    // マシン（ship._dockingPhase、_meetsArrivalCriteria/
+    // _lockShipAtTarget）に一本化した。'docked'フェーズになった
+    // 時点で位置・姿勢・速度は既に目的地へ固定済みのため、ここでは
+    // 通常のソルバー/積分処理そのものを丸ごとスキップするだけで
+    // よい（以後の手動入力・自動制御力は無視される。自動操船を
+    // OFFにすれば通常の物理へ復帰する）。
+    if (ship.autoDockingEnabled && State.dockingTarget && ship._dockingPhase === 'docked') {
+      return;
+    }
 
     const { desiredForce, desiredTorque } = ThrusterSolver.buildDesiredFromInput(input, ship, dt);
 
@@ -48,107 +48,6 @@ const FlightPhysics = {
 
     this._applyThrusters(ship, ratios, dt);
     this._applySpeedCap(ship, dt);
-  },
-
-  // -----------------------------------------------------------
-  // v18: 自動操船中の到着判定＋完全固定。
-  //   条件: ship.autoDockingEnabled && State.dockingTarget があり、
-  //         目的地までの距離 < DOCKING_ARRIVAL_DISTANCE (既定1) かつ
-  //         現在速度 < DOCKING_ARRIVAL_SPEED (既定1)。
-  //   固定内容: position/quaternionを目的地の値へ直接セットし、
-  //   velocity/angularVelocityをゼロにする。スラスター出力比
-  //   （ship.thrusterOutputRatios、HUD/エンジンFXが参照）も全て0に
-  //   落とし、「スラスターを使わず止まっている」ことが見た目にも
-  //   一致するようにする。
-  //   一度固定に入ったら、艦がその場から動く要因（外力等）は
-  //   このゲーム内には存在しないため、自動操船がONかつ目的地が
-  //   変わらない限りロックされ続ける。
-  //
-  //   v34: 距離・速度だけを見て固定していたため、ヨー反転などで
-  //   最終進入(inFinalApproach)に一度も入れないまま姿勢が揃わず
-  //   入港（固定）してしまう不具合があった。対応として、固定条件に
-  //   以下の2つを追加する。
-  //     (1) 直前フレームが最終進入フェーズだったこと
-  //         （ship._dockingWasInFinalApproach、03-thruster-solver.js
-  //         の_buildDesiredForAutoDockingが毎フレーム更新する。この
-  //         関数はFlightPhysics.stepの中で本メソッドの後に呼ばれる
-  //         ため、ここで参照できるのは常に「直前フレーム時点」の値。
-  //         これにより「最終進入から切り替わる場合」以外での固定を
-  //         防ぐ）。
-  //     (2) 船の姿勢が実際に目的地の保存済み姿勢と揃っていること
-  //         （heading・rollの両方をDOCKING_FINAL_APPROACH_HEADING_
-  //         READY_ANGLE / DOCKING_ARRIVAL_ROLL_READY_ANGLE以内で判定）。
-  // -----------------------------------------------------------
-  DOCKING_ARRIVAL_DISTANCE: 1.0,
-  DOCKING_ARRIVAL_SPEED: 1.0,
-  // roll角の到着許容角度(rad)。heading側はThrusterSolver.
-  // DOCKING_FINAL_APPROACH_HEADING_READY_ANGLE（最終進入フェーズに
-  // 入るための基準）をそのまま流用し、rollだけこちらで別途定義する
-  // （最終進入フェーズはheadingのみを条件にしておりrollまでは
-  // 見ていないため）。
-  DOCKING_ARRIVAL_ROLL_READY_ANGLE: 0.14,
-
-  // 船の姿勢が目的地の保存済み姿勢とheading・rollの両方で揃っているか。
-  _isAttitudeReadyForArrival(ship, target) {
-    const approachAxisWorld = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion));
-    const approachAxisLocal = rotateVecByQuat(approachAxisWorld, conjugateQuat(ship.quaternion));
-    const headingErrorFromAxis = Math.acos(clamp(-approachAxisLocal.z, -1, 1));
-    if (headingErrorFromAxis > ThrusterSolver.DOCKING_FINAL_APPROACH_HEADING_READY_ANGLE) {
-      return false;
-    }
-
-    const rollError = ThrusterSolver._computeRollErrorAngle(ship, target);
-    return Math.abs(rollError.angle) <= this.DOCKING_ARRIVAL_ROLL_READY_ANGLE;
-  },
-
-  _tryLockAtDockingArrival(ship) {
-    if (!ship || !ship.autoDockingEnabled || !State.dockingTarget) return false;
-
-    const target = State.dockingTarget;
-    const dx = target.position.x - ship.position.x;
-    const dy = target.position.y - ship.position.y;
-    const dz = target.position.z - ship.position.z;
-    const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    const speed = vecLength(ship.velocity);
-
-    if (distance >= this.DOCKING_ARRIVAL_DISTANCE || speed >= this.DOCKING_ARRIVAL_SPEED) {
-      return false;
-    }
-
-    // v34: 最終進入から切り替わる場合のみ固定を許可する。
-    if (!ship._dockingWasInFinalApproach) {
-      return false;
-    }
-
-    // v34: 姿勢（heading・roll）が実際に揃っていることも固定条件にする。
-    if (!this._isAttitudeReadyForArrival(ship, target)) {
-      return false;
-    }
-
-    ship.position.x = target.position.x;
-    ship.position.y = target.position.y;
-    ship.position.z = target.position.z;
-
-    ship.quaternion.x = target.quaternion.x;
-    ship.quaternion.y = target.quaternion.y;
-    ship.quaternion.z = target.quaternion.z;
-    ship.quaternion.w = target.quaternion.w;
-
-    ship.velocity.x = 0;
-    ship.velocity.y = 0;
-    ship.velocity.z = 0;
-
-    ship.angularVelocity.x = 0;
-    ship.angularVelocity.y = 0;
-    ship.angularVelocity.z = 0;
-
-    // スラスター側の表示・演出もゼロに揃える
-    for (const t of ship.thrusters) {
-      ship.thrusterOutputRatios[t.id] = 0;
-    }
-    ship.isAtMaxSpeed = false;
-
-    return true;
   },
 
   // -----------------------------------------------------------

@@ -541,6 +541,80 @@ const ThrusterSolver = {
     return false;
   },
 
+  // -----------------------------------------------------------
+  // 艦の姿勢と目的地の保存済み姿勢(target.quaternion)を比較し、
+  // roll誤差角を返す。target.quaternionが定める「上ベクトル」を
+  // ローカル座標へ変換し、艦の現在のローカルZ軸（船首-方向の
+  // 逆＝ローカル+Z）まわりに見て、艦のローカルY軸からどれだけ
+  // ズレているかをroll誤差角として返す。
+  //
+  // 単純に「目標の上ベクトルと艦の上ベクトルのなす角」を使うと、
+  // 艦がまだ目標方向を向ききっていない（pitch/yawが大きくズレて
+  // いる）間はそのズレ自体がroll誤差に混入し、不要なroll回転を
+  // 誘発してしまう。それを避けるため、艦のローカルZ軸（現在の
+  // 船首軸）を基準にした平面へ目標の上ベクトルを投影してから
+  // 角度を測る＝「今向いている方向を軸として、上方向だけがどれだけ
+  // 傾いているか」を見る形にしている。
+  //
+  // 戻り値: { angle, axis } のうちaxisはローカルpitch/yaw成分を
+  // 含まない純粋なroll軸（0,0,±1相当）方向で、符号がそのまま
+  // 回頭すべき向きを表す。
+  // -----------------------------------------------------------
+  _computeRollErrorAngle(ship, target) {
+    const targetUpWorld = rotateVecByQuat({ x: 0, y: 1, z: 0 }, target.quaternion);
+    const targetUpLocal = rotateVecByQuat(targetUpWorld, conjugateQuat(ship.quaternion));
+
+    // 艦のローカルZ軸（船首軸）成分を取り除き、Z軸まわりの平面へ投影
+    const projected = { x: targetUpLocal.x, y: targetUpLocal.y, z: 0 };
+    const projLen = vecLength(projected);
+    if (projLen < 1e-6) {
+      // 目標の上方向がほぼ艦の船首軸と一致（＝roll軸として不定）。
+      // 極めて稀（目的地姿勢が艦の現在の船首方向と同じ軸を向いて
+      // いる場合）で、この場合はroll誤差を評価できないため0を返す。
+      return { angle: 0, axis: { x: 0, y: 0, z: 1 } };
+    }
+    const currentUpLocal = { x: 0, y: 1, z: 0 };
+    const projNorm = vecScale(projected, 1 / projLen);
+
+    // currentUpLocal(0,1,0)からprojNormへの回転角・向きをZ軸まわりで求める。
+    // 2D外積(x1*y2 - y1*x2)で符号、内積でcos角を得る（atan2で安定に）。
+    const cross = currentUpLocal.x * projNorm.y - currentUpLocal.y * projNorm.x;
+    const dot = currentUpLocal.x * projNorm.x + currentUpLocal.y * projNorm.y;
+    const angle = Math.atan2(cross, dot);
+    // axisは(0,0,1)固定。angleの符号がそのまま「艦のローカル+Z軸周り
+    // にangleだけ回せば目標に一致する」向きに対応する。
+    return { angle, axis: { x: 0, y: 0, z: 1 } };
+  },
+
+  // -----------------------------------------------------------
+  // 艦の船首方向(noseLocal)から目標方向(dirLocal)へ向けるための
+  // 回転角・回転軸を求める。ほぼ真後ろ（180°近く）を向きたい場合の
+  // 外積縮退（sin(θ)がθ=90°を軸に対称なため、外積の長さだけでは
+  // 「ほぼ正面」と「ほぼ真後ろ」を区別できない）に対応するため、
+  // atan2(|cross|, dot)で0..πの全域について正しい角度を求める。
+  // ちょうど180°付近で回転軸が数学的に不定になる場合は、仮の
+  // 回転軸（艦のローカルX軸）で旋回のきっかけを作る。
+  // -----------------------------------------------------------
+  _computeHeadingAngleAndAxis(noseLocal, dirLocal) {
+    const axis = vecCross(noseLocal, dirLocal);
+    const crossLen = vecLength(axis);
+    const dot = clamp(vecDot(noseLocal, dirLocal), -1, 1);
+    const angle = Math.atan2(crossLen, dot); // 0..π（180°付近も含め正確）
+
+    let axisNorm;
+    if (crossLen > 1e-6) {
+      axisNorm = vecScale(axis, 1 / crossLen);
+    } else if (angle > Math.PI / 2) {
+      // 外積が縮退する特異点（ほぼ真後ろ）。回転軸は数学的に不定
+      // なので、仮の軸（艦のローカルX軸）で旋回のきっかけを作る。
+      axisNorm = { x: 1, y: 0, z: 0 };
+    } else {
+      axisNorm = { x: 0, y: 0, z: 0 };
+    }
+
+    return { angle, axis: axisNorm };
+  },
+
   // v08: 自動操船（入港）関連の調整値
   // v15: 「目的地が遠くてもまず姿勢合わせのRCSばかり吹いて主機が
   // 働かない」という報告を受け、フルトルクになる角度閾値を約3倍に
@@ -549,456 +623,34 @@ const ThrusterSolver = {
   // 目的方向にヘディングが収束した際は_lockHeadingIfWithinTolerance()
   // が残留角速度を強制的に切り捨てて即座に完全静止させるため、
   // 「弱めた分だけいつまでも微調整し続ける」ことにはならない。
+  // v46: 姿勢制御（heading/roll）の比例トルク用の角度閾値。
+  // 遠方（cruise/approach/adjust）では緩め、brake300/brake250/
+  // final_approach/tunnel直前では厳しめにして「近づくほど姿勢を
+  // きっちり合わせる」挙動にする。_computeHeadingFullTorqueAngleで
+  // 距離に応じて両者を線形補間する。
   DOCKING_HEADING_FULL_TORQUE_ANGLE: 1.05, // 船首と目的方向のなす角(rad)がこれ以上でフルトルク、未満は比例して弱める（約60°）
-  DOCKING_HEADING_MIN_ANGLE: 0.005, // これ未満の角度差は補正不要（微小振動防止、HEADING_LOCK_TOLERANCE_DEGより粗い一次判定として残置）
-  // v22: 「自動操船中、rollは目標(0)へは収束するが、目的地に保存
-  // されたroll角そのものへは合わせにいかない」という報告への対応。
-  // 従来はrollの手動入力を拒否して角速度ダンピングで止めるだけで、
-  // 目的地のroll角を追いかけるトルクを一切発生させていなかった。
-  // ここからはautoRollLockActive中（距離800以内）、pitch/yawと
-  // 同じ比例制御スキームでroll角も目的地の保存済み姿勢へ揃える
-  // （_computeRollErrorAngle参照）。
+  // これ未満の角度差は補正不要（微小振動防止）。約0.006°で、
+  // HEADING_LOCK_TOLERANCE_DEG(0.01°)より厳しい値にしてある。
+  // 入港基準ARRIVAL_HEADING_ERROR_DEG(0.1°)より緩い値にすると、
+  // 「まだ入港基準を満たしていないのに補正不要と判定されて
+  // 収束が止まる」デッドゾーンができてしまうため、ロック判定
+  // よりさらに小さい値を選ぶ必要がある。
+  DOCKING_HEADING_MIN_ANGLE: 0.0001,
   DOCKING_ROLL_FULL_TORQUE_ANGLE: 1.05, // roll誤差(rad)がこれ以上でフルトルク（pitch/yawの遠方用と同じ緩さ、約60°）
-  DOCKING_ROLL_MIN_ANGLE: 0.005, // これ未満のroll誤差は補正不要（微小振動防止）
-  // v23: 「進入軸から大きく横にズレた位置から入港すると、姿勢が
-  // 一瞬で揃った状態から目的地の方角へ急変し、往復することもある」
-  // という報告への対応。
-  //
-  // 原因: onApproachSide（艦が進入軸上の手前側にいるか）は
-  // alongDistWorld（艦から目的地への方向ベクトルと進入軸の内積）の
-  // 符号だけで判定していた。艦が進入軸から大きく横にズレた位置に
-  // いると、実際にはまだ十分手前にいても、艦が進入軸方向へわずか
-  // 前後に動くだけでこの内積が0付近を跨ぎ、onApproachSideが
-  // true/falseを頻繁に反転してしまう（横ズレが150あるのにZが
-  // ±10程度動いただけで符号が変わる、というシミュレーションで
-  // 確認済み）。onApproachSide=falseになると最終進入の姿勢固定
-  // ロジック全体（_computeHeadingTargetDirWorld、inFinalApproachZone
-  // 判定）が無効化され、姿勢目標が一気に「目的地の方角」へ
-  // ジャンプする。
-  //
-  // 対策: ヒステリシス化する。一度「手前側」と判定されたら、
-  // alongDistWorldがこのマージンを下回る（＝明確に奥まで通り越す）
-  // までは「手前側」の判定を維持する（_computeOnApproachSideWithHysteresis
-  // 参照、判定結果はship._dockingOnApproachSideにキャッシュする）。
-  DOCKING_APPROACH_SIDE_EXIT_MARGIN: -20.0, // この値(alongDistWorld)を下回って初めて「奥側に出た」と判定する
+  DOCKING_ROLL_MIN_ANGLE: 0.0001, // これ未満のroll誤差は補正不要（DOCKING_HEADING_MIN_ANGLEと同じ理由）
 
-  // v27: 「オーバーシュートすると最終進入から通常の接近中フェーズへ
-  // 戻ってしまい、そのまま目的地の方角へ突っ込むだけで、きちんと
-  // 再アプローチ（進入軸まで戻って向き直してから入り直す）してくれ
-  // ない」という報告への対応。
-  //
-  // 従来の挙動: onApproachSide=falseになると、_computeHeadingTargetDirWorld
-  // が単純に「目的地の方角」を返すだけだった。これだと目的地の
-  // 真後ろ側から突っ込んだ場合、進入軸を無視して目的地へ直進
-  // →また逆側へ抜ける、を繰り返しかねない。
-  //
-  // 対策: 再アプローチ専用のウェイポイントを進入軸の手前側
-  // （target.position + approachAxisWorld * REAPPROACH_WAYPOINT_DISTANCE、
-  // 通常の入口とほぼ同じ位置）に置き、オーバーシュートを検知した
-  // 瞬間からship._dockingReapproachingをtrueにする。この間は
-  // 目的地そのものではなくこのウェイポイントへ向けて飛ばすことで、
-  // 一旦進入軸の手前まで戻ってから改めて正規の進入コースに乗り
-  // 直す（＝ベジエ接近ロジックがまた効くようになる）形にする。
-  // ウェイポイントに十分近づき、かつ進入軸に沿う向きまで戻れたら
-  // （＝onApproachSideが再びtrueに戻ったら）通常の接近ロジックへ
-  // 復帰する。
-  //
-  // v29: 「再アプローチが最終進入からのオーバーシュート以外
-  // （通常接近フェーズでのはみ出しなど）でも発動してしまう」との
-  // 報告を受け、発動条件を「直前フレームまで実際に最終進入フェーズ
-  // (inFinalApproach)にいた場合に限る」よう
-  // _computeOnApproachSideWithHysteresis側で絞った
-  // （ship._dockingWasInFinalApproach参照）。それ以外での
-  // onApproachSide=false（例: 遠方でのはみ出し）は、従来通り
-  // 「目的地の方角」を向く単純なフォールバック(v17)のみで対応する。
-  DOCKING_REAPPROACH_WAYPOINT_DISTANCE: 250.0, // 進入軸手前側、目的地からこの距離のウェイポイントへ一旦戻る
-
-  // v30: 「再アプローチを、目的地の方角へ機首を素早く向け直す動きでは
-  // なく、飛行機のゴーアラウンドのように進行方向を保ったままヨーだけで
-  // 円軌道を描いて反転させたい」という要望への対応。
-  //
-  // オーバーシュートを検知した瞬間（ship._dockingReapproachingが
-  // falseからtrueへ切り替わる瞬間）の艦の位置と水平面（艦のワールド
-  // 上方向に垂直な面）内の進行方向から、水平面内の円（旋回円）を
-  // 一度だけ構築してship._dockingGoAroundにキャッシュする
-  // （_startGoAroundTurn参照）。円の中心は進行方向から見て進入軸
-  // （approachAxisWorldの逆方向、＝再アプローチウェイポイント側）に
-  // 近い側へ90°の位置に置くことで、旋回が自然に「進入軸の手前側へ
-  // 戻ってくる」向きになる。
-  //
-  // 以後は_computeGoAroundHeadingDirWorldが、艦から見て円周上を
-  // DOCKING_BEZIER_LOOKAHEAD_DISTANCE相当だけ先読みした点を姿勢の
-  // 目標方向として返す（ベジエの先読み点方式と同じPure Pursuit的な
-  // 考え方）。円弧上を半周（180°）進むか、再アプローチウェイポイント
-  // に十分近づいたら通常のウェイポイント追従（_computeReapproachWaypointDirWorld）
-  // に引き継ぐ（_isGoAroundComplete参照）。
-  DOCKING_GO_AROUND_RADIUS: 220.0, // ゴーアラウンド旋回円の半径
-  // 円弧に沿った先読み距離。ベジエと同じ値を既定にして曲がり方の
-  // 体感速度を揃える。
-  DOCKING_GO_AROUND_LOOKAHEAD_DISTANCE: 150.0,
-  // 円弧をどこまで辿ったら通常の再アプローチウェイポイント追従へ
-  // 引き継ぐか（ラジアン、Math.PIで半周＝180°）。180°より少し手前で
-  // 切り上げることで、円弧の終端とウェイポイント方向のなめらかな
-  // 接続を確保する。
-  DOCKING_GO_AROUND_MAX_ARC: 2.8, // 約160°
-  DOCKING_POSITION_FULL_THRUST_DISTANCE: 60.0, // 目的地までの距離がこれ以上でフル推力、未満は比例して弱める
-  DOCKING_POSITION_MIN_DISTANCE: 0.15, // これ未満の距離は接近推力を止める（振動防止、あとは速度制動のみで静止させる）
-  // v15: 「目的地が10万離れていても速度4で頭打ちになり、主機出力が
-  // 0%に張り付く」という報告への対応。
-  //
-  // 原因: DOCKING_APPROACH_SPEED_FULL_BRAKE（速度ブレーキがフルに
-  // なる速度）が距離を一切考慮しない固定値だったため、目的地が
-  // どれだけ遠くても「速度がこの値に達したら全力ブレーキ」が働き、
-  // 接近力とブレーキ力がほぼ相殺してdesiredForce.zが実質ゼロに
-  // なっていた（本来このブレーキは接近末期のオーバーシュート防止用）。
-  //
-  // 対策: ブレーキの基準速度（この速度でフルブレーキになる）を、
-  // 距離に応じて動的に伸縮させる。
-  //   - 距離が DOCKING_POSITION_FULL_THRUST_DISTANCE 以内: 従来通り
-  //     DOCKING_APPROACH_SPEED_FULL_BRAKE（近接時の基準）に絞る。
-  //   - 距離が DOCKING_APPROACH_SPEED_TAPER_DISTANCE 以上: 艦の
-  //     maxSpeedまで基準を引き上げる（＝実質ブレーキがかからず
-  //     加速し続けられる）。
-  //   - その間は距離に応じて線形補間する。
-  // これにより「遠方ではフル加速、目的地に近づくにつれ従来通り
-  // 穏やかに減速」という自然な挙動になる。
-  DOCKING_APPROACH_SPEED_FULL_BRAKE: 4.0, // 目的地付近（近接時）でのオーバーシュート防止用ブレーキが最大になる速度の基準値
-  DOCKING_APPROACH_SPEED_TAPER_DISTANCE: 600.0, // この距離以上では速度上限をship.maxSpeedまで緩める（近接時基準からの遷移距離）
-
-  // v17: 「オートドッキングが目的地を通り越しがち」「距離200を
-  // 切ったら姿勢を整えてまっすぐ入港してほしい」という要望対応。
-  //
-  // 最終進入フェーズ: 目的地までの距離がこの値以下になったら、
-  //   - 船首の向きを「現在位置→目的地」ではなく「目的地の保存済み
-  //     姿勢（State.dockingTarget.quaternion）そのもの」に合わせる。
-  //     これにより最終進入軸が固定され、目的地に着くまで機体が
-  //     ふらつかず、常に同じ直線上をまっすぐ進入する形になる。
-  //   - 横方向（ローカルX/Y）の速度・位置ずれを強めに制動し、
-  //     ふらつきを早めに消し込む。
-  //   - 前後方向は_computeDockingStoppingDistance()による制動距離
-  //     ベースのブレーキに切り替え、「通り越す」オーバーシュートを
-  //     防ぐ。
-  DOCKING_FINAL_APPROACH_DISTANCE: 200.0,
-
-  // v30: 「最終進入(距離200)に入る前から、目的地そのものではなく
-  // 進入軸上の手前側にある仮想ウェイポイントを目指してほしい。
-  // 距離200に入る時点で既に位置・姿勢とも進入軸にきっちり乗って
-  // いれば、そこから先はほぼ直進(並進スラスターにほぼ頼らない)
-  // だけで入港できるはず」という要望への対応。
-  //
-  // 従来のベジエ接近(_buildApproachBezier)はP3(終点)を常に
-  // target.positionそのものに置いていた。曲線終端が本物の目的地に
-  // 向かって収束するため、距離200へ近づくにつれ曲線の接線が
-  // 「目的地そのものへの直線」に寄っていき、進入軸への収束が
-  // 十分な余裕をもって完了しないことがあった。
-  //
-  // 対策: 通常フェーズ（最終進入に入るまで）の間、姿勢・並進の
-  // 両方が目指す先をtarget.positionではなく、進入軸上でtarget.
-  // positionからapproachAxisWorldの逆方向へこのDISTANCE分だけ
-  // 戻った仮想ウェイポイント（_computeVirtualApproachTarget参照）に
-  // 差し替える。艦はこの仮想ウェイポイントに向けてベジエ曲線・
-  // 通常接近ロジックを解くため、距離200へ到達する頃には自然と
-  // 「進入軸上、姿勢も揃った状態」に収束している。
-  //
-  // 距離200を切って本物の最終進入フェーズ(inFinalApproach)に入って
-  // からは、従来通り_buildFinalApproachForceが本物のtarget.position
-  // （toTargetWorldは実距離）を見て直進・制動を行う。
-  //
-  // v36: 「姿勢だけ揃えて200圏内で停止しても、位置が進入軸から
-  // 大きくずれていると最終進入に入れない（＝そのまま入港できない）」
-  // という報告への対応。従来はこの値がDOCKING_FINAL_APPROACH_
-  // DISTANCE（200）と同じで、仮想ウェイポイント到達＝実距離400
-  // 付近というタイミングしか位置合わせの猶予がなかった。
-  //
-  // v38: 当初はDOCKING_HEADING_BLEND_END_DISTANCEと同じ500に
-  // 揃えていたが、これだと実距離500付近で「艦が実際に狙っている
-  // 仮想ウェイポイントまでの残り距離」がほぼ0になり、ベジエの
-  // ハンドル長・先読み点が潰れて姿勢目標が不安定になる（「距離500で
-  // 船の向きがおかしくなる」「何度も500に戻ろうとする」不具合の
-  // 原因）。通常フェーズの並進制御は仮想ウェイポイント（＝実距離
-  // 500の点）そのものへブレーキ＋接近力をかけ続けるため、そこを
-  // 行き過ぎても姿勢が整うまで何度でも押し戻されていた。
-  // 対策: DOCKING_HEADING_BLEND_END_DISTANCEを300へ引き下げ、姿勢
-  // ブレンドが確定する距離と仮想ウェイポイントの位置(500)をあえて
-  // ずらした。実距離500の時点ではまだブレンド中（仮想ウェイポイント
-  // までまだ十分距離がある）でベジエが安定し、300で位置・姿勢とも
-  // 収束させたあと、300→200の100の区間を回頭の遅れを吸収する猶予に
-  // 充てる。
-  DOCKING_VIRTUAL_TARGET_OFFSET: 500.0,
-
-  // v43: 「進入軸に乗って、正しい方向から入るまで距離200
-  // (DOCKING_FINAL_APPROACH_DISTANCE)に入らないようにしてほしい。
-  // 出口側から接近するなど、仮想ウェイポイントへ直線で向かうと
-  // その途中で距離200圏内をかすめてしまう場合は、距離500以上の
-  // 範囲を通って迂回してほしい」という要望への対応。
-  //
-  // 背景: 通常フェーズは艦の現在位置から仮想ウェイポイント
-  // （_computeVirtualApproachTarget、進入軸上・target.positionの
-  // 手前側）へ、姿勢はベジエ先読み、並進はほぼ直線的に向かう
-  // （_buildApproachBezierのP3・approachTargetWorldとも同じ
-  // 仮想ウェイポイントを終点にする）。艦がまだ進入軸から大きく
-  // 外れた位置（特に出口側寄り、target.positionを挟んで仮想
-  // ウェイポイントの反対側に近い位置）にいると、艦の現在位置→
-  // 仮想ウェイポイントを結ぶ直線そのものがtarget.positionのすぐ
-  // 脇（距離200未満）を通ってしまうことがある。これだと「正しい
-  // 進入方向・正しい姿勢が整う前に距離200圏内（最終進入ゾーン）へ
-  // 入ってしまう」ことになり、意図しない角度で最終進入フェーズへ
-  // 突入しかねない。
-  //
-  // 対策: 通常フェーズが実際に目指す先（仮想ウェイポイント、
-  // _computeVirtualApproachTarget）を確定した直後、艦の現在位置
-  // からその点までの直線がtarget.positionにDOCKING_FINAL_APPROACH_
-  // DISTANCE未満まで接近するかを判定する
-  // （_computeApproachAvoidanceWaypoint内、点と線分の最短距離）。
-  // 接近する場合は、target.positionを中心に半径
-  // DOCKING_AVOIDANCE_DETOUR_RADIUS（500、DOCKING_VIRTUAL_TARGET_
-  // OFFSETと同じ値=仮想ウェイポイントと同じ「安全な距離」の目安）
-  // 以上離れた迂回点を経由目標として1つ差し込む。迂回点は艦の
-  // 現在の横方向オフセット（進入軸に対する垂直成分）の延長線上に
-  // 置くことで、「今いる側へさらに膨らんでから回り込む」自然な
-  // 迂回になる（ゴーアラウンドの中心選びと同じ考え方）。
-  //
-  // 迂回中はship._dockingAvoidanceWaypointにフレームをまたいで
-  // キャッシュし、艦が実際にそこへ十分近づくか、直線が再び安全に
-  // なるまで維持する（ヒステリシス、_computeApproachAvoidanceWaypoint
-  // 参照）。姿勢用ベジエ・並進のどちらも同じeffectiveTarget.position
-  // を参照する既存構造（v30）にそのまま乗せるため、
-  // _buildDesiredForAutoDocking側の変更は仮想ウェイポイント算出
-  // 直後に1箇所差し込むだけで済む。
-  DOCKING_AVOIDANCE_DETOUR_RADIUS: 500.0, // 迂回点はtarget.positionからこの距離以上離す
-  DOCKING_AVOIDANCE_ARRIVAL_RADIUS: 80.0, // 迂回点からこの距離まで近づいたら本来の仮想ウェイポイントへ切り替える
-  DOCKING_AVOIDANCE_EXIT_MARGIN: 40.0, // 迂回不要と判定するための余裕（200ちょうどではなく+40の240を安全側の基準にし、境界での往復を防ぐ）
-
-  // v44: 「最終進入の突入条件に、進入軸上にいることを追加してほしい」
-  // という要望への対応。
-  //
-  // 従来のinFinalApproachは距離200(DOCKING_FINAL_APPROACH_DISTANCE)と
-  // 姿勢(headingReadyForFinalApproach)のみで判定しており、位置が
-  // 進入軸からどれだけ横にズレていても、姿勢さえ整えば最終進入
-  // フェーズへ入れてしまっていた。通常は仮想ウェイポイント(v30)・
-  // 迂回(v43)のおかげで距離200へ到達する頃には自然と軸上に収束して
-  // いるはずだが、再アプローチ/ゴーアラウンド中に本物のtarget.
-  // positionへの実距離がたまたま200を切るケース（v44で別途対応）
-  // などでは、位置が軸から大きくズレたまま最終進入に入りかねない。
-  //
-  // 対策: 艦から目的地への実ベクトル(toTargetWorld)を進入軸に投影し、
-  // 軸に垂直な横方向オフセットの大きさを求め、これがこの値以下で
-  // あることもinFinalApproachの条件に追加する（onAxisForFinalApproach、
-  // _buildDesiredForAutoDocking参照）。満たさない間はheadingHold
-  // （その場で速度を殺しつつ姿勢/位置を合わせる）のまま留まる。
-  //
-  // v45: 許容値を指定値(√3/2)へ変更。
-  DOCKING_FINAL_APPROACH_LATERAL_READY_OFFSET: Math.sqrt(3) / 2, // この横ズレ(進入軸に垂直な距離)以内でないと最終進入へ入れない（≈0.866）
-
-  // v20: 「距離200に入った瞬間に姿勢が目的地方向→進入軸方向へ
-  // 一気に切り替わり、大きく旋回してしまう」という報告への対応。
-  // 従来は距離200を境に姿勢の目標方向を瞬時に切り替えていたが、
-  // 進入コースから外れた位置にいるほどこの境界での方向転換が
-  // 急になっていた。
-  //
-  // 対策: この距離（DOCKING_HEADING_BLEND_START_DISTANCE）から
-  // DOCKING_HEADING_BLEND_END_DISTANCEに至るまでの間で、
-  // 「目的地の方角」から「目的地の進入軸方向」へ姿勢の目標方向を
-  // 徐々に線形補間する（_computeHeadingTargetDirWorld参照）。
-  // 飛行機の着陸アプローチが遠方から少しずつ機首をファイナル
-  // コースへ合わせていくのに似せた形。
-  DOCKING_HEADING_BLEND_START_DISTANCE: 800.0,
-
-  // v25: 「進入コースが折れ線的（目的地方向→進入軸方向の線形補間）
-  // ではなく、1本の滑らかな曲線をたどるようにしてほしい」という
-  // 要望への対応。_computeHeadingTargetDirWorldを、3次ベジエ曲線上の
-  // 先読み点（look-ahead point）を追いかけるパスフォロー方式に
-  // 置き換えた（_buildApproachBezier / _lookAheadPointOnBezier参照）。
-  //
-  // 曲線の出口側ハンドル（目的地の手前・進入軸に沿ってどれだけ
-  // 手綱を伸ばすか）の長さ。長いほど最終進入軸へ早めに、かつ
-  // なだらかに乗る。
-  DOCKING_BEZIER_EXIT_HANDLE_LENGTH: 260.0,
-  // 曲線上を先読みする距離（艦から見てこの分だけ曲線の先にある点を
-  // 姿勢の目標方向にする）。短すぎると曲線への追従が唐突（角ばる）に、
-  // 長すぎるとショートカットして曲線から外れがちになる。
-  DOCKING_BEZIER_LOOKAHEAD_DISTANCE: 150.0,
-
-  // v37: 「距離500付近でもヨーが反転したまま抜け出せない」という
-  // 報告への対応。_buildApproachBezierの始点ハンドル(p1)は艦の
-  // 「現在の船首方向」を接線として曲線を作るため、船首が目的地方向と
-  // 大きく（特に90°以上）ズレていると、曲線がその乱れた向きへ
-  // 一旦伸びてから目的地へ戻る歪な形になり、先読み点が艦の後方・
-  // 横に来ることがあった。目標方向（先読み点）が「今向いている方向の
-  // 延長線上」になるため、船首が大きくズレているほど収束せず
-  // 同じ向きを追認し続ける悪循環（アトラクター）になっていた
-  // （_computeHeadingTargetDirWorld参照）。
-  //
-  // 対策: 船首と目的地方向のなす角がこの閾値(rad)以上の間は、
-  // ベジエ曲線を使わず単純に「目的地の方角」（targetDirWorld）へ
-  // 向ける（v17以前の単純フォールバックと同じ）。これは循環構造を
-  // 持たないため、船首の向きに関わらず必ず目的地方向へ収束する。
-  // 角度がこの閾値未満まで小さくなった（＝ある程度目的地方向を
-  // 向けた）後で初めてベジエへ切り替え、そこから滑らかに進入軸へ
-  // 乗せていく。DOCKING_HEADING_FULL_TORQUE_ANGLE（フルトルクに
-  // なる角度、約60°）と同じ値を流用し、「フルトルクで向き直している
-  // 間はベジエを使わない」という一貫した基準にする。
-  // ヒステリシス（DOCKING_HEADING_BEZIER_ENTER_MARGIN）を設け、
-  // 境界付近で単純フォールバック⇔ベジエが毎フレーム切り替わる
-  // チャタリングを防ぐ（一度ベジエに入ったら、角度がこのマージン分
-  // 余計に開くまではベジエのまま維持する）。
-  DOCKING_HEADING_BEZIER_ENTER_ANGLE: 1.05, // 約60°
-  DOCKING_HEADING_BEZIER_ENTER_MARGIN: 0.17, // 約10°分のヒステリシス
-
-  // v21: 「距離200(DOCKING_FINAL_APPROACH_DISTANCE)に着く前に
-  // 姿勢を回り切っておいて、200以降はほぼ直進だけで入港したい」
-  // という要望への対応。
-  //
-  // 従来はブレンド完了距離＝最終進入距離（どちらも200）だったため、
-  // 「目標方向が動き続ける→船の回頭が追いつく前に200へ到達する」
-  // というラグが常に発生していた。ブレンドの完了(t=1、目標方向が
-  // 進入軸方向で確定する距離)をDOCKING_FINAL_APPROACH_DISTANCEより
-  // 手前のここで済ませることで、そこから200に着くまでの区間を
-  // 「回頭が実際に追いつくための猶予時間」として使う。
-  //
-  // v38: 一時DOCKING_VIRTUAL_TARGET_OFFSET（仮想ウェイポイントの
-  // オフセット）と同じ500に揃えていたが、実距離500付近で仮想
-  // ウェイポイントまでの残り距離が0に近づき、姿勢計算・並進の
-  // 接近先が同じ一点に収束してしまい不安定になっていた
-  // （DOCKING_VIRTUAL_TARGET_OFFSETのコメント参照）。300へ戻し、
-  // 300→200の100の区間を回頭の遅れを吸収する猶予とする。
-  DOCKING_HEADING_BLEND_END_DISTANCE: 300.0,
-
-  // 最終進入フェーズ専用のフルトルク角度閾値。通常フェーズ用の
-  // DOCKING_HEADING_FULL_TORQUE_ANGLE（約60°、遠方でも主機が
-  // 働くよう緩めた値）より厳しくし、「距離200を切ったらまず
-  // 姿勢をきっちり合わせる」動きを優先させる（約20°）。
+  // brake300/brake250/final_approach専用のフルトルク角度閾値。
+  // 通常フェーズ用（約60°、遠方でも主機が働くよう緩めた値）より
+  // 厳しくし、「近距離ではまず姿勢をきっちり合わせる」動きを
+  // 優先させる（約20°）。
   DOCKING_FINAL_HEADING_FULL_TORQUE_ANGLE: 0.35,
 
-  // v21: 距離200(DOCKING_FINAL_APPROACH_DISTANCE)に到達した時点で
-  // まだ姿勢誤差がこの角度(rad)を超えていた場合、直進主体の最終
-  // 進入フェーズへは入らせず、その場に留まって（前進速度を絞り）
-  // 姿勢だけを合わせ切ることを優先する
-  // （_isHeadingReadyForFinalApproach参照、約8°）。
-  DOCKING_FINAL_APPROACH_HEADING_READY_ANGLE: 0.14,
-  // 上記の「その場で姿勢合わせ」中、前進をどこまで絞るか
-  // （0=完全停止優先、1=絞らない）。
-  // v34: 「最終進入以外は距離200以内に入らせない」方針への変更に伴い、
-  // 呼び出し側（headingHold分岐）では常に0を直接渡すようになった
-  // ため、この定数自体は現在未使用（値だけ残置）。
-  DOCKING_HEADING_HOLD_FORWARD_DAMPING: 0.15,
-  // 最終進入フェーズにおける横方向（ローカルX/Y）位置ずれ補正の
-  // 比例ゲイン。目的地の直線進入軸からどれだけ横にずれているかに
-  // 応じて、そのずれを消す方向の並進力を追加する（姿勢を目的地の
-  // 姿勢に固定した結果、位置ずれの補正はもう「船首を目的地に
-  // 向ける」トルクでは賄えなくなるため、並進側で明示的に補う）。
+  // brake300/brake250での横方向位置ずれ補正（並進）の比例ゲイン。
+  // 目的地の直線進入軸からどれだけ横にずれているかに応じて、その
+  // ずれを消す方向の並進力を追加する。
   DOCKING_LATERAL_CORRECTION_FULL_THRUST_OFFSET: 15.0, // 横ずれがこれ以上でフル横方向推力
-  // v17: 制動距離ベースの接近ブレーキが「まだ制動距離に余裕がある」
-  // と判定した際に許容する最大接近速度。ship.maxSpeedそのものだと
-  // 最終進入フェーズに入った直後にフル加速してしまいかねないため、
-  // 最終進入フェーズ用に別途頭打ちを設ける。
-  // v25: 「最終進入が遅すぎる」報告への対応。フルブレーキ/フル前進の
-  // ハードスイッチを廃止し常に物理的な安全速度まで詰められるように
-  // なったため、巡航速度上限自体も0.5→0.75へ引き上げて体感速度を上げる
-  // （安全速度側のクランプがあるので、これを上げても通り越しには
-  // つながらない）。
-  DOCKING_FINAL_APPROACH_MAX_SPEED_RATIO: 0.75, // ship.maxSpeedに対する比率
-  // v25: 目標接近速度＝「残り距離でちょうど止まり切れる速度
-  // sqrt(2*maxDecel*remainingDist)」に掛ける安全マージン係数
-  // （1.0だと理論値ぎりぎりで、推力配分ソルバーの丸めや1フレーム分の
-  // 遅れでわずかにオーバーシュートしうるため少し保守的に絞る）。
-  DOCKING_FINAL_APPROACH_BRAKE_MARGIN: 0.85,
+  DOCKING_POSITION_MIN_DISTANCE: 0.15, // これ未満の距離は接近推力を止める（振動防止、あとは速度制動のみで静止させる）
 
-  // v28: 「最終進入の逆噴射/主機関の喧嘩(v25)を直したら、今度は
-  // 最終進入に入った瞬間フル加速してオーバーシュートするだけに
-  // なった」という報告への対応。
-  //
-  // 原因1: DOCKING_FINAL_APPROACH_MAX_SPEED_RATIO(0.75)をship.maxSpeed
-  // （艦種プリセットにより140〜420と幅がある）にそのまま掛けていたため、
-  // 距離200時点の巡航速度目標(cruiseSpeed)が艦種によっては100〜300超
-  // にもなり得た。distanceベースのphysicalSafeSpeedがこれより小さければ
-  // 通常は問題ないが、艦の減速性能(maxDecel)が高いほどphysicalSafeSpeedも
-  // 大きく出るため、結果的に「距離200からの目標接近速度」自体が
-  // 実際に安全に減速し切れる値より過大になりがちだった。
-  // 対策: 距離ベースの上限とは別に、最終進入時の巡航速度に絶対値の
-  // 上限を設ける（下記DOCKING_FINAL_APPROACH_MAX_SPEED_ABS）。
-  //
-  // 原因2（本命）: 目標接近速度との誤差(speedError)を推力へ変換する
-  // 基準がFORWARD_VELOCITY_FULL_THROTTLE_ERROR(固定40)だった。これは
-  // 手動操縦のスロットル追従用に決めた値で艦の性能を一切考慮しない
-  // ため、上記のcruiseSpeedが100を超えるような艦では最終進入に入った
-  // 瞬間のspeedErrorが軽く40を超え、即座にthrustStrength=1(フル主機関)
-  // になっていた。フル加速で溜めた速度は同じ基準でしかブレーキも
-  // かからず、結局止まり切れずオーバーシュートする、という2段階の
-  // 不具合だった。
-  // 対策: 最終進入専用のスロットル基準を、艦の実際の最大減速度
-  // (maxDecel)から動的に算出する（_computeFinalApproachThrottleErrorRef
-  // 参照）。減速力が強い艦ほど基準を大きく（＝多少速度差があっても
-  // 緩やかに埋める）、弱い艦ほど基準を小さく（＝早めにフル出力へ
-  // 入って足りない制動力を補う）取ることで、「フル加速一択」を防ぐ。
-  DOCKING_FINAL_APPROACH_MAX_SPEED_ABS: 60.0, // 最終進入(距離200以下)の巡航速度自体の絶対上限（艦種によらず一律）
-  // 基準となる減速度(m/s^2)。この減速度の艦であればFORWARD_VELOCITY_
-  // FULL_THROTTLE_ERROR(40)相当のスロットル基準を使う、という
-  // スケーリングの原点。艦の実際のmaxDecelがこれより大きければ
-  // 基準を比例して緩め（速度差に寛容に）、小さければ厳しくする。
-  DOCKING_FINAL_APPROACH_THROTTLE_REF_DECEL: 8.0,
-  // スロットル基準のスケール自体を安全のためこの範囲にクランプする
-  // （減速力が極端に強い/弱い艦でも暴れないようにする）。
-  DOCKING_FINAL_APPROACH_THROTTLE_REF_MIN: 10.0,
-  DOCKING_FINAL_APPROACH_THROTTLE_REF_MAX: 40.0,
-
-  // v28: 上記のスロットル基準スケーリングだけでは根本原因を解決
-  // できなかった。詳細な検証の結果判明した本当の原因は以下の通り。
-  //
-  // targetSpeed = min(cruiseSpeed, sqrt(2*maxDecel*remainingDist*margin))
-  // という「残り距離が減るほど目標速度も連続的に絞る」設計(v25)では、
-  // remainingDistが0に近づくとtargetSpeedも0に張り付く。すると
-  // speedError(=targetSpeed - closingSpeed)が「現在速度の符号を反転
-  // させただけの小さな値」になり、比例制御thrustStrength=speedError/refも
-  // 比例して小さくなる。つまり本来「今すぐ全力で止まらないと間に合わない」
-  // 場面であっても、目標速度側の絞り込みが先に効いてしまい、ブレーキが
-  // 速度なりに弱まっていって制動距離の物理的保証（sqrt(2ad)の前提である
-  // 「常に最大減速度でブレーキする」）が崩れ、間に合わずに通り越して
-  // いた。v25のコメントにある「フルブレーキ分岐は不要になる」という
-  // 想定が誤りだった。
-  //
-  // 対策: 速度超過側（speedError<0）に限り、比例制御とは別に
-  // 「実際にこのまま等加速度maxDecelでブレーキした場合の制動距離
-  // (stoppingDistance = closingSpeed^2 / (2*maxDecel*margin))」と
-  // 「残り距離」を比較した緊急度(urgency)を計算し、
-  //   urgency <= URGENCY_BLEND_START: 従来通りの弱い比例ブレーキのまま
-  //   urgency >= URGENCY_BLEND_FULL : ほぼフルブレーキ(-1)
-  //   その間は線形にブレンド
-  // とする。urgencyは連続量なので、緊急度が低いうちは滑らかな比例
-  // 制御のまま、間に合わなくなりそうになるにつれ滑らかにフルブレーキへ
-  // 寄っていき、v25が警戒していた「閾値をまたいだ瞬間に1↔-1が
-  // 交互に切り替わる」不連続は起きない（シミュレーションで、
-  // フル加速からフルブレーキへ1.00→0.95→0.73→...→0.05→-1.00と
-  // 連続的に推移し、その後止まり切るまでオーバーシュートしない
-  // ことを確認済み）。
-  DOCKING_FINAL_APPROACH_URGENCY_BLEND_START: 0.5, // 制動距離/残り距離がこの比率を超えたらブレーキ強化を開始
-  DOCKING_FINAL_APPROACH_URGENCY_BLEND_FULL: 0.9, // この比率でほぼフルブレーキ(-1)に達する
-
-  // v20: 「旋回で生じた横滑りの勢いを殺しきれず目的地を通り過ぎて
-  // しまう」不具合対策（勢い殺しモード、_updateMomentumKillState参照）。
-  MOMENTUM_KILL_MIN_LATERAL_SPEED: 2.0, // これ未満の横滑り速度は無視し、通常のRCS制動任せにする
-  // v21: 「勢いキル→抜けた直後に接近力で再加速→また勢いキル」を
-  // 繰り返してしまう報告への対応。
-  //
-  // 原因は2つあった:
-  //   1) 退出マージンが緩く(0.5)、横滑りが半分程度収まっただけで
-  //      通常フェーズへ戻っていた（＝まだ結構な横滑りが残っている
-  //      状態で接近力が復帰し、それがまた横滑りを生む）。
-  //   2) 通常フェーズに戻った瞬間、approachStrength（接近力）が
-  //      距離だけで決まり全開に近い値へ即復帰していたため、
-  //      「勢いキルで横滑りを削った意味」がすぐ再加速で相殺されて
-  //      いた。
-  //
-  // 対策:
-  //   1) 退出マージンを大幅に厳しくし(0.5→0.15)、横滑りがほぼ
-  //      収まりきってから通常制御へ戻す。
-  //   2) 退出直後はMOMENTUM_KILL_COOLDOWN_SECにわたり接近力を
-  //      徐々にしか復帰させない（_momentumKillCooldownRemainingで
-  //      管理、_buildDesiredForAutoDocking内でapproachStrengthに
-  //      乗算する）。この間もRCSによる速度ブレーキ自体は普段通り
-  //      効くので「できるだけ普通のRCSで減速する」という狙いに沿う。
-  MOMENTUM_KILL_EXIT_MARGIN: 0.15, // 退出判定の余裕係数（制動距離が残り距離のこの倍率を下回るまで維持、チャタリング防止）
-  MOMENTUM_KILL_COOLDOWN_SEC: 2.5, // 勢いキル退出直後、接近力をゆっくり戻すまでの時間(秒)
 
   buildDesiredFromInput(input, ship, dt) {
     const boostMult = input.boost ? 1.6 : 1.0;
@@ -1093,1201 +745,214 @@ const ThrusterSolver = {
     return { desiredForce, desiredTorque };
   },
 
-  // -----------------------------------------------------------
-  // v08: 自動操船（入港）モード用の欲求力/トルクを組み立てる。
+  // =============================================================
+  // v46: 自動ドッキング操縦 — ゼロベース再設計
   //
-  // 姿勢:
-  //   船首（ローカル-Z軸）を「現在位置から目的地座標への方向」に
-  //   常に向けるよう、pitch/yaw軸のトルクを自動生成する
-  //   （目的地の"姿勢角"そのものに機体を合わせるのではなく、
-  //   目的地の"方角"を向かせる一般的なオートパイロット方式）。
-  //   roll軸は自動制御の対象外とし、ユーザーのrotateRoll入力を
-  //   そのまま使う（要望通り、ロールだけ手動操作を受け付ける）。
+  // 経緯: v08〜v45の間、個別の不具合報告に対する継ぎ足し修正
+  // （オーバーシュート対策、ヒステリシス、勢い殺しモード、ゴー
+  // アラウンド、迂回ウェイポイント…）を重ねた結果、分岐同士が
+  // 複雑に絡み合い、一つの修正が別の場面を壊す状態になっていた。
+  // v46では要件を明示的なフェーズ（ship._dockingPhase）の
+  // ステートマシンとして再設計し、各フェーズの制御則を独立して
+  // 記述する。過去のバグ修正で得られた物理的な知見（艦の実際の
+  // 制動能力から速度上限を逆算する、ローカル速度全体を一括で
+  // ブレーキする等）は土台の_estimateMaxLinearDecel等を通じて
+  // 引き継ぐが、フェーズ遷移そのものはこのステートマシンだけで
+  // 完結させる。
   //
-  //   角速度打ち消し（ダンピング）は自動操船中も常時有効にする
-  //   （手を離した瞬間に船首が目的方向で止まってくれないと
-  //   「常に目的地に向ける」が成立しないため、自動姿勢制動の
-  //   ON/OFF設定とは独立に適用する）。
+  // フェーズ一覧（ship._dockingPhase）:
+  //   'cruise'         : 自由巡航。制約なし、仕想WPへ最短で向かう
+  //   'approach'       : distance 800→500。最高速=braking(50)
+  //   'adjust'         : distance 500→300。最高速=braking(25)
+  //   'brake300'       : distance=300到達、一度完全静止→軸に乗せる
+  //   'final_approach' : distance 300→250。姿勢を整え切る
+  //   'brake250'       : distance=250、入港基準を満たすまで整える
+  //   'tunnel'         : distance 250→0（実質200→0がトンネル内部）。
+  //                      姿勢固定・直進のみ
+  //   'overshoot'      : トンネル内で通り抜け、奥側へ抜けていく間
+  //   'docked'         : 入港完了、完全固定
   //
-  // 並進:
-  //   目的地座標までのワールド方向ベクトルをローカル座標へ変換し、
-  //   距離に応じた比例制御で「近づく」推力を生成した上で、
-  //   目的地付近では現在の速度を打ち消すブレーキも加える
-  //   （距離0・速度0の両方に収束させることで「その場に留まる」
-  //   自動制御を維持する）。
-  //   ユーザーの手動並進入力（thrustStrafeX/Y）はロールと同様に
-  //   「自動制御力への上乗せ」として加算する。
+  // 実際の遷移はdistance/alongDist/速度/姿勢誤差を毎フレーム見て
+  // 決定される（enum自体は「今どのフェーズの制御則を使うか」の
+  // 結果でしかなく、根拠となる生の物理量は都度計算し直す）。
   //
-  //   v09: thrustForward（メインエンジンのスロットルレバー）は
-  //   自動操船中は完全に無視する。以前はストレイフと同列に
-  //   「自動制御力への上乗せ」として加算していたが、これだと
-  //   レバーがニュートラル(0)以外の位置にあるだけでオートパイロットの
-  //   接近/静止用の前後推力が意図せず歪められてしまい、「自動操縦中は
-  //   メインエンジンもレバーを無視して自動で出力してほしい」という
-  //   要望に反していた。ストレイフ・ロールは姿勢や横移動の微調整として
-  //   残す一方、前後（メインエンジンが主に担う軸）は自動操船ロジックの
-  //   接近距離・速度ブレーキ計算だけに委ねる。
-  // -----------------------------------------------------------
+  // 目的地オブジェクト（State.dockingTarget）は将来「宇宙港の
+  // モデル」ごとに寸法・速度・距離しきい値が変わることを見越し、
+  // target.dockingParamsに一部または全部の項目を上書き指定できる
+  // ようにする。未指定の項目はDOCKING_DEFAULTSの値を使う
+  // （_getDockingParams参照）。
+  // =============================================================
 
   // -----------------------------------------------------------
-  // v20: 「勢い殺しモード」の判定・状態更新。
+  // ドッキング関連の全パラメータのデフォルト値。
   //
-  // 目的地方向(targetDirWorld)から見て直交する速度成分（横滑り）を
-  // 求め、それをRCS（_estimateMaxLateralDecel、非力）だけで打ち消す
-  // 場合の制動距離（v^2/(2a)）を計算する。この制動距離が目的地までの
-  // 残り距離を超えていたら「このままではRCSだけで横滑りを消しきれず
-  // 通り過ぎてしまう」と判断し、勢い殺しモードへ入る。
-  //
-  // 一度入ったら、退出条件には余裕(MOMENTUM_KILL_EXIT_MARGIN)を
-  // 持たせる。境界ぎりぎりで毎フレーム条件が反転するとON/OFFが
-  // 高速に切り替わり姿勢が暴れる（チャタリング）ため、「まだ十分安全と
-  // 言えるところまで横滑りが収まる」まで維持してから通常の
-  // 目的地/進入軸への姿勢制御に戻す。
-  //
-  // 状態はship._momentumKillActiveにキャッシュする（06-hud.jsの
-  // デバッグ表示からも参照する）。
+  // 個々のtarget（宇宙港）がtarget.dockingParamsに同名のキーを
+  // 持っていれば、そちらの値がこのデフォルトを上書きする
+  // （_getDockingParams参照）。艦側の性能（maxSpeed、
+  // _estimateMaxLinearDecel等）はship側の値をそのまま使うため
+  // ここには含めない。
   // -----------------------------------------------------------
-  _updateMomentumKillState(ship, distance, targetDirWorld, dt) {
-    const wasActive = ship._momentumKillActive === true;
+  DOCKING_DEFAULTS: {
+    // --- ゾーン境界（すべてtarget.positionからの直線距離） ---
+    ZONE_CRUISE_START: 800,        // これ以上遠いと自由巡航（無制限）
+    ZONE_APPROACH_START: 800,      // アプローチ開始距離
+    ZONE_ADJUST_START: 500,        // 調整フェーズ開始距離（仕想WPの距離でもある）
+    ZONE_BRAKE300: 300,            // 距離300ブレーキポイント
+    ZONE_BRAKE250: 250,            // 距離250ブレーキポイント（同時に半径250の迂回判定基準）
+    ZONE_FINAL_APPROACH: 200,      // トンネル入り口（最終進入距離）
 
-    if (!targetDirWorld || distance <= 1e-4) {
-      if (wasActive) this._startMomentumKillCooldown(ship);
-      ship._momentumKillActive = false;
-      return false;
+    // --- 侵入禁止・迂回 ---
+    NO_ENTRY_RADIUS: 200,          // 半径200以内は最終進入(トンネル内)以外での進入禁止
+    AVOIDANCE_RADIUS: 250,         // 半径250以上でまだ軸上でなければ仕想WP経由へ迂回
+
+    // --- 仕想ウェイポイント ---
+    VIRTUAL_WAYPOINT_OFFSET: 500,  // target.positionから進入軸上手前のオフセット距離
+
+    // --- 速度上限（「制動距離Nの速度」という形で指定） ---
+    APPROACH_MAX_BRAKING_DISTANCE: 50, // アプローチ〜調整フェーズの最高速度(制動距離50相当)
+    ADJUST_MAX_BRAKING_DISTANCE: 25,   // 調整フェーズの最高速度(制動距離25相当)　※ADJUST開始時にAPPROACHから引き継ぐ
+
+    // --- 最終進入（トンネル内） ---
+    FINAL_APPROACH_ENTRY_SPEED: 0.5,     // 距離200地点での目標前進速度
+    FINAL_APPROACH_BRAKING_DISTANCE: 10, // トンネル内での制動距離（この距離で速度が0へ収束するよう逆算）
+
+    // --- 入港（固定）判定基準 ---
+    ARRIVAL_SPEED: 0.5,
+    ARRIVAL_HEADING_ERROR_DEG: 0.1,   // 各軸（pitch/yaw由来のheading, roll）誤差の許容(度)
+    ARRIVAL_ANGULAR_SPEED: 0.01,      // これ未満で角速度を強制的に0へスナップ
+
+    // --- オーバーシュート・再アプローチ ---
+    OVERSHOOT_REAPPROACH_DISTANCE: 300, // 奥側でこの距離離れたら再アプローチ（=通常アプローチへ合流）発動
+
+    // --- 停止判定（brake300/brake250の「完全静止」の基準） ---
+    STOP_SPEED_EPSILON: 0.05,
+  },
+
+  // docked状態を維持する際の距離許容誤差（距離の単位。艦種・宇宙港の
+  // 寸法に依らない固定値でよいため、DOCKING_DEFAULTSには含めない）。
+  DOCKED_STATE_DISTANCE_EPSILON: 1.0,
+
+  // -----------------------------------------------------------
+  // target.dockingParamsの値があれば優先し、無い項目はデフォルトで
+  // 埋めたパラメータセットを返す。宇宙港モデルごとの寸法差（将来
+  // 実装予定）を、このオブジェクトを介して自動ドッキングロジック
+  // 全体へ伝播させる。呼び出しごとに毎回マージするが、キー数は
+  // 少ないためコスト上問題にならない。
+  // -----------------------------------------------------------
+  _getDockingParams(target) {
+    const overrides = (target && target.dockingParams) || {};
+    const params = {};
+    for (const key in this.DOCKING_DEFAULTS) {
+      params[key] = overrides[key] !== undefined ? overrides[key] : this.DOCKING_DEFAULTS[key];
     }
-
-    const velWorld = ship.velocity;
-    const alongSpeed = vecDot(velWorld, targetDirWorld);
-    const alongVelWorld = vecScale(targetDirWorld, alongSpeed);
-    const lateralVelWorld = {
-      x: velWorld.x - alongVelWorld.x,
-      y: velWorld.y - alongVelWorld.y,
-      z: velWorld.z - alongVelWorld.z,
-    };
-    const lateralSpeed = vecLength(lateralVelWorld);
-
-    if (lateralSpeed < this.MOMENTUM_KILL_MIN_LATERAL_SPEED) {
-      if (wasActive) this._startMomentumKillCooldown(ship);
-      ship._momentumKillActive = false;
-      return false;
-    }
-
-    const maxLateralDecel = this._estimateMaxLateralDecel(ship);
-    const lateralStoppingDistance = (lateralSpeed * lateralSpeed) / (2 * maxLateralDecel);
-
-    const active = wasActive
-      ? lateralStoppingDistance > distance * this.MOMENTUM_KILL_EXIT_MARGIN
-      : lateralStoppingDistance > distance;
-
-    if (wasActive && !active) this._startMomentumKillCooldown(ship);
-    ship._momentumKillActive = active;
-    return active;
-  },
-
-  // v21: 勢いキルモードを退出した瞬間に呼び、クールダウンタイマーを
-  // セットする。以後MOMENTUM_KILL_COOLDOWN_SEC秒かけて接近力の
-  // 上限を0→1へ線形に戻す（_getApproachCooldownMultiplier参照）。
-  _startMomentumKillCooldown(ship) {
-    ship._momentumKillCooldownRemaining = this.MOMENTUM_KILL_COOLDOWN_SEC;
-  },
-
-  // v21: 現在の接近力上限倍率(0..1)を返す。クールダウン中でなければ
-  // 常に1。dtを渡した場合はタイマーを1フレーム分消費させる。
-  _tickApproachCooldownMultiplier(ship, dt) {
-    const remaining = ship._momentumKillCooldownRemaining || 0;
-    if (remaining <= 0) return 1;
-    const next = Math.max(0, remaining - (dt || 0));
-    ship._momentumKillCooldownRemaining = next;
-    // 残り時間からそのまま比率を出すのではなく、経過側（1 - 残り/合計）を
-    // 使うことで「タイマーをセットした瞬間は0、満了で1」という
-    // 直感通りの向きにする。
-    const elapsedRatio = 1 - next / this.MOMENTUM_KILL_COOLDOWN_SEC;
-    return clamp(elapsedRatio, 0, 1);
+    return params;
   },
 
   // -----------------------------------------------------------
-  // v20: 通常フェーズ（勢い殺しモードでも最終進入フェーズでもない間）の
-  // 姿勢目標方向を求める。
-  //
-  //   - 進入軸の手前側にいない場合（艦が目的地を通り越して奥に
-  //     出てしまっている場合）は、従来通り「目的地の方角」を
-  //     そのまま返す（ブレンドしない）。この場合にブレンドすると
-  //     船首が進入軸方向に固定されたまま目的地から離れ続ける
-  //     不具合（v17コメント参照）が再発するため。
-  //   - それ以外は、DOCKING_HEADING_BLEND_START_DISTANCEから
-  //     DOCKING_HEADING_BLEND_END_DISTANCEまでの間で「目的地の方角」から
-  //     「進入軸方向」へ線形補間する。距離がDOCKING_HEADING_
-  //     BLEND_START_DISTANCE以上ならt=0（純粋に目的地の方角）、
-  //     DOCKING_HEADING_BLEND_END_DISTANCE以下ならt=1（純粋に進入軸方向）
-  //     になる。v21よりEND_DISTANCE(v38現在300)はFINAL_APPROACH_
-  //     DISTANCE(200)より手前に設定してあり、200へ着くまでの残り
-  //     区間を実際の船体の回頭が目標に追いつくための猶予時間として
-  //     使う。
+  // 「距離dで速度がちょうど0になる」よう安全側に見積もった目標
+  // 速度を、艦の実際の制動能力(decel)から逆算する。
+  //   v = sqrt(2 * decel * max(0, d) * margin)
+  // marginは理論値ぎりぎりを避けるための安全係数（<1）。
   // -----------------------------------------------------------
-  // v25: 艦の現在位置(ship.position)・現在の船首方向(ship.quaternionの-Z)・
-  // 目的地位置(target.position)・目的地の進入軸(approachAxisWorld)から
-  // 3次ベジエ曲線を構築する。
-  //   P0 = 艦の現在位置（曲線の始点）
-  //   P1 = P0から艦の現在の船首方向へ少し進めた点（始点側ハンドル。
-  //        「今向いている方向へ滑らかに離陸する」接線を保証する）
-  //   P2 = 目的地からapproachAxisWorldの逆方向（入口側、ゲートの
-  //        手前）へDOCKING_BEZIER_EXIT_HANDLE_LENGTH分戻した点
-  //        （終点側ハンドル。曲線の終端付近が自然と進入軸に沿う）
-  //   P3 = 目的地位置（終点）
-  // ハンドル長P0-P1はP0-P3間の距離に応じてスケールし、近距離では
-  // 曲線が暴れないようにする。
-  _buildApproachBezier(ship, target, approachAxisWorld, distance) {
-    const noseWorld = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, ship.quaternion));
-    const p0 = { x: ship.position.x, y: ship.position.y, z: ship.position.z };
-    const p3 = { x: target.position.x, y: target.position.y, z: target.position.z };
+  BRAKE_SAFETY_MARGIN: 0.85,
 
-    // 始点ハンドル長: 距離の1/3程度（極端に短い/長いを避けるため
-    // exit handleとも同程度の範囲にクランプ）。
-    const startHandleLen = clamp(distance / 3, 20, this.DOCKING_BEZIER_EXIT_HANDLE_LENGTH * 1.5);
-    const p1 = {
-      x: p0.x + noseWorld.x * startHandleLen,
-      y: p0.y + noseWorld.y * startHandleLen,
-      z: p0.z + noseWorld.z * startHandleLen,
-    };
-
-    const exitHandleLen = Math.min(this.DOCKING_BEZIER_EXIT_HANDLE_LENGTH, distance * 0.8);
-    const p2 = {
-      x: p3.x - approachAxisWorld.x * exitHandleLen,
-      y: p3.y - approachAxisWorld.y * exitHandleLen,
-      z: p3.z - approachAxisWorld.z * exitHandleLen,
-    };
-
-    return { p0, p1, p2, p3 };
+  _speedForBrakingDistance(decel, distance) {
+    const d = Math.max(0, distance);
+    return Math.sqrt(2 * Math.max(decel, 1e-6) * d * this.BRAKE_SAFETY_MARGIN);
   },
 
-  // 3次ベジエ曲線上の点をパラメータt(0..1)で評価する
-  _evalBezier(bezier, t) {
-    const u = 1 - t;
-    const a = u * u * u;
-    const b = 3 * u * u * t;
-    const c = 3 * u * t * t;
-    const d = t * t * t;
+  // -----------------------------------------------------------
+  // 仕想ウェイポイント: target.positionから進入軸上手前
+  // VIRTUAL_WAYPOINT_OFFSETの固定点。艦とtarget.positionの間に
+  // 収まるよう、target.positionまでの実距離でクランプする
+  // （距離がオフセット未満なら仕想WPはtarget.positionそのものに
+  //近づき、艦の後方へ回り込むことはない）。
+  // -----------------------------------------------------------
+  _computeVirtualWaypoint(target, approachAxisWorld, distance, params) {
+    const offset = Math.min(params.VIRTUAL_WAYPOINT_OFFSET, distance);
     return {
-      x: a * bezier.p0.x + b * bezier.p1.x + c * bezier.p2.x + d * bezier.p3.x,
-      y: a * bezier.p0.y + b * bezier.p1.y + c * bezier.p2.y + d * bezier.p3.y,
-      z: a * bezier.p0.z + b * bezier.p1.z + c * bezier.p2.z + d * bezier.p3.z,
+      x: target.position.x + approachAxisWorld.x * offset,
+      y: target.position.y + approachAxisWorld.y * offset,
+      z: target.position.z + approachAxisWorld.z * offset,
     };
   },
 
-  // 曲線をNセグメントの折れ線として近似し、艦の現在位置から
-  // DOCKING_BEZIER_LOOKAHEAD_DISTANCEだけ曲線に沿って先にある点を
-  // 返す（Pure Pursuit的な先読み点探索）。艦は常にP0上にいるので、
-  // 弧長はP0からの累積距離をそのまま積算すればよい。
-  _lookAheadPointOnBezier(bezier, lookAheadDistance) {
-    const SEGMENTS = 24;
-    let prev = bezier.p0;
-    let accumulated = 0;
-    for (let i = 1; i <= SEGMENTS; i++) {
-      const t = i / SEGMENTS;
-      const point = this._evalBezier(bezier, t);
-      const segLen = vecLength({
-        x: point.x - prev.x,
-        y: point.y - prev.y,
-        z: point.z - prev.z,
-      });
-      if (accumulated + segLen >= lookAheadDistance) {
-        // このセグメント内で先読み距離に到達する。セグメント内を
-        // 線形補間して近似点を返す（曲率に対して十分細かい分割数
-        // なので線形近似で問題ない）。
-        const remain = lookAheadDistance - accumulated;
-        const segT = segLen > 1e-6 ? remain / segLen : 0;
-        return {
-          x: prev.x + (point.x - prev.x) * segT,
-          y: prev.y + (point.y - prev.y) * segT,
-          z: prev.z + (point.z - prev.z) * segT,
-        };
-      }
-      accumulated += segLen;
-      prev = point;
-    }
-    // 曲線全長が先読み距離に満たない（＝目的地がかなり近い）場合は
-    // 終点（目的地そのもの）を返す。
-    return bezier.p3;
-  },
-
   // -----------------------------------------------------------
-  // v25: 通常フェーズ（勢い殺しモードでも最終進入フェーズでもない間）の
-  // 姿勢目標方向を求める。
+  // 半径AVOIDANCE_RADIUS以上、かつまだ進入軸上に乗っていない
+  // （lateralが大きい）場合に経由させる、固定の中間地点。
   //
-  // 旧実装（v20〜v24）は「目的地の方角」から「進入軸方向」への単純な
-  // 方向ベクトルの線形補間で、艦の実際の軌跡は考慮していなかった。
-  // これは2本の直線区間を繋いだ折れ線に近い経路になり、「1本の
-  // 滑らかな線をたどってほしい」という要望に対して曲がり角が
-  // 目立っていた。
+  // 進入軸上、target.positionから手前側（-approachAxisWorld方向）
+  // にVIRTUAL_WAYPOINT_OFFSET+AVOIDANCE_RADIUS（固定距離）だけ
+  // 離れた、横方向オフセットを持たない点を返す。艦の現在位置に
+  // 応じて動的に変えず、常にこの固定点を経由させることで、
+  // 「艦が既に迂回点を追い越していて逆走を指示してしまう」
+  // ような相互作用を避ける（過去に実際発生した不具合）。
   //
-  // 新実装: 艦の現在位置・現在の船首方向・目的地・目的地の進入軸から
-  // 3次ベジエ曲線を毎フレーム再構築し、その曲線上の少し先（先読み点）
-  // を目標方向にする（_buildApproachBezier / _lookAheadPointOnBezier）。
-  // 艦が動くたびに曲線の始点・接線も追従して再計算されるので、
-  // 見た目には「目的地までなめらかに湾曲する1本の軌道」を辿りながら、
-  // 終端では自然に進入軸へ収束する。
-  //   - 進入軸の手前側にいない場合（艦が目的地を通り越して奥に
-  //     出てしまっている場合）は、従来通り「目的地の方角」を
-  //     そのまま返す（曲線を組まない）。この場合に曲線追従すると
-  //     船首が進入軸方向に固定されたまま目的地から離れ続ける
-  //     不具合（v17コメント参照）が再発するため。
+  // 使う側（_runApproachPhase/_runReturnToAxisPhase）は、艦が
+  // まだこの中間地点に対して十分な距離がある間はこれを目標にし、
+  // 十分近づいたら通常の目標（仕想WP/target.position）に切り替える
+  // 二段階方式を取る。
   // -----------------------------------------------------------
-  // -----------------------------------------------------------
-  // v27: 再アプローチウェイポイント（進入軸の手前側、目的地から
-  // approachAxisWorld方向へDOCKING_REAPPROACH_WAYPOINT_DISTANCE分
-  // 戻った位置）から見た「艦からウェイポイントへの単位方向ベクトル」
-  // を返す。姿勢側（_computeHeadingTargetDirWorld）・並進側
-  // （_buildDesiredForAutoDockingの並進ブロック）の両方から
-  // 同じウェイポイント座標を参照させることで、向く方向と実際に
-  // 進む方向を一致させる。
-  // -----------------------------------------------------------
-  // v28: 符号バグ修正。approachAxisWorldは「目的地の船首方向
-  // （target.quaternionの-Z）」＝艦が最終進入で目的地へ向けて
-  // 進む向きそのものである。艦が進入軸の手前側（正常な進入口側、
-  // alongDistWorld>0）にいる時、艦の位置は
-  // target.position - approachAxisWorld * distance
-  // （＝進入軸の逆方向に離れた側）にある。したがって「進入軸の
-  // 手前側に戻る」ウェイポイントも同じ符号（マイナス）で置く
-  // 必要がある。
-  //
-  // 旧実装はtarget.position + approachAxisWorld * DISTANCEと
-  // 符号を誤っており、これは手前側ではなく艦が通り越して出て
-  // しまう奥側（進入軸のさらに先）にウェイポイントを置いていた。
-  // このため艦が奥側に出た瞬間、再アプローチ先も同じ奥側（より
-  // 遠く）に生成され、alongDistWorldが0以上（＝手前側）に戻る
-  // 条件を満たせないまま船首だけがそちらを向き続け、実質的に
-  // 「軸に戻ろうとして進めなくなる」不具合になっていた。
-  // v30: 進入軸上、target.positionからapproachAxisWorldの逆方向へ
-  // distance分だけ戻った点を返す汎用ヘルパー。再アプローチ
-  // ウェイポイント（_computeReapproachWaypoint）と仮想ウェイポイント
-  // （_computeVirtualApproachTarget）は「戻す距離」が違うだけで
-  // 計算式は同一なので、ここに共通化する。
-  _computeAxisOffsetPoint(target, approachAxisWorld, distance) {
+  _computeAvoidanceWaypoint(ship, target, approachAxisWorld, params) {
+    const safeAlong = params.VIRTUAL_WAYPOINT_OFFSET + params.AVOIDANCE_RADIUS;
     return {
-      x: target.position.x - approachAxisWorld.x * distance,
-      y: target.position.y - approachAxisWorld.y * distance,
-      z: target.position.z - approachAxisWorld.z * distance,
+      x: target.position.x - approachAxisWorld.x * safeAlong,
+      y: target.position.y - approachAxisWorld.y * safeAlong,
+      z: target.position.z - approachAxisWorld.z * safeAlong,
     };
-  },
-
-  _computeReapproachWaypoint(target, approachAxisWorld) {
-    return this._computeAxisOffsetPoint(
-      target,
-      approachAxisWorld,
-      this.DOCKING_REAPPROACH_WAYPOINT_DISTANCE
-    );
-  },
-
-  // v30: 通常フェーズ（最終進入に入るまで）が姿勢・並進の両方で
-  // 実際に目指す先。進入軸上、target.positionの手前
-  // DOCKING_VIRTUAL_TARGET_OFFSET分の位置に置く
-  // （DOCKING_VIRTUAL_TARGET_OFFSET定数のコメント参照）。
-  //
-  // v39: 「実距離500付近で何度も押し戻される」不具合への対応。
-  // 従来はオフセットを常にDOCKING_VIRTUAL_TARGET_OFFSET固定で
-  // 使っていたため、この仮想ウェイポイントはtarget.positionから
-  // 常に500手前の「空間上の固定点」だった。艦が(進入軸沿いに見て)
-  // その固定点を一度通り過ぎると、点は艦から見て後方に来てしまい、
-  // 並進側の接近方向(approachDirLocal)が後ろ向きに反転、艦を
-  // その固定点（＝実距離500の場所）へ押し戻し続けていた。
-  // 対策(v39時点): オフセットの上限をalongDistWorld（艦から見た、
-  // 進入軸に沿った目的地までの残り距離）でクランプする。
-  //
-  // v45: 「距離500を切ろうというあたり(560等)から、船があらぬ方向を
-  // 向こうとして制御を失ったようになる」という報告への対応。
-  //
-  // 原因: v39の対策は「艦の位置を進入軸へ投影した点」と実質的に
-  // 同じ計算になっていた（offset=alongDistWorldとすると、
-  // target.position - axis*alongDistWorldは艦位置の軸投影点に
-  // 一致する）。艦が進入軸から大きく横にズレている状態でこれが
-  // 起こると、仮想ウェイポイントが常に「艦のちょうど真横」に
-  // 来続けてしまい、艦がどれだけ前進してもウェイポイントが
-  // 追いかけてくる形になる。真横の目標を追いかけようとする艦は
-  // 目標方向がほぼ90°で頭打ちになり、旋回してもなお真横を
-  // 向き続けよう（あるいは真横を追い越すと今度は後方の同じ点へ
-  // 引き戻されよう）とするため、いつまでも姿勢が収束しない
-  // （「あらぬ方向を向いて制御を失ったよう」に見える不具合の
-  // 原因）。合成データでの検証で、横ズレが大きいほどこの現象が
-  // 顕著になり、軸上（横ズレ0）では発生しないことを確認済み
-  // （＝v39が想定していた「軸上を直進中に固定点を追い越す」
-  // ケースだけをたまたま正しく解決し、横ズレがあるケースを
-  // 壊していた）。
-  //
-  // 対策: クランプの基準を、艦位置の軸投影(alongDistWorld)ではなく
-  // 艦から目的地までの直線距離(distance)に変更する。これにより
-  // 「艦位置をそのまま投影した点」には決してならず、横ズレが
-  // あっても仮想ウェイポイントが真横に張り付くことはない。
-  // また下限を0ではなくDOCKING_FINAL_APPROACH_DISTANCE（距離200）に
-  // 変更した。理由は、distanceがこの値を下回った時点で艦は既に
-  // inFinalApproachZone（v44）に入っており、以降は
-  // _buildDesiredForAutoDocking側でheadingHold/inFinalApproachの
-  // どちらかが必ず成立してこの仮想ウェイポイント（およびそれを
-  // 使うベジエ追従）自体が使われなくなるため、下限をtarget.position
-  // そのもの（0）まで縮める意味がなく、縮め続けるとtarget.positionを
-  // 追い越して艦の真後ろに回り込む区間が生じてしまうため。
-  _computeVirtualApproachTarget(target, approachAxisWorld, shipPosition) {
-    const toTargetWorld = {
-      x: target.position.x - shipPosition.x,
-      y: target.position.y - shipPosition.y,
-      z: target.position.z - shipPosition.z,
-    };
-    const distance = vecLength(toTargetWorld);
-    const offset = clamp(
-      distance,
-      this.DOCKING_FINAL_APPROACH_DISTANCE,
-      this.DOCKING_VIRTUAL_TARGET_OFFSET
-    );
-    return this._computeAxisOffsetPoint(target, approachAxisWorld, offset);
   },
 
   // -----------------------------------------------------------
-  // v43: 点pointと線分(segStart-segEnd)の最短距離を返す。
-  // 迂回判定（艦の現在位置→仮想ウェイポイントの直線がtarget.
-  // positionにどれだけ接近するか）専用の汎用ヘルパー。
+  // 艦の姿勢を、ワールド方向ベクトルheadingTargetWorldへ向ける
+  // トルク要求を desiredTorque(x,y=pitch/yaw) に書き込む。
+  // fullTorqueAngle未満の角度差では比例して弱める。角度差が
+  // HEADING_LOCK_TOLERANCE_DEG未満ならロックして角速度を0に吸収。
+  // 戻り値: headingLocked (bool)
   // -----------------------------------------------------------
-  _pointToSegmentDistance(point, segStart, segEnd) {
-    const seg = { x: segEnd.x - segStart.x, y: segEnd.y - segStart.y, z: segEnd.z - segStart.z };
-    const segLenSq = seg.x * seg.x + seg.y * seg.y + seg.z * seg.z;
-    const toPoint = { x: point.x - segStart.x, y: point.y - segStart.y, z: point.z - segStart.z };
-    // segLenSqがほぼ0（始点=終点）なら単純に始点との距離を返す。
-    const t = segLenSq > 1e-8 ? clamp(vecDot(toPoint, seg) / segLenSq, 0, 1) : 0;
-    const closest = {
-      x: segStart.x + seg.x * t,
-      y: segStart.y + seg.y * t,
-      z: segStart.z + seg.z * t,
-    };
-    return vecLength({ x: point.x - closest.x, y: point.y - closest.y, z: point.z - closest.z });
+  _applyHeadingTorque(ship, headingTargetWorld, fullTorqueAngle, desiredTorque) {
+    const targetDirLocal = rotateVecByQuat(headingTargetWorld, conjugateQuat(ship.quaternion));
+    const noseLocal = { x: 0, y: 0, z: -1 };
+    const { angle, axis: axisNorm } = this._computeHeadingAngleAndAxis(noseLocal, targetDirLocal);
+
+    const headingLocked = this._lockHeadingIfWithinTolerance(ship, angle);
+    if (!headingLocked && angle > this.DOCKING_HEADING_MIN_ANGLE) {
+      const torqueStrength = Math.min(1, angle / fullTorqueAngle);
+      desiredTorque.x = axisNorm.x * torqueStrength;
+      desiredTorque.y = axisNorm.y * torqueStrength;
+    }
+    return headingLocked;
   },
 
   // -----------------------------------------------------------
-  // v43: 艦の現在位置からrawWaypoint（本来の仮想ウェイポイント、
-  // または再アプローチウェイポイント）へ直行する直線が、target.
-  // positionにDOCKING_FINAL_APPROACH_DISTANCE未満まで接近する場合、
-  // 迂回点を挟んで返す。安全なら（あるいは既に迂回点へ十分近づいた
-  // 後、直行しても安全なら）rawWaypointをそのまま返す。
-  //
-  // 迂回点はtarget.positionを中心に、
-  //   - 進入軸(approachAxisWorld)に垂直な平面上、艦の現在位置の
-  //     横方向オフセット（進入軸に対する垂直成分）の向きを延長
-  //   - 艦の横方向オフセットがほぼ0（ほぼ真後ろ・真正面から
-  //     接近している）場合は、進入軸に対して適当な垂直方向
-  //     （ワールド上方向とapproachAxisWorldの外積、それも縮退
-  //     するなら任意の垂直方向）を使う
-  // に、半径DOCKING_AVOIDANCE_DETOUR_RADIUSの点を置く。
-  //
-  // ヒステリシス: 一度迂回を開始したら、艦がDOCKING_AVOIDANCE_
-  // ARRIVAL_RADIUS以内へ実際に近づくまでは同じ迂回点を維持する
-  // （毎フレーム直線判定が safe/unsafe を跨いで迂回点が動き続け、
-  // 艦がどこにも定まらず振動する事態を防ぐ）。
+  // 艦のrollを、target.quaternionが定めるroll角へ向けるトルク要求を
+  // desiredTorque.zに書き込む。戻り値: rollLocked (bool)
   // -----------------------------------------------------------
-  _computeApproachAvoidanceWaypoint(ship, target, approachAxisWorld, rawWaypoint) {
-    const cached = ship._dockingAvoidanceWaypoint;
-    if (cached) {
-      const distToCached = vecLength({
-        x: ship.position.x - cached.x,
-        y: ship.position.y - cached.y,
-        z: ship.position.z - cached.z,
-      });
-      if (distToCached > this.DOCKING_AVOIDANCE_ARRIVAL_RADIUS) {
-        // まだ迂回点に到達していない間は、直線が再度安全かどうかに
-        // 関わらず同じ迂回点へ向かい続ける（振動防止）。
-        return cached;
-      }
-      // 迂回点に十分近づいた。以後は毎フレームの安全判定に戻す
-      // （下記へ続く。再び危険と判定されれば新しい迂回点を張る）。
-      ship._dockingAvoidanceWaypoint = null;
+  _applyRollTorque(ship, target, desiredTorque) {
+    const rollError = this._computeRollErrorAngle(ship, target);
+    const rollLocked = this._lockRollIfWithinTolerance(ship, rollError.angle);
+    if (!rollLocked && Math.abs(rollError.angle) > this.DOCKING_ROLL_MIN_ANGLE) {
+      const rollTorqueStrength = clamp(rollError.angle / this.DOCKING_ROLL_FULL_TORQUE_ANGLE, -1, 1);
+      desiredTorque.z = rollError.axis.z * rollTorqueStrength;
     }
-
-    const clearance = this._pointToSegmentDistance(target.position, ship.position, rawWaypoint);
-    const safeDistance = this.DOCKING_FINAL_APPROACH_DISTANCE + this.DOCKING_AVOIDANCE_EXIT_MARGIN;
-    if (clearance >= safeDistance) {
-      return rawWaypoint;
-    }
-
-    // 艦の現在位置を進入軸へ投影し、横方向オフセット（進入軸に垂直な
-    // 成分）を取り出す。
-    const toShipWorld = {
-      x: ship.position.x - target.position.x,
-      y: ship.position.y - target.position.y,
-      z: ship.position.z - target.position.z,
-    };
-    const alongComp = vecDot(toShipWorld, approachAxisWorld);
-    const lateral = {
-      x: toShipWorld.x - approachAxisWorld.x * alongComp,
-      y: toShipWorld.y - approachAxisWorld.y * alongComp,
-      z: toShipWorld.z - approachAxisWorld.z * alongComp,
-    };
-    const lateralLen = vecLength(lateral);
-
-    let lateralDirWorld;
-    if (lateralLen > 1e-3) {
-      lateralDirWorld = vecScale(lateral, 1 / lateralLen);
-    } else {
-      // 艦がほぼ進入軸の真上（横ズレがない）にいる特異ケース。
-      // 進入軸に垂直などれかの方向を使えれば十分なので、ワールド
-      // 上方向との外積を試し、それも縮退する（進入軸がほぼ真上/
-      // 真下を向く艦種向けの姿勢）ならワールドX軸で代用する。
-      const upWorld = { x: 0, y: 1, z: 0 };
-      const fallback = vecCross(upWorld, approachAxisWorld);
-      const fallbackLen = vecLength(fallback);
-      lateralDirWorld = fallbackLen > 1e-3
-        ? vecScale(fallback, 1 / fallbackLen)
-        : { x: 1, y: 0, z: 0 };
-    }
-
-    const waypoint = {
-      x: target.position.x + lateralDirWorld.x * this.DOCKING_AVOIDANCE_DETOUR_RADIUS,
-      y: target.position.y + lateralDirWorld.y * this.DOCKING_AVOIDANCE_DETOUR_RADIUS,
-      z: target.position.z + lateralDirWorld.z * this.DOCKING_AVOIDANCE_DETOUR_RADIUS,
-    };
-    ship._dockingAvoidanceWaypoint = waypoint;
-    return waypoint;
+    return rollLocked;
   },
 
   // -----------------------------------------------------------
-  // v30: ゴーアラウンド旋回円を、オーバーシュート検知フレームの
-  // 艦の位置・進行方向から一度だけ構築する。
-  //
-  //   平面: ワールド上方向{0,1,0}を法線とする水平面（＝ヨー旋回、
-  //         pitch/rollは巻き込まない）。艦の進行方向をこの平面へ
-  //         投影して旋回開始方向とする。
-  //   中心: 進行方向に対して垂直な2方向のうち、「再アプローチ
-  //         ウェイポイント（進入軸手前側）に近い側」を選び、艦の
-  //         現在位置からDOCKING_GO_AROUND_RADIUS分だけそちらへ
-  //         離れた点を中心にする。これにより、円の向こう半周が
-  //         自然と進入軸の手前側を向く。
-  //   回転方向: 中心を選んだ側と逆回り（艦から見て中心へ向く方向を
-  //         軸に、進行方向から中心方向へ回る向き）に旋回すれば、
-  //         進行方向を保ったまま滑らかに弧を描ける。
-  //
-  // 速度がほぼゼロ（静止に近い）場合は進行方向の代わりに艦の船首
-  // 方向を使う。
+  // 角速度ダンピング: 各軸、上でトルクを既に発生させていない
+  // （|desiredTorque[axis]|が1未満の）分だけブレーキトルクを
+  // 上乗せする。角速度がARRIVAL_ANGULAR_SPEED未満に落ちている軸は
+  // 「スラスターの限界で完全に0にしきれない」問題への対策として
+  // 直接0にスナップする。
   // -----------------------------------------------------------
-  _startGoAroundTurn(ship) {
-    const target = State.dockingTarget;
-    if (!target) {
-      ship._dockingGoAround = null;
-      return;
-    }
-    const upWorld = { x: 0, y: 1, z: 0 };
-    const speed = vecLength(ship.velocity);
-    const rawHeading =
-      speed > 1e-3
-        ? vecScale(ship.velocity, 1 / speed)
-        : vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, ship.quaternion));
-
-    // 進行方向を水平面へ投影（上下成分を捨てて水平のヨー旋回にする）
-    const headingUpComp = vecDot(rawHeading, upWorld);
-    const headingFlat = {
-      x: rawHeading.x - upWorld.x * headingUpComp,
-      y: rawHeading.y - upWorld.y * headingUpComp,
-      z: rawHeading.z - upWorld.z * headingUpComp,
-    };
-    const headingFlatLen = vecLength(headingFlat);
-    const headingDirWorld =
-      headingFlatLen > 1e-6 ? vecScale(headingFlat, 1 / headingFlatLen) : { x: 0, y: 0, z: -1 };
-
-    // 進行方向に直交する水平方向（右手系: up × heading）
-    const rightWorld = vecNormalize(vecCross(upWorld, headingDirWorld));
-
-    // 再アプローチウェイポイント（進入軸手前側）が、艦から見て
-    // rightWorld側・-rightWorld側のどちらに近いかで中心側を選ぶ。
-    const approachAxisWorld = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion));
-    const waypoint = this._computeReapproachWaypoint(target, approachAxisWorld);
-    const toWaypoint = {
-      x: waypoint.x - ship.position.x,
-      y: waypoint.y - ship.position.y,
-      z: waypoint.z - ship.position.z,
-    };
-    const sideSign = vecDot(toWaypoint, rightWorld) >= 0 ? 1 : -1;
-
-    const centerDirWorld = vecScale(rightWorld, sideSign);
-    const center = {
-      x: ship.position.x + centerDirWorld.x * this.DOCKING_GO_AROUND_RADIUS,
-      y: ship.position.y + centerDirWorld.y * this.DOCKING_GO_AROUND_RADIUS,
-      z: ship.position.z + centerDirWorld.z * this.DOCKING_GO_AROUND_RADIUS,
-    };
-
-    ship._dockingGoAround = {
-      center,
-      radius: this.DOCKING_GO_AROUND_RADIUS,
-      // 円周上の「現在位置から中心への方向」の逆（＝艦から見た
-      // 中心からの外向き方向）を角度0の基準にする。
-      startOutward: vecScale(centerDirWorld, -1),
-      // sideSign>0（中心が艦の右側）なら艦は中心の周りを反時計回り
-      // （up軸から見て）に進む必要がある。詳細はコメント参照。
-      sideSign,
-      arcTraveled: 0,
-    };
-  },
-
-  // ゴーアラウンド円弧上を、現在の弧長位置からlookAheadDistanceだけ
-  // 進んだ点の座標を返す。円周上を移動するのでarcTraveled（既に
-  // 辿った弧長）を角度に変換して回転させるだけでよい。
-  _lookAheadPointOnGoAround(goAround, lookAheadDistance) {
-    const totalAngle = goAround.arcTraveled / goAround.radius +
-      lookAheadDistance / goAround.radius;
-    // sideSign>0: 中心が右側 → 艦は中心から見て時計回りに外向きベクトル
-    // を回転させる必要がある（進行方向が常に外向きベクトルの90°
-    // 進行方向側になるように）。ロドリゲスの回転公式をup軸周りで使う。
-    const upWorld = { x: 0, y: 1, z: 0 };
-    const angle = -goAround.sideSign * totalAngle;
-    const rotated = this._rotateAroundAxis(goAround.startOutward, upWorld, angle);
-    return {
-      x: goAround.center.x + rotated.x * goAround.radius,
-      y: goAround.center.y + rotated.y * goAround.radius,
-      z: goAround.center.z + rotated.z * goAround.radius,
-    };
-  },
-
-  // 単位ベクトルaxisの周りにvecをangle(rad)だけ回転させる
-  // （ロドリゲスの回転公式）。
-  _rotateAroundAxis(vec, axis, angle) {
-    const cos = Math.cos(angle);
-    const sin = Math.sin(angle);
-    const dot = vecDot(vec, axis);
-    const cross = vecCross(axis, vec);
-    return {
-      x: vec.x * cos + cross.x * sin + axis.x * dot * (1 - cos),
-      y: vec.y * cos + cross.y * sin + axis.y * dot * (1 - cos),
-      z: vec.z * cos + cross.z * sin + axis.z * dot * (1 - cos),
-    };
-  },
-
-  // v30: ゴーアラウンド中の姿勢目標方向。円弧上の先読み点（艦から
-  // DOCKING_GO_AROUND_LOOKAHEAD_DISTANCEだけ先）を目指す。毎フレーム
-  // 艦が実際に進んだ弧長をarcTraveledに積算し、円弧の総辿破角が
-  // DOCKING_GO_AROUND_MAX_ARCへ達したら（＝ほぼ半周した）呼び出し側で
-  // 通常の再アプローチウェイポイント追従へ引き継ぐ
-  // （_isGoAroundComplete参照）。
-  _computeGoAroundHeadingDirWorld(ship, goAround, dt) {
-    // 艦の実際の速度（水平成分の速さ）を弧長の進み具合として積算する。
-    // 停止に近い場合は円弧上を進まない（その場で頭だけ振らせない）。
-    const speed = vecLength(ship.velocity);
-    if (speed > 1e-3 && dt) {
-      goAround.arcTraveled += speed * dt;
-    }
-    const lookAheadPoint = this._lookAheadPointOnGoAround(
-      goAround,
-      this.DOCKING_GO_AROUND_LOOKAHEAD_DISTANCE
-    );
-    const dir = {
-      x: lookAheadPoint.x - ship.position.x,
-      y: lookAheadPoint.y - ship.position.y,
-      z: lookAheadPoint.z - ship.position.z,
-    };
-    const dirLen = vecLength(dir);
-    return dirLen > 1e-6 ? vecScale(dir, 1 / dirLen) : null;
-  },
-
-  // 円弧の辿破角がDOCKING_GO_AROUND_MAX_ARCへ達したかどうか。
-  _isGoAroundComplete(goAround) {
-    if (!goAround) return true;
-    const angleTraveled = goAround.arcTraveled / goAround.radius;
-    return angleTraveled >= this.DOCKING_GO_AROUND_MAX_ARC;
-  },
-
-  _computeReapproachWaypointDirWorld(ship, target, approachAxisWorld) {
-    const waypoint = this._computeReapproachWaypoint(target, approachAxisWorld);
-    const dir = {
-      x: waypoint.x - ship.position.x,
-      y: waypoint.y - ship.position.y,
-      z: waypoint.z - ship.position.z,
-    };
-    const dirLen = vecLength(dir);
-    return dirLen > 1e-6 ? vecScale(dir, 1 / dirLen) : null;
-  },
-
-  _computeHeadingTargetDirWorld(ship, target, targetDirWorld, approachAxisWorld, distance, onApproachSide, dt) {
-    if (!onApproachSide) {
-      // v29: 「進入軸の手前側にいない(onApproachSide=false)」状態には
-      // 2種類ある。(1)最終進入フェーズから実際にオーバーシュートした
-      // 場合（ship._dockingReapproaching=true）と、(2)それ以外
-      // （通常接近フェーズでたまたま進入軸をまたいで奥に出てしまった
-      // 場合など、最終進入を一度も経験していない）。
-      // 前者だけ再アプローチへ向け、後者は従来通り
-      // 「目的地の方角」に向く単純なフォールバック(v17)のままにする
-      // （再アプローチは"最終進入からのオーバーシュート"時専用の
-      // 挙動にしたいという要望への対応。_computeOnApproachSideWithHysteresis
-      // 側でship._dockingReapproachingの発動条件自体を絞っている）。
-      //
-      // v30: 再アプローチ中は、まず「ゴーアラウンド」（進行方向を
-      // 保ったままヨーだけで円弧を描いて反転する、飛行機の
-      // ゴーアラウンドのような動き）を優先する。円弧をひとしきり
-      // （DOCKING_GO_AROUND_MAX_ARC分）辿り終えたら
-      // （_isGoAroundComplete）、従来通りの再アプローチウェイポイント
-      // への直線追従に引き継ぎ、進入軸手前側へ実際に戻ってこさせる。
-      if (ship._dockingReapproaching) {
-        if (!this._isGoAroundComplete(ship._dockingGoAround)) {
-          const goAroundDirWorld = this._computeGoAroundHeadingDirWorld(ship, ship._dockingGoAround, dt);
-          if (goAroundDirWorld) return goAroundDirWorld;
-        }
-        const waypointDirWorld = this._computeReapproachWaypointDirWorld(ship, target, approachAxisWorld);
-        return waypointDirWorld || targetDirWorld;
-      }
-      return targetDirWorld;
-    }
-    if (distance <= 1e-4) return approachAxisWorld;
-
-    // v37: 船首と目的地方向のなす角を見て、大きくズレている間は
-    // ベジエ（循環構造を持つため大きくズレた船首では収束しない）を
-    // 使わず、単純な「目的地の方角」へのフォールバックにする。
-    // ヒステリシス付きでship._dockingUsingBezierに現在の状態を
-    // キャッシュする（フレームをまたいだ状態保持）。
-    const noseWorldForBezierCheck = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, ship.quaternion));
-    const headingAngleToTarget = Math.acos(clamp(vecDot(noseWorldForBezierCheck, targetDirWorld), -1, 1));
-    const wasUsingBezier = ship._dockingUsingBezier === true;
-    const enterAngle = this.DOCKING_HEADING_BEZIER_ENTER_ANGLE;
-    const exitAngle = enterAngle + this.DOCKING_HEADING_BEZIER_ENTER_MARGIN;
-    const useBezier = wasUsingBezier
-      ? headingAngleToTarget < exitAngle
-      : headingAngleToTarget < enterAngle;
-    ship._dockingUsingBezier = useBezier;
-
-    if (!useBezier) {
-      return targetDirWorld;
-    }
-
-    const bezier = this._buildApproachBezier(ship, target, approachAxisWorld, distance);
-    const lookAheadDist = Math.min(this.DOCKING_BEZIER_LOOKAHEAD_DISTANCE, distance);
-    const lookAheadPoint = this._lookAheadPointOnBezier(bezier, lookAheadDist);
-
-    const dir = {
-      x: lookAheadPoint.x - ship.position.x,
-      y: lookAheadPoint.y - ship.position.y,
-      z: lookAheadPoint.z - ship.position.z,
-    };
-    const dirLen = vecLength(dir);
-    return dirLen > 1e-6 ? vecScale(dir, 1 / dirLen) : targetDirWorld;
-  },
-
-  // -----------------------------------------------------------
-  // v21: フルトルクになる角度閾値を、距離800(DOCKING_HEADING_
-  // BLEND_START_DISTANCE)から距離300(DOCKING_HEADING_BLEND_END_DISTANCE、
-  // v38時点)の間で「緩め(DOCKING_HEADING_FULL_TORQUE_ANGLE, 約60°)」
-  // から「厳しめ(DOCKING_FINAL_HEADING_FULL_TORQUE_ANGLE, 約20°)」へ
-  // 線形補間する。_computeHeadingTargetDirWorldの目標方向ブレンドと
-  // 同じ区間・同じtを使うことで、「距離800からアプローチと同時に
-  // 少しずつ回頭を強めながら姿勢を整えていく」という一貫した
-  // 挙動になる。300以降は常にDOCKING_FINAL_HEADING_FULL_TORQUE_ANGLE
-  // （厳しめ・小さい誤差でもフルトルク）のままなので、300→200の
-  // 猶予区間でしっかり回頭を追いつかせられる。
-  // -----------------------------------------------------------
-  _computeHeadingFullTorqueAngle(distance) {
-    const blendRange = Math.max(
-      1e-6,
-      this.DOCKING_HEADING_BLEND_START_DISTANCE - this.DOCKING_HEADING_BLEND_END_DISTANCE
-    );
-    const t = clamp(
-      (this.DOCKING_HEADING_BLEND_START_DISTANCE - distance) / blendRange,
-      0,
-      1
-    );
-    return (
-      this.DOCKING_HEADING_FULL_TORQUE_ANGLE +
-      (this.DOCKING_FINAL_HEADING_FULL_TORQUE_ANGLE - this.DOCKING_HEADING_FULL_TORQUE_ANGLE) * t
-    );
-  },
-
-  // -----------------------------------------------------------
-  // v22: 目的地に保存された姿勢(target.quaternion)の"上"方向
-  // （ワールドY軸をtarget.quaternionで回転したもの）を艦の
-  // ローカル座標へ変換し、艦の現在のローカルZ軸（船首-方向の
-  // 逆＝ローカル+Z）まわりに見て、艦のローカルY軸からどれだけ
-  // ズレているかをroll誤差角として返す。
-  //
-  // 単純に「目標の上ベクトルと艦の上ベクトルのなす角」を使うと、
-  // 艦がまだ目標方向を向ききっていない（pitch/yawが大きくズレて
-  // いる）間はそのズレ自体がroll誤差に混入し、不要なroll回転を
-  // 誘発してしまう。それを避けるため、艦のローカルZ軸（現在の
-  // 船首軸）を基準にした平面へ目標の上ベクトルを投影してから
-  // 角度を測る＝「今向いている方向を軸として、上方向だけがどれだけ
-  // 傾いているか」を見る形にしている。
-  //
-  // 戻り値: { angle, axis } のうちaxisはローカルpitch/yaw成分を
-  // 含まない純粋なroll軸（0,0,±1相当）方向で、符号がそのまま
-  // 回頭すべき向きを表す。
-  // -----------------------------------------------------------
-  _computeRollErrorAngle(ship, target) {
-    const targetUpWorld = rotateVecByQuat({ x: 0, y: 1, z: 0 }, target.quaternion);
-    const targetUpLocal = rotateVecByQuat(targetUpWorld, conjugateQuat(ship.quaternion));
-
-    // 艦のローカルZ軸（船首軸）成分を取り除き、Z軸まわりの平面へ投影
-    const zComp = targetUpLocal.z;
-    const projected = { x: targetUpLocal.x, y: targetUpLocal.y, z: 0 };
-    const projLen = vecLength(projected);
-    if (projLen < 1e-6) {
-      // 目標の上方向がほぼ艦の船首軸と一致（＝roll軸として不定）。
-      // 極めて稀（目的地姿勢が艦の現在の船首方向と同じ軸を向いて
-      // いる場合）で、この場合はroll誤差を評価できないため0を返す。
-      return { angle: 0, axis: { x: 0, y: 0, z: 1 } };
-    }
-    const currentUpLocal = { x: 0, y: 1, z: 0 };
-    const projNorm = vecScale(projected, 1 / projLen);
-
-    // currentUpLocal(0,1,0)からprojNormへの回転角・向きをZ軸まわりで求める。
-    // 2D外積(x1*y2 - y1*x2)で符号、内積でcos角を得る（atan2で安定に）。
-    const cross = currentUpLocal.x * projNorm.y - currentUpLocal.y * projNorm.x;
-    const dot = currentUpLocal.x * projNorm.x + currentUpLocal.y * projNorm.y;
-    const angle = Math.atan2(cross, dot);
-    // axisは(0,0,1)固定。angleの符号がそのまま「艦のローカル+Z軸周り
-    // にangleだけ回せば目標に一致する」向きに対応する（シミュレーション
-    // で実際に収束することを検証済み）。
-    return { angle, axis: { x: 0, y: 0, z: 1 } };
-  },
-
-  // -----------------------------------------------------------
-  // v23: onApproachSideのヒステリシス版。艦が進入軸から大きく
-  // 横にズレた位置にいると、alongDistWorldの符号だけでの判定は
-  // 艦のわずかな前後移動でも頻繁に反転してしまう
-  // （DOCKING_APPROACH_SIDE_EXIT_MARGINのコメント参照）。
-  //
-  // 一度「手前側(true)」と判定された場合、alongDistWorldが
-  // DOCKING_APPROACH_SIDE_EXIT_MARGIN（負の値、既定-20）を
-  // 下回るまでは「手前側」の判定を維持する。逆に一度「奥側
-  // (false)」と判定された場合は、alongDistWorldが0以上に
-  // 戻り次第すぐ「手前側」に復帰する（奥から戻ってくる際に
-  // わざと遅らせる理由はないため、falseからtrueへの遷移は
-  // 従来通り即時）。
-  //
-  // 判定結果はship._dockingOnApproachSideにフレームをまたいで
-  // キャッシュする（ドッキング解除時などに古い値が残っても、
-  // 次にドッキング開始した際は最初のフレームでalongDistWorld>=0
-  // なら即trueになるだけなので実害はない）。
-  // -----------------------------------------------------------
-  _computeOnApproachSideWithHysteresis(ship, alongDistWorld) {
-    const wasOnApproachSide = ship._dockingOnApproachSide !== false; // 未設定時はtrue扱い（従来のデフォルト挙動に合わせる）
-    let onApproachSide;
-    if (wasOnApproachSide) {
-      onApproachSide = alongDistWorld >= this.DOCKING_APPROACH_SIDE_EXIT_MARGIN;
-    } else {
-      onApproachSide = alongDistWorld >= 0;
-    }
-    ship._dockingOnApproachSide = onApproachSide;
-
-    // v29: 「再アプローチが、最終進入からのオーバーシュート以外の
-    // 場面でも発動してしまう」という報告への対応。
-    //
-    // 旧実装(v27)は「手前側→奥側へ切り替わった瞬間」であれば距離や
-    // フェーズを問わず無条件に再アプローチモードへ入っていた。この
-    // ためたとえば通常接近フェーズ（最終進入に一度も入っていない、
-    // 遠方で艦が進入軸をわずかにまたいだだけ）でもalongDistWorldの
-    // 符号が反転すれば再アプローチが誤発動しうる状態だった。
-    //
-    // 対策: 「直前のフレームで実際に最終進入フェーズ(inFinalApproach)
-    // に入っていたか」をship._dockingWasInFinalApproach（
-    // _buildDesiredForAutoDocking側でフレーム末に更新）で判定し、
-    // 最終進入中だった場合に限り、手前側→奥側への切り替わりを
-    // 「最終進入からのオーバーシュート」とみなして再アプローチを
-    // 発動する。最終進入に入っていない間の同じ切り替わりは、
-    // 従来通りのフォールバック（目的地の方角を向く通常ロジック）に
-    // 任せ、再アプローチウェイポイントは使わない。
-    const wasInFinalApproach = ship._dockingWasInFinalApproach === true;
-    if (wasOnApproachSide && !onApproachSide && wasInFinalApproach) {
-      ship._dockingReapproaching = true;
-      // v30: 再アプローチ発動の瞬間、ゴーアラウンド旋回円を一度だけ
-      // 構築する（このフレームの艦の位置・速度方向を基準にする）。
-      this._startGoAroundTurn(ship);
-    } else if (onApproachSide) {
-      ship._dockingReapproaching = false;
-      ship._dockingGoAround = null;
-    }
-
-    // v24: 「目的地の姿勢（進入軸）が艦の実際の接近経路と大きく
-    // 食い違っている場合（例: ほぼ直進で着く位置関係なのに目的地の
-    // 姿勢が直進方向とはかけ離れている）、alongDistWorldが距離800を
-    // 切ってもずっと負のままになり、一度もonApproachSideがtrueに
-    // ならない」という報告への対応。
-    //
-    // この関数のfalse時フォールバック（進入軸への姿勢固定・最終進入
-    // ゾーンを無効化する）は本来、「一度は進入軸の手前側に入ったのに
-    // 後から追い越して奥に出てしまった」場合に、姿勢が目的地から
-    // 離れていく方向へ固定され続ける不具合(v17)を防ぐためのもの。
-    // 艦がそもそも一度も手前側に入ったことがなければこの「追い越し」
-    // は起こりようがなく、フォールバックを発動させる理由がない。
-    // むしろ発動させると、姿勢がいつまで経っても進入軸へブレンド
-    // されず最終進入フェーズにも入れない（＝目的地の保存済み姿勢へ
-    // 一切旋回しない）という今回の不具合に直結する。
-    //
-    // 対策: 本物のonApproachSide=trueを一度でも経験したかを
-    // ship._dockingEverOnApproachSideに記録する。まだ一度も経験して
-    // いない間は、生のonApproachSideがfalseでも「手前側」扱いを
-    // 返し、オーバーシュート用フォールバックを保留する。一度でも
-    // 本物のtrueを経験した後は、以後は従来どおり生の判定（と既存の
-    // ヒステリシス）をそのまま使う。
-    if (onApproachSide) {
-      ship._dockingEverOnApproachSide = true;
-    }
-    if (!onApproachSide && !ship._dockingEverOnApproachSide) {
-      return true;
-    }
-    return onApproachSide;
-  },
-
-  // -----------------------------------------------------------
-  // v24: 「船首から見てほぼ真後ろ（180°近く）の方向へ向けたい時、
-  // 全く旋回せず逆噴射だけで移動しようとする」不具合の修正。
-  //
-  // 原因: 従来はnoseLocalとdirLocalの外積の長さをそのままasin()に
-  // 渡して角度を求めていた（angle = asin(|cross|)）。sin(θ)は
-  // θ=90°を軸に対称（sin(θ)=sin(180°-θ)）なため、外積の長さだけでは
-  // 「ほぼ正面(θ≈0°)」と「ほぼ真後ろ(θ≈180°)」を区別できない。
-  // 真後ろに近づくほど外積の長さは0へ収束し、実際には180°近い
-  // 誤差があるのにangle≈0と誤判定され、HEADING_LOCK_TOLERANCE_DEG
-  // （0.01°）を下回ったとしてheadingLockedがtrueになり、角速度を
-  // 強制的にゼロへ吸収して回頭そのものを止めてしまっていた。以後は
-  // 並進側の制御だけが働き、船首を向けないまま逆噴射スラスターで
-  // 直接後退する、という報告どおりの挙動になっていた。
-  //
-  // 対策: atan2(|cross|, dot)で0..πの全域について正しい角度を
-  // 求める。ちょうど180°付近では外積そのものが数値的に縮退し
-  // 回転軸が不定になる（sin(180°)=0で軸方向が消える）ため、縮退時
-  // （外積がほぼ0で、かつ正面より背面に近い＝angleがπ/2超）は
-  // 仮の回転軸を使って旋回のきっかけを作る。一度でも旋回し始めれば
-  // 外積が非ゼロになり、以降は通常どおり正しい軸へ収束する。
-  // -----------------------------------------------------------
-  _computeHeadingAngleAndAxis(noseLocal, dirLocal) {
-    const axis = vecCross(noseLocal, dirLocal);
-    const crossLen = vecLength(axis);
-    const dot = clamp(vecDot(noseLocal, dirLocal), -1, 1);
-    const angle = Math.atan2(crossLen, dot); // 0..π（180°付近も含め正確）
-
-    let axisNorm;
-    if (crossLen > 1e-6) {
-      axisNorm = vecScale(axis, 1 / crossLen);
-    } else if (angle > Math.PI / 2) {
-      // 外積が縮退する特異点（ほぼ真後ろ）。回転軸は数学的に不定
-      // なので、仮の軸（艦のローカルX軸）で旋回のきっかけを作る。
-      axisNorm = { x: 1, y: 0, z: 0 };
-    } else {
-      axisNorm = { x: 0, y: 0, z: 0 };
-    }
-
-    return { angle, axis: axisNorm };
-  },
-
-  _buildDesiredForAutoDocking(input, ship, dt) {
-    const target = State.dockingTarget;
-    const toTargetWorld = {
-      x: target.position.x - ship.position.x,
-      y: target.position.y - ship.position.y,
-      z: target.position.z - ship.position.z,
-    };
-    const distance = vecLength(toTargetWorld);
-
-    // v17: 距離がDOCKING_FINAL_APPROACH_DISTANCE以下になったら
-    // 「最終進入フェーズ」に切り替える。以後は目的地の方角ではなく
-    // 目的地に保存された姿勢そのものへ船首を固定し、まっすぐ一直線に
-    // 進入させる。
-    //
-    // ただし、これは「艦が目的地の進入軸上、まだ手前側にいる」場合
-    // にのみ有効な前提である。何らかの理由（急な外力、極端な初速、
-    // 手動操縦からの切り替え直後など）で艦が目的地を通り越して
-    // 奥側に出てしまった場合、姿勢を固定したままだと船首が
-    // 目的地と逆を向いたまま戻れなくなる（「奥に行き過ぎたのに
-    // 同じ方向を向き続けてさらに離れていく」不具合）。そのため、
-    // 進入軸上での位置関係（alongDistの符号）を見て、奥側に
-    // 出てしまっている間は通常フェーズと同じ「目的地の方角へ
-    // 船首を向ける」ロジックにフォールバックし、手前側まで
-    // 戻ってきたら改めて最終進入の姿勢固定を再開する。
-    const approachAxisWorld = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion));
-    const alongDistWorld = vecDot(toTargetWorld, approachAxisWorld);
-    const onApproachSide = this._computeOnApproachSideWithHysteresis(ship, alongDistWorld);
-
-    // v30: 通常フェーズ（まだ最終進入に入っていない間）が姿勢・並進の
-    // 両方で実際に目指す先を、target.positionそのものではなく進入軸上の
-    // 仮想ウェイポイント（_computeVirtualApproachTarget、target.positionの
-    // DOCKING_VIRTUAL_TARGET_OFFSET手前）に差し替える。
-    // これにより、距離200（本物のtarget.positionまでの距離）へ到達する
-    // 頃には既に位置・姿勢とも進入軸上に乗っており、以降の最終進入
-    // フェーズ（_buildFinalApproachForce、本物のtarget.positionを直接
-    // 使う）はほぼ直進の制動だけで済むようになる。
-    //
-    // onApproachSideがfalse（進入軸の奥側に出てしまっている）場合は
-    // 従来通り本物のtarget.positionをそのまま使う
-    // （_computeHeadingTargetDirWorld・並進の再アプローチ分岐が
-    // それぞれ独自にフォールバック/ウェイポイントを解決するため、
-    // ここでは通常時の1本の経路計算にのみ影響させる）。
-    const virtualApproachTargetPos = this._computeVirtualApproachTarget(
-      target,
-      approachAxisWorld,
-      ship.position
-    );
-
-    // v43: 「艦の現在位置→仮想ウェイポイント」の直線が距離200
-    // (DOCKING_FINAL_APPROACH_DISTANCE)未満までtarget.positionへ
-    // 接近してしまう場合、その直線経路自体を迂回点経由に差し替える
-    // （DOCKING_AVOIDANCE_DETOUR_RADIUS定数群のコメント参照）。
-    // onApproachSide=falseの間（奥側に出てしまっている・再アプローチ
-    // 中）はここでは扱わない。そちらは_computeHeadingTargetDirWorldの
-    // 再アプローチ/ゴーアラウンド分岐と並進側のship._dockingReapproaching
-    // 分岐がそれぞれ専用の経路（進入軸手前側のウェイポイント）へ
-    // 既に迂回しているため、二重に迂回ロジックを重ねる必要がない。
-    const effectiveApproachTargetPos = onApproachSide
-      ? this._computeApproachAvoidanceWaypoint(ship, target, approachAxisWorld, virtualApproachTargetPos)
-      : virtualApproachTargetPos;
-    // onApproachSideがfalseへ落ちた（奥側に出た）場合は迂回状態も
-    // リセットしておく。再度手前側に戻った際、古い迂回点に引っ張られ
-    // ないようにするため。
-    if (!onApproachSide) {
-      ship._dockingAvoidanceWaypoint = null;
-    }
-
-    const effectiveTarget = onApproachSide
-      ? { position: effectiveApproachTargetPos, quaternion: target.quaternion }
-      : target;
-    const toEffectiveTargetWorld = {
-      x: effectiveTarget.position.x - ship.position.x,
-      y: effectiveTarget.position.y - ship.position.y,
-      z: effectiveTarget.position.z - ship.position.z,
-    };
-
-    // v21: 「距離200(DOCKING_FINAL_APPROACH_DISTANCE)に着く前に
-    // 姿勢を回り切っておいて、以降はほぼ直進だけにしたい」という
-    // 要望への対応。距離条件だけでなく、船首が進入軸方向へ
-    // DOCKING_FINAL_APPROACH_HEADING_READY_ANGLE以内まで実際に
-    // 揃っていることも最終進入フェーズへ入る条件に加える。
-    // 揃うのが遅れている間は通常フェーズの回頭ロジックのまま
-    // その場に留まって姿勢を合わせ切る（headingReadyForFinalApproach、
-    // 前進速度の絞りはheadingHold変数側で行う）。
-    const approachAxisLocalForCheck = rotateVecByQuat(approachAxisWorld, conjugateQuat(ship.quaternion));
-    const headingErrorFromAxis = Math.acos(clamp(-approachAxisLocalForCheck.z, -1, 1));
-    const headingReadyForFinalApproach =
-      headingErrorFromAxis <= this.DOCKING_FINAL_APPROACH_HEADING_READY_ANGLE;
-
-    // v44: 進入軸上にいるか（横方向オフセットが十分小さいか）を
-    // 最終進入の突入条件に追加する。toTargetWorld（本物のtarget.
-    // positionまでの実ベクトル）を進入軸へ投影し、軸に垂直な
-    // 成分の長さを見る（DOCKING_FINAL_APPROACH_LATERAL_READY_OFFSET
-    // のコメント参照）。
-    const alongDistForAxisCheck = vecDot(toTargetWorld, approachAxisWorld);
-    const lateralFromAxis = {
-      x: toTargetWorld.x - approachAxisWorld.x * alongDistForAxisCheck,
-      y: toTargetWorld.y - approachAxisWorld.y * alongDistForAxisCheck,
-      z: toTargetWorld.z - approachAxisWorld.z * alongDistForAxisCheck,
-    };
-    const onAxisForFinalApproach =
-      vecLength(lateralFromAxis) <= this.DOCKING_FINAL_APPROACH_LATERAL_READY_OFFSET;
-
-    // v31: 「アプローチ中に仮想ウェイポイントへ向かいながら姿勢も
-    // 進入軸へ揃えていき、距離200到達と同時に位置・姿勢とも
-    // 進入軸上に乗っている」という設計を踏まえ、最終進入ゾーンへの
-    // 突入条件からonApproachSideを外し、距離のみで判定する。
-    // オーバーシュート後の異常系（onApproachSide=falseかつ
-    // ship._dockingReapproaching=true）は、この直前の
-    // _computeOnApproachSideWithHysteresis内で既に再アプローチ/
-    // ゴーアラウンド専用ロジックへ切り替わっており、そちらが
-    // 姿勢制御を引き継ぐため、ここでinFinalApproachZoneがtrueに
-    // なっても実害はない。
-    //
-    // v44: 「再アプローチ/ゴーアラウンドが、距離500を目指す仮想
-    // ウェイポイント機能と喧嘩している」という報告への対応。
-    // 従来はinFinalApproachZoneがonApproachSideを見ていなかったため、
-    // 再アプローチ/ゴーアラウンド中（onApproachSide=false、まだ
-    // 進入軸の手前側に戻り切れていない）でも、本物のtarget.position
-    // への実距離がたまたま200を切ると最終進入ゾーンへ入ってしまい、
-    // headingHold/inFinalApproachが再アプローチ・ゴーアラウンドの
-    // 経路制御を上書きしてしまうことがあった。再アプローチ/
-    // ゴーアラウンドを明確に優先させるため、これらの最中
-    // （ship._dockingReapproaching=true）は最終進入ゾーンの判定
-    // 自体を無効化する。再アプローチウェイポイントに到達し
-    // onApproachSideが再びtrueに戻ってから、改めて通常の距離判定に
-    // 従う。
-    //
-    // また実際の姿勢固定(inFinalApproach)には引き続き
-    // headingReadyForFinalApproach（船首が進入軸に実際に揃っている
-    // こと）に加え、onAxisForFinalApproach（位置も進入軸上に
-    // 乗っていること）を要求するため、姿勢や位置が整わないまま
-    // 最終進入フェーズに入ってしまうことはない（揃うまでは
-    // headingHold＝その場で速度を殺しつつ調整中のまま留まる）。
-    const inFinalApproachZone =
-      distance <= this.DOCKING_FINAL_APPROACH_DISTANCE && !ship._dockingReapproaching;
-    const inFinalApproach =
-      inFinalApproachZone && headingReadyForFinalApproach && onAxisForFinalApproach;
-    // v29: 次フレームの_computeOnApproachSideWithHysteresis呼び出しが
-    // 「直前フレームで最終進入フェーズに入っていたか」を参照できる
-    // よう、このフレームで確定したinFinalApproachをship側に記録する。
-    // ここでの代入は次回呼び出し時に読まれる（今回のonApproachSide
-    // 判定は既にこの直前で完了済みなので、今回の判定には影響しない）。
-    ship._dockingWasInFinalApproach = inFinalApproach;
-    // 最終進入ゾーンに入っているのに姿勢または位置（進入軸上か）が
-    // まだ整っていない：その場で回頭・位置合わせを優先し、前進は
-    // DOCKING_HEADING_HOLD_FORWARD_DAMPINGまで絞る（完全停止では
-    // なく、多少は近づきながら合わせる）。
-    const headingHold =
-      inFinalApproachZone && !(headingReadyForFinalApproach && onAxisForFinalApproach);
-
-    // 目的方向への単位ベクトル（勢い殺しモードの判定、姿勢ブレンドの
-    // 奥側フォールバックで使う。安全装置である勢い殺し判定は本物の
-    // target.positionまでの距離・方角をそのまま使う）
-    const targetDirWorld = distance > 1e-4 ? vecNormalize(toTargetWorld) : null;
-
-    // v30: 姿勢のベジエ追従・通常フェーズの並進接近が実際に目指す
-    // 方向（onApproachSide中は仮想ウェイポイントの方角、奥側に出て
-    // いる間は従来通り本物の目的地の方角にフォールバックする）。
-    const approachTargetDirWorld =
-      vecLength(toEffectiveTargetWorld) > 1e-4 ? vecNormalize(toEffectiveTargetWorld) : targetDirWorld;
-
-    // v20: 「旋回で生じた横滑りをRCSだけでは殺しきれず目的地を
-    // 通り過ぎる」不具合対策。詳細は_updateMomentumKillStateのコメント参照。
-    const killingMomentum = this._updateMomentumKillState(ship, distance, targetDirWorld, dt);
-
-    // --- 姿勢: 通常は船首(-Z)を目的方向へ（距離が縮まるにつれ徐々に
-    //     進入軸方向へブレンド）、最終進入フェーズは目的地の保存済み
-    //     姿勢そのものへ、勢い殺しモード中は現在の速度ベクトル方向
-    //     （進行方向そのもの）へ向けるpitch/yawトルク ---
-    //
-    // v21: 「rollだけは常にユーザー入力を受け付けてしまっており、
-    // 距離800以降はrollも含めて自動制御に姿勢を委ねたい」という
-    // 要望への対応。距離800(DOCKING_HEADING_BLEND_START_DISTANCE)を
-    // 切ったらrollの手動入力(input.rotateRoll)も無視する。
-    // v22: さらに、rollを単に0へ収束させるだけでなく、目的地に
-    // 保存された姿勢のroll角そのものへ実際に合わせにいくよう
-    // なった（下記のautoRollLockActiveブロック、_computeRollErrorAngle
-    // 参照）。800以上ではこれまで通りrollは手動のまま。
-    // onApproachSideは見ない（通り越して奥側に出てしまっている間も
-    // 「距離800以内なら手動操作は全て自動制御に委ねる」という要望
-    // に忠実に、距離のみで判定する）。
-    const autoRollLockActive = distance <= this.DOCKING_HEADING_BLEND_START_DISTANCE;
-    let desiredTorque = { x: 0, y: 0, z: autoRollLockActive ? 0 : input.rotateRoll };
-    let headingLocked = false;
-    let rollLocked = false;
-
-    if (killingMomentum) {
-      // v20: 目的地/進入軸への通常の姿勢制御を中断し、船首を現在の
-      // 速度ベクトル方向へ向け直す。これにより速度のほぼ全てが
-      // 艦のローカルZ軸に乗り、艦内で最も強い並進スラスター
-      // （主機関・逆噴射スラスター）が全力でその速度を打ち消せる
-      // ようになる（並進側の処理は下記のkillingMomentum分岐を参照）。
-      const speed = vecLength(ship.velocity);
-      if (speed > 1e-4) {
-        const progradeWorld = vecScale(ship.velocity, 1 / speed);
-        const progradeLocal = rotateVecByQuat(progradeWorld, conjugateQuat(ship.quaternion));
-        const noseLocal = { x: 0, y: 0, z: -1 };
-        const { angle, axis: axisNorm } = this._computeHeadingAngleAndAxis(noseLocal, progradeLocal);
-
-        headingLocked = this._lockHeadingIfWithinTolerance(ship, angle);
-
-        if (!headingLocked && angle > this.DOCKING_HEADING_MIN_ANGLE) {
-          // 緊急の向き直しなので、最終進入と同じ厳しめの閾値で
-          // 素早くフルトルクへ近づける。
-          const torqueStrength = Math.min(1, angle / this.DOCKING_FINAL_HEADING_FULL_TORQUE_ANGLE);
-          desiredTorque.x = axisNorm.x * torqueStrength;
-          desiredTorque.y = axisNorm.y * torqueStrength;
-        }
-      }
-    } else if (distance > 1e-4) {
-      // v32: ヨー反転バグ対策。inFinalApproach（最終進入フェーズ、
-      // 姿勢が既に整っている）の間は、ベジエ先読み点という「位置」
-      // ベースの目標方向計算をやめ、target.quaternionが定める船首
-      // 方向（-Z軸）そのものを直接ワールド空間へ変換して姿勢目標に
-      // する。
-      // 理由: _computeHeadingTargetDirWorldの先読み点はベジエ曲線
-      // （終点=目的地位置）上を弧長ベースで辿るため、艦が目的地に
-      // 極めて接近する（distanceが小さくなる）と、先読み点が艦の
-      // すぐ近傍・場合によっては後方や横に来てしまうことがあった。
-      // これが「最後の姿勢固定でヨーが180度逆になる」不具合の原因
-      // だった。最終進入フェーズは既に船首が進入軸に揃っている
-      // (headingReadyForFinalApproach)ので、以後は位置を経由せず
-      // 目的地の保存済み姿勢へ直接収束させることで、位置計算の
-      // 不安定さの影響を受けなくする。
-      //
-      // v35: headingHold（最終進入ゾーンに入ったがまだ姿勢が
-      // 揃っていない間）も同じ問題を抱えていた。_buildApproachBezier
-      // の始点ハンドル(p1)は艦の「現在の船首方向」を接線として使う
-      // ため、船首がヨー反転などで大きく乱れている間にこの関数を
-      // 呼び続けると、乱れた船首方向を起点に次の目標方向を計算する
-      // 循環構造になり、姿勢がいつまで経っても収束しない（「泊まって
-      // からも姿勢調整を一切しない」報告の原因）。
-      // 対策: headingHold中もinFinalApproachと同様、位置ベースの
-      // ベジエ計算を経由せず、target.quaternionへ直接収束させる。
-      // 距離200圏内(inFinalApproachZone)に入って以降は常にこちらを
-      // 使い、位置ベースのベジエ追従は圏外（通常フェーズ）専用にする。
-      const useDirectHeadingTarget = inFinalApproach || headingHold;
-      const headingTargetWorld = useDirectHeadingTarget
-        ? vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion))
-        : this._computeHeadingTargetDirWorld(
-            ship,
-            effectiveTarget,
-            approachTargetDirWorld,
-            approachAxisWorld,
-            distance,
-            onApproachSide,
-            dt
-          );
-      const targetDirLocal = rotateVecByQuat(headingTargetWorld, conjugateQuat(ship.quaternion));
-
-      // 現在の船首方向（ローカル-Z）から見た目的方向への回転軸・角度を、
-      // 小角近似の外積で求める（fromVec × toVec ≈ 回転軸*sin(角度)、
-      // pitch/yawの2軸分だけを使う簡易版。厳密な最短回転ではないが
-      // 「船首を向ける」用途では十分な近似で、既存の角速度ダンピングと
-      // 同じ比例制御スキームに素直に乗せられる）。
-      const noseLocal = { x: 0, y: 0, z: -1 };
-      // x≈pitch誤差, y≈yaw誤差。角度自体はatan2ベースで0..π全域正確
-      // （_computeHeadingAngleAndAxis参照、v24でasin()の180°付近の
-      // 誤判定バグを修正）。
-      const { angle, axis: axisNorm } = this._computeHeadingAngleAndAxis(noseLocal, targetDirLocal);
-
-      // v09: 目標角度との差がHEADING_LOCK_TOLERANCE_DEG（既定0.01度）を
-      // 下回ったら、トルク要求を出さず角速度も強制的にゼロへ吸収する
-      // （_lockHeadingIfWithinTolerance）。これにより「ほぼ揃っている
-      // のに微小な残差を追いかけ続けてRCSが吹きっぱなしになる」現象を防ぐ。
-      headingLocked = this._lockHeadingIfWithinTolerance(ship, angle);
-
-      if (!headingLocked && angle > this.DOCKING_HEADING_MIN_ANGLE) {
-        // v21: 「距離200を境にフルトルク角度が緩め(60°)→厳しめ(20°)へ
-        // 瞬時に切り替わり、境界で急に回頭が強くなる（＝固定された
-        // ように感じる）」という報告への対応。
-        // _computeHeadingTargetDirWorldと同じ距離800→200の区間で、
-        // フルトルク角度自体も線形補間する。距離800以上では従来通り
-        // 穏やかな60°、距離200以下では従来通り厳しい20°になり、
-        // その間はなめらかに遷移する（「距離800からアプローチと同時に
-        // ゆっくり姿勢を整えたい」という要望に合わせ、200という
-        // 境界を実質的に無くす）。
-        const fullTorqueAngle = this._computeHeadingFullTorqueAngle(distance);
-        const torqueStrength = Math.min(1, angle / fullTorqueAngle);
-        desiredTorque.x = axisNorm.x * torqueStrength;
-        desiredTorque.y = axisNorm.y * torqueStrength;
+  _applyAngularDamping(ship, desiredTorque, dt, snapEpsilon) {
+    for (const axis of ['x', 'y', 'z']) {
+      if (Math.abs(ship.angularVelocity[axis]) < snapEpsilon) {
+        ship.angularVelocity[axis] = 0;
       }
     }
-
-    // v22: 「自動操船中、船首の向き(pitch/yaw)は目的地方向へ合わせて
-    // くれるが、rollは目的地に保存された姿勢のroll角までは合わせて
-    // くれない」という報告への対応。autoRollLockActive中（距離800
-    // 以内）は、pitch/yawと同じ比例制御スキームでroll角も目的地の
-    // 保存済み姿勢へ揃える。killingMomentum中（速度方向へ緊急に
-    // 向き直している最中）はpitch/yawの目標自体が目的地姿勢とは
-    // 無関係な進行方向になるため、rollだけ目的地姿勢を追いかけると
-    // 不自然になる。そのためkillingMomentum中はrollトルクを出さず
-    // 角速度ダンピングにのみ委ねる（=roll角速度を止めるだけ）。
-    if (autoRollLockActive && !killingMomentum) {
-      const rollError = this._computeRollErrorAngle(ship, target);
-      rollLocked = this._lockRollIfWithinTolerance(ship, rollError.angle);
-
-      if (!rollLocked && Math.abs(rollError.angle) > this.DOCKING_ROLL_MIN_ANGLE) {
-        const rollTorqueStrength = clamp(
-          rollError.angle / this.DOCKING_ROLL_FULL_TORQUE_ANGLE,
-          -1,
-          1
-        );
-        desiredTorque.z = rollError.axis.z * rollTorqueStrength;
-      }
-    }
-
-    // 角速度ダンピング: 自動操船中はpitch/yaw/rollいずれの軸も、
-    // 上記で意図的にトルクを発生させていない（≒0に近い）場合は
-    // 角速度を打ち消す方向へ寄せる。これにより目的方向へ向いた後
-    // 船首がピタッと止まり、rollもユーザーが手を離せば止まる。
-    // headingLocked時はship.angularVelocity.x/yが既に0へ吸収済み
-    // なのでダンピング対象はほぼrollのみになる。
-    // v09: 固定閾値の比例ブレーキではなく、艦の制動能力に基づいた
-    // オーバーシュートしない強さ（_computeOvershootSafeBrakeTorque）
-    // を使う。理由は通常のダンピングと同じ（艦種による慣性差）。
     const angSpeed = vecLength(ship.angularVelocity);
     if (angSpeed > this.AUTO_DAMPING_MIN_ANGULAR_SPEED) {
       const brakeDir = this._computeOvershootSafeBrakeTorque(ship, ship.angularVelocity, dt);
-      // 既に自動制御/手動入力で発生させているトルク要求へブレーキ分を
-      // 加算する（自動姿勢合わせと角速度ダンピングを同時に働かせる）。
       desiredTorque.x += brakeDir.x * (1 - Math.abs(desiredTorque.x));
       desiredTorque.y += brakeDir.y * (1 - Math.abs(desiredTorque.y));
       desiredTorque.z += brakeDir.z * (1 - Math.abs(desiredTorque.z));
@@ -2295,546 +960,796 @@ const ThrusterSolver = {
       desiredTorque.y = clamp(desiredTorque.y, -1, 1);
       desiredTorque.z = clamp(desiredTorque.z, -1, 1);
     }
+  },
 
-    // --- 並進: 目的地座標へ接近し、付近では速度を打ち消して静止する ---
-    const desiredForce = { x: 0, y: 0, z: 0 };
+  // -----------------------------------------------------------
+  // 艦のローカル速度全体を、目標速度ベクトル(ワールド座標)へ
+  // 一致させる並進力を desiredForce(x,y,z) に書き込む（全方位、
+  // 姿勢を問わず効く汎用ブレーキ/追従。headingHold/tunnel/
+  // brakeポイントなど「船首の向きに関わらず特定のワールド速度に
+  // したい」場面で使う）。
+  //   targetVelWorld: 目標のワールド速度ベクトル（静止させたいなら
+  //                   {0,0,0}）
+  // -----------------------------------------------------------
+  _applyVelocityMatch(ship, targetVelWorld, desiredForce) {
+    const targetVelLocal = rotateVecByQuat(targetVelWorld, conjugateQuat(ship.quaternion));
+    const localVel = rotateVecByQuat(ship.velocity, conjugateQuat(ship.quaternion));
+    const errLocal = {
+      x: targetVelLocal.x - localVel.x,
+      y: targetVelLocal.y - localVel.y,
+      z: targetVelLocal.z - localVel.z,
+    };
+    const errMag = vecLength(errLocal);
+    if (errMag < 1e-4) return;
+    const dir = vecScale(errLocal, 1 / errMag);
+    const strength = Math.min(1, errMag / this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR);
+    desiredForce.x = dir.x * strength;
+    desiredForce.y = dir.y * strength;
+    desiredForce.z = dir.z * strength;
+  },
+
+  // -----------------------------------------------------------
+  // 艦の現在位置から目標位置(ワールド)へ向かう並進力を desiredForce
+  // に書き込む。距離に応じた比例接近力と、艦の実際の制動能力から
+  // 逆算した速度上限（maxBrakingDistanceで指定）を合成する。
+  // 「制動距離ベースの速度上限を超えないよう」ブレーキを主として
+  // 解き、接近力はブレーキが余らせた分だけ上乗せする
+  // （v17以来の知見: 単純加算だと打ち消し合って通り過ぎる）。
+  //
+  //   maxBrakingDistanceOverride: 呼び出し側が明示的に速度上限を
+  //     「制動距離Nの速度」として指定したい場合の距離N。
+  //     nullなら艦の制動距離そのまま（実質無制限、自由巡航用）。
+  // -----------------------------------------------------------
+  DOCKING_POSITION_FULL_THRUST_DISTANCE_DEFAULT: 300,
+
+  // targetPosWorldへ向かう並進力を desiredForce に書き込む。
+  //   maxBrakingDistanceOverride: 速度上限を「制動距離N」として
+  //     明示指定したい場合の距離N。nullなら無制限（cruise用）。
+  //   stoppingDistanceForCapOverride: 「目的地への物理的な制動距離」
+  //     を計算する際に使う距離を、実際の操舵目標(targetPosWorld)への
+  //     距離ではなく、これで明示的に上書きする。省略時（undefined）
+  //     はtargetPosWorldへの距離をそのまま使う。
+  //     用途: approach/adjustフェーズでは、艦の操舵目標は仕想WPや
+  //     迂回点だが、「目的地に近づくと自然に減速する」という効果は
+  //     あくまでtarget.positionまでの実距離に基づくべきで、仕想WPの
+  //     手前で完全停止してしまうと（＝仕想WPまでの距離を基準にすると）
+  //     approachが仕想WP付近で停止・再加速を繰り返す不安定な挙動を
+  //     招く。この引数でtarget.positionまでの実距離を渡すことで、
+  //     「操舵方向は仕想WPへ、減速の基準はtarget.positionへの実距離」
+  //     を両立させる。
+  _applyApproachForce(ship, targetPosWorld, maxBrakingDistanceOverride, desiredForce, stoppingDistanceForCapOverride) {
+    const toTargetWorld = {
+      x: targetPosWorld.x - ship.position.x,
+      y: targetPosWorld.y - ship.position.y,
+      z: targetPosWorld.z - ship.position.z,
+    };
+    const distance = vecLength(toTargetWorld);
+    if (distance <= 1e-4) return;
+
+    const dirWorld = vecScale(toTargetWorld, 1 / distance);
+    const dirLocal = rotateVecByQuat(dirWorld, conjugateQuat(ship.quaternion));
     const localVel = rotateVecByQuat(ship.velocity, conjugateQuat(ship.quaternion));
 
-    if (killingMomentum) {
-      // v20: 接近力は一切出さず、フルブレーキだけをかける。姿勢が
-      // 速度ベクトル方向へ揃うにつれ、局所速度のほぼ全てがローカルZ
-      // 成分に乗ってくるため、この単純な「ローカル速度と逆向きに
-      // フル出力」でも主機関・逆噴射スラスターが自動的に選ばれ
-      // （03-thruster-solver.jsのソルバーが方向の一致度で評価する）、
-      // 弱いRCSだけに頼っていた通常フェーズより強く減速できる。
-      const speed = vecLength(localVel);
-      if (speed > 1e-4) {
-        const brakeDirLocal = vecScale(localVel, -1 / speed);
-        desiredForce.x = brakeDirLocal.x;
-        desiredForce.y = brakeDirLocal.y;
-        desiredForce.z = brakeDirLocal.z;
-      }
-    } else if (inFinalApproach) {
-      // v17: 最終進入フェーズ（距離200以下、かつv21よりheadingReady=
-      // 姿勢が既に整っている場合のみ）。姿勢は既に目的地の
-      // 保存済み姿勢へ固定を試みているので、並進側は
-      //   1) 目的地の進入軸に対する横ずれ(X/Y)を消す
-      //   2) 進入軸方向(Z)は制動距離ベースのブレーキで
-      //      オーバーシュートなく減速しながら進む
-      // の2つを別々に解く。approach力とbrake力を単純加算して
-      // クランプする旧方式は、ブレーキが必要な場面でも接近力に
-      // 打ち消されてブレーキ実効値が薄まり「通り越す」原因になって
-      // いたため、ここでは横方向とZ方向を分離した上でZ方向は
-      // ブレーキを主、接近をブレーキが許す残り分だけに制限する。
-      this._buildFinalApproachForce(desiredForce, ship, target, toTargetWorld, localVel, dt);
-    } else if (headingHold) {
-      // v21: 最終進入ゾーン(距離200以下)には入ったが、まだ姿勢が
-      // DOCKING_FINAL_APPROACH_HEADING_READY_ANGLE以内に揃って
-      // いない状態。
-      // v34: 従来はDOCKING_HEADING_HOLD_FORWARD_DAMPING（0.15）まで
-      // 絞るだけで加速側の推力を完全には止めていなかったため、
-      // ヨー反転などで姿勢がなかなか揃わない間にじわじわ前進を
-      // 続けてしまい、「最終進入(inFinalApproach)に入れないまま
-      // 距離200のラインをさらに割り込んでいく」不具合があった。
-      // 「最終進入以外では距離200以内に入らせない」という方針に
-      // 合わせ、加速側の推力を完全にゼロにした（_buildFinalApproachForce
-      // へforwardDamping=0を渡す形）。
-      //
-      // v35: それでもなお200圏内へ侵入してしまう不具合が残っていた。
-      // 原因は_buildFinalApproachForceの制動方式にあった：あの関数は
-      // 「目的地の進入軸」を基準に速度を『進入軸方向(主機関が担当・
-      // 強い)』と『横方向(RCSが担当・弱い)』へ分解し、それぞれ別々に
-      // ブレーキをかける。この前提は「船首がおおよそ進入軸方向を
-      // 向いている」場合しか成立しない。ところがheadingHold中は
-      // まさに姿勢(特にヨー)が乱れている最中で、本来なら主機関の
-      // 強い制動力で止まるべき速度成分が「横方向」に分類されてしまい、
-      // 非力なRCSだけでは制動が追いつかず、慣性のまま距離200を
-      // 突破していた（「エンジンを止めたつもりが慣性で飛ばされる」
-      // という報告はこれが原因）。
-      //
-      // 対策: headingHold中は進入軸基準の分解をやめ、killingMomentum
-      // 分岐と同じ考え方で「船の現在のローカル速度(localVel)をその
-      // まま逆方向へフルブレーキ」する。船体がどの向きを向いていても、
-      // ローカル速度と逆向きの力なら、ソルバー(ThrusterSolver.solve)側が
-      // 艦の全スラスター（主機関含む）から方向の一致度で最適な組み
-      // 合わせを自動選択してくれるため、姿勢が乱れている最中でも
-      // 「今出せる最大の制動力」で確実にワールド速度を殺せる。
-      // 横方向の位置ずれ補正（進入軸に戻ろうとする力）は、姿勢が
-      // 揃っていない間はどのみち大きな意味を持たないため出さない
-      // （姿勢が揃ってheadingHoldを抜け、inFinalApproachに入ってから
-      // 改めて_buildFinalApproachForceが横ずれを補正する）。
-      const speed = vecLength(localVel);
-      if (speed > 1e-4) {
-        const brakeStrength = Math.min(1, speed / this.DOCKING_HEADING_HOLD_BRAKE_FULL_SPEED);
-        desiredForce.x = (-localVel.x / speed) * brakeStrength;
-        desiredForce.y = (-localVel.y / speed) * brakeStrength;
-        desiredForce.z = (-localVel.z / speed) * brakeStrength;
-      }
-    } else if (distance > this.DOCKING_POSITION_MIN_DISTANCE) {
-      // --- 通常フェーズ（距離200超）: 目的地方向への接近力と、
-      //     艦の実際の制動能力に基づく速度ブレーキを合成する ---
-      //
-      // v17: 「通り越しがち」の一番の原因はここにあった。旧実装は
-      // 接近力とブレーキ力を単純加算してから-1..1にクランプして
-      // いたが、両者は逆方向を向くことが多く（接近力=目的地方向、
-      // ブレーキ力=速度と逆方向で、順調に接近中はこの2つがほぼ
-      // 正反対）、加算すると打ち消し合ってしまう。結果、
-      // 「ブレーキが必要なほど速度が出ている」場面ほど合成後の
-      // 実効推力が薄まり、減速しきれず通り越す、という不具合に
-      // なっていた。
-      //
-      // 対策: 最終進入フェーズと同じ考え方で、ブレーキを主として
-      // 解き、接近力はブレーキが余らせた分（1 - |ブレーキ強度|）を
-      // 上限に控えめに上乗せする。
-      //
-      // v27: 再アプローチ中（onApproachSide=false、オーバーシュート
-      // 直後）は、接近先を目的地そのものではなく再アプローチ
-      // ウェイポイント（進入軸の手前側）にする。目的地への直進力の
-      // ままだと姿勢側は既にウェイポイントへ向き直っているのに
-      // 並進力だけ目的地方向のままズレてしまうため、姿勢・並進の
-      // 目標地点を必ず一致させる。
-      // v30: それ以外（通常の接近中）は、target.positionそのものでは
-      // なくeffectiveTarget.position（仮想ウェイポイント。
-      // onApproachSide=falseならtargetそのものにフォールバック済み）
-      // を接近先にする。姿勢側（上のheadingTargetWorld計算）と同じ
-      // 目標地点を使うことで、距離200に到達する頃には並進の狙いも
-      // 姿勢もどちらも進入軸上に揃っている状態になる。
-      //
-      // v30: ゴーアラウンド中（進行方向を保ったままヨーだけで円弧を
-      // 描いている最中）は、ウェイポイントへの接近力・横ずれ補正の
-      // どちらも並進スラスターを噴かせない。「並進はほぼ使わず、
-      // 姿勢(ヨー)だけで曲がる」というゴーアラウンドの狙いに対し、
-      // 通常の接近ロジックが横方向のRCSを噴いてしまうと弧が乱れて
-      // しまうため。速度は現在の慣性のまま（ダンピングもかけない）
-      // 円弧を描かせ、ゴーアラウンド完了後に通常のブレーキ・接近力
-      // 制御へ戻す。
-      const goingAround = ship._dockingReapproaching && !this._isGoAroundComplete(ship._dockingGoAround);
-      if (goingAround) {
-        desiredForce.x = 0;
-        desiredForce.y = 0;
-        desiredForce.z = 0;
-      } else {
-      const approachTargetWorld = ship._dockingReapproaching
-        ? this._computeReapproachWaypoint(target, approachAxisWorld)
-        : effectiveTarget.position;
-      const toApproachTargetWorld = {
-        x: approachTargetWorld.x - ship.position.x,
-        y: approachTargetWorld.y - ship.position.y,
-        z: approachTargetWorld.z - ship.position.z,
-      };
-      const toTargetLocal = rotateVecByQuat(toApproachTargetWorld, conjugateQuat(ship.quaternion));
-      const approachDirLocal = vecNormalize(toTargetLocal);
-      // v21: 勢いキル退出直後はクールダウン倍率(0→1)を接近力に掛け、
-      // 「殺したはずの勢いを接近力で即座に再生産してしまう」ことを防ぐ。
-      // ブレーキ側(speedBrakeReference以下)には掛けない＝減速そのものは
-      // 通常のRCS/主機関にそのまま任せる。
-      const cooldownMult = this._tickApproachCooldownMultiplier(ship, dt);
-      const approachStrength =
-        Math.min(1, distance / this.DOCKING_POSITION_FULL_THRUST_DISTANCE) * cooldownMult;
+    // 現在速度のうち、目標方向成分(closingSpeed)とそれ以外(lateral)を分離。
+    const closingSpeed = vecDot(localVel, dirLocal);
+    const lateralVel = {
+      x: localVel.x - dirLocal.x * closingSpeed,
+      y: localVel.y - dirLocal.y * closingSpeed,
+      z: localVel.z - dirLocal.z * closingSpeed,
+    };
+    const lateralSpeed = vecLength(lateralVel);
 
-      // v17: 艦の実際の最大減速度(_estimateMaxLinearDecel)から
-      // 「残り距離(を最終進入距離まで詰めた分)でちょうど
-      // DOCKING_FINAL_APPROACH_DISTANCEに間に合う速度」を逆算し、
-      // 現在速度がそれを超えていたら従来のdistanceベースの基準値より
-      // 優先して強めにブレーキをかける。
-      //
-      // v32: 「進入軸に着く前に距離200を切ってしまい、姿勢が
-      // 整わないまま最終進入ゾーンに入る（＝RCSが横方向の勢いを
-      // 殺しきれず通り過ぎる）」という報告への対応。
-      // 従来はlocalVel全体の大きさ(speed)を、前進方向(Z、主機関・
-      // 逆噴射担当)の減速能力だけから逆算したphysicalSafeSpeedと
-      // 比較していた。しかし横方向(X/Y、RCS担当)は前進方向より
-      // 遥かに非力（艦種にもよるが1桁以上弱い）なため、横方向の
-      // 速度成分にも同じ基準を適用すると「この速度なら止まれる」
-      // という見積もりが横方向では大きく甘くなり、実際には
-      // ブレーキが追いつかず通り過ぎていた。
-      // 対策: Z成分と横成分(X/Y)を分離し、それぞれの軸が実際に
-      // 出せる減速能力(_estimateMaxLinearDecel/_estimateMaxLateralDecel)
-      // から個別にphysicalSafeSpeedを算出、ブレーキ強度も軸ごとに
-      // 独立して計算する。
-      const maxDecel = this._estimateMaxLinearDecel(ship);
+    // 横滑り成分は常にRCSでフルブレーキ（艦の姿勢に関わらず横方向は
+    // 常に消してよい）。
+    if (lateralSpeed > 1e-4) {
+      const lateralBrakeDir = vecScale(lateralVel, -1 / lateralSpeed);
       const maxLateralDecel = this._estimateMaxLateralDecel(ship);
-      const distanceToFinalZone = Math.max(0, distance - this.DOCKING_FINAL_APPROACH_DISTANCE);
-      // v36: 「距離200へ到達した時点でまだ速度が残っていて、
-      // headingHold(全方位フルブレーキ)でも200のラインで止まりきれず
-      // 160付近まで侵入してしまう」という報告への対応。
-      // 従来はここでマージンなし（1.0倍）の理論値ぎりぎりを
-      // physicalSafeSpeedとして使っていたが、これは
-      // 「艦がずっと理想的な向きのまま走り続ける」前提の計算であり、
-      // 実際には多少の余裕がないと、ソルバーの丸めや1フレーム分の
-      // 遅れ、姿勢がまだ完全には揃いきっていない間の制動力低下等で
-      // 詰めきれずわずかに超過する。_buildFinalApproachForce側で
-      // 既に使っているDOCKING_FINAL_APPROACH_BRAKE_MARGIN（0.85）と
-      // 同じ考え方をここにも適用し、200到達時点でより確実に
-      // 制動が間に合う速度まで事前に絞っておく。
-      // v = sqrt(2 * a * d * margin) : この距離で確実に止まり切れる速度
-      const physicalSafeSpeed = Math.sqrt(
-        2 * maxDecel * distanceToFinalZone * this.DOCKING_FINAL_APPROACH_BRAKE_MARGIN
-      );
-      const physicalSafeLateralSpeed = Math.sqrt(
-        2 * maxLateralDecel * distanceToFinalZone * this.DOCKING_FINAL_APPROACH_BRAKE_MARGIN
-      );
+      const lateralBrakeStrength = Math.min(1, lateralSpeed / (maxLateralDecel * 2));
+      desiredForce.x += lateralBrakeDir.x * lateralBrakeStrength;
+      desiredForce.y += lateralBrakeDir.y * lateralBrakeStrength;
+      desiredForce.z += lateralBrakeDir.z * lateralBrakeStrength;
+    }
 
-      // v15: ブレーキが「フルになる速度」を距離に応じて伸縮させる。
-      // 距離がDOCKING_POSITION_FULL_THRUST_DISTANCE以内なら従来通り
-      // DOCKING_APPROACH_SPEED_FULL_BRAKEに絞り、DOCKING_APPROACH_
-      // SPEED_TAPER_DISTANCE以上ではship.maxSpeedまで緩める（遠方では
-      // 速度4程度で頭打ちにならず加速し続けられるようにするため）。
-      // v17: ただし艦の制動能力から逆算したphysicalSafeSpeedより
-      // 緩い基準値は採用しない（min）。遠方では従来通りmaxSpeed
-      // 付近まで緩められるが、最終進入距離が近づくにつれ
-      // physicalSafeSpeedが急速に絞られ、通り越さない速度まで
-      // 事前に減速させる。
-      const taperRange = Math.max(
-        1e-6,
-        this.DOCKING_APPROACH_SPEED_TAPER_DISTANCE - this.DOCKING_POSITION_FULL_THRUST_DISTANCE
-      );
-      const taperT = clamp(
-        (distance - this.DOCKING_POSITION_FULL_THRUST_DISTANCE) / taperRange,
-        0,
-        1
-      );
-      const distanceBasedReference =
-        this.DOCKING_APPROACH_SPEED_FULL_BRAKE +
-        (ship.maxSpeed - this.DOCKING_APPROACH_SPEED_FULL_BRAKE) * taperT;
-      const speedBrakeReference = Math.max(
-        this.DOCKING_APPROACH_SPEED_FULL_BRAKE,
-        Math.min(distanceBasedReference, physicalSafeSpeed)
-      );
-      // v32: 横成分専用の基準値。DOCKING_APPROACH_SPEED_FULL_BRAKE
-      // （距離ベースの下限）は前進方向を想定した値なので、横方向は
-      // physicalSafeLateralSpeedのみで頭打ちにする（下限を設けると
-      // 横方向の非力さを無視してブレーキを緩めてしまうため）。
-      const lateralSpeedBrakeReference = Math.max(1e-3, physicalSafeLateralSpeed);
+    // 進行方向(closingSpeed)の速度上限を、maxBrakingDistanceOverride
+    // （指定があれば）から決める。速度上限は「常に適用される上限」
+    // であり、下回っている間は自由（無理に加速する必要はない）。
+    const maxDecel = this._estimateMaxLinearDecel(ship);
+    let speedCap = Infinity;
+    if (maxBrakingDistanceOverride !== null) {
+      speedCap = this._speedForBrakingDistance(maxDecel, maxBrakingDistanceOverride);
+    }
+    // 目的地への物理的な制動距離（この距離で止まりきれる速度）も
+    // 上限として効かせる（速度上限区間内でも、目的地に近づけば
+    // 自然に減速していく）。基準距離はstoppingDistanceForCapOverride
+    // があればそちらを、なければtargetPosWorldへのdistanceを使う。
+    const stoppingBasisDistance =
+      stoppingDistanceForCapOverride !== undefined ? stoppingDistanceForCapOverride : distance;
+    const stoppingSpeedCap = this._speedForBrakingDistance(maxDecel, stoppingBasisDistance);
+    const effectiveCap = Math.min(speedCap, stoppingSpeedCap);
 
-      const lateralVelLocal = { x: localVel.x, y: localVel.y, z: 0 };
-      const lateralSpeed = vecLength(lateralVelLocal);
-      const forwardSpeed = Math.abs(localVel.z);
-
-      let brakeDirLocal = { x: 0, y: 0, z: 0 };
-      if (lateralSpeed > 1e-4) {
-        const lateralBrakeStrength = Math.min(1, lateralSpeed / lateralSpeedBrakeReference);
-        const lateralBrakeDir = vecScale(lateralVelLocal, -1 / lateralSpeed);
-        brakeDirLocal.x = lateralBrakeDir.x * lateralBrakeStrength;
-        brakeDirLocal.y = lateralBrakeDir.y * lateralBrakeStrength;
-      }
-      let brakeStrength = 0;
-      if (forwardSpeed > 1e-4) {
-        brakeStrength = Math.min(1, forwardSpeed / speedBrakeReference);
-        brakeDirLocal.z = -Math.sign(localVel.z) * brakeStrength;
-      }
-      // approachHeadroom（接近力を上乗せしてよい余地）はZ方向の
-      // ブレーキ強度のみを見る。横方向のブレーキは横ずれ補正であり、
-      // 接近力（進行方向への推力）とは軸が異なるため混同しない。
-
-      // v17: ブレーキを主として適用し、接近力はブレーキが使わなかった
-      // 出力の余り（1 - brakeStrength）分だけ、ブレーキ方向を邪魔しない
-      // 範囲で上乗せする。ブレーキ方向と接近方向が同じ（＝目的地から
-      // 離れる速度が出ている、正しく引き返している最中等）場合は
-      // 単純加算でよい。
-      desiredForce.x = brakeDirLocal.x;
-      desiredForce.y = brakeDirLocal.y;
-      desiredForce.z = brakeDirLocal.z;
-
-      const approachHeadroom = Math.max(0, 1 - brakeStrength);
-      desiredForce.x += approachDirLocal.x * approachStrength * approachHeadroom;
-      desiredForce.y += approachDirLocal.y * approachStrength * approachHeadroom;
-      desiredForce.z += approachDirLocal.z * approachStrength * approachHeadroom;
-
-      desiredForce.x = clamp(desiredForce.x, -1, 1);
-      desiredForce.y = clamp(desiredForce.y, -1, 1);
-      desiredForce.z = clamp(desiredForce.z, -1, 1);
+    if (closingSpeed > effectiveCap) {
+      // 上限超過: ブレーキを主として解く。
+      const over = closingSpeed - effectiveCap;
+      const brakeStrength = Math.min(1, over / this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR);
+      desiredForce.x += -dirLocal.x * brakeStrength;
+      desiredForce.y += -dirLocal.y * brakeStrength;
+      desiredForce.z += -dirLocal.z * brakeStrength;
+    } else {
+      // 上限内: 残り余力の範囲で接近力を出す。基準距離は
+      // stoppingBasisDistance（target.positionへの実距離、cruiseでは
+      // 操舵目標そのもの）を使う。仕想WPまでの距離(distance)を
+      // 使うと、approach/adjustが仕想WP付近で不要に加速を弱めて
+      // しまう。
+      const usedByBrake = Math.max(Math.abs(desiredForce.x), Math.abs(desiredForce.y), Math.abs(desiredForce.z));
+      const approachStrength = Math.min(1 - usedByBrake, stoppingBasisDistance / this.DOCKING_POSITION_FULL_THRUST_DISTANCE_DEFAULT);
+      if (approachStrength > 0) {
+        desiredForce.x += dirLocal.x * approachStrength;
+        desiredForce.y += dirLocal.y * approachStrength;
+        desiredForce.z += dirLocal.z * approachStrength;
       }
     }
 
-    // --- 手動のストレイフ微調整をロールと同様に上乗せする ---
-    // v09: thrustForward（メインエンジンのレバー）は上乗せしない
-    // （上記コメント参照）。ストレイフ(X/Y)はRCSでの微調整として従来通り許可。
-    // v21: rollと同じく、距離800(DOCKING_HEADING_BLEND_START_DISTANCE)を
-    // 切ったら（autoRollLockActive）ストレイフの手動微調整も拒否し、
-    // 並進・回転すべてを自動制御に委ねる。
-    if (!autoRollLockActive) {
-      desiredForce.x = clamp(desiredForce.x + input.thrustStrafeX, -1, 1);
-      desiredForce.y = clamp(desiredForce.y + input.thrustStrafeY, -1, 1);
+    desiredForce.x = clamp(desiredForce.x, -1, 1);
+    desiredForce.y = clamp(desiredForce.y, -1, 1);
+    desiredForce.z = clamp(desiredForce.z, -1, 1);
+  },
+
+  // -----------------------------------------------------------
+  // 入港判定基準（distance/lateral/姿勢誤差/角速度）を満たすか判定。
+  // trueなら艦をtarget.position/quaternionへ完全固定してよい。
+  // -----------------------------------------------------------
+  _meetsArrivalCriteria(ship, target, params) {
+    const speed = vecLength(ship.velocity);
+    if (speed >= params.ARRIVAL_SPEED) return false;
+
+    const approachAxisWorld = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion));
+    const approachAxisLocal = rotateVecByQuat(approachAxisWorld, conjugateQuat(ship.quaternion));
+    const headingErrorRad = Math.acos(clamp(-approachAxisLocal.z, -1, 1));
+    const toleranceRad = params.ARRIVAL_HEADING_ERROR_DEG * (Math.PI / 180);
+    if (headingErrorRad > toleranceRad) return false;
+
+    const rollError = this._computeRollErrorAngle(ship, target);
+    if (Math.abs(rollError.angle) > toleranceRad) return false;
+
+    const angSpeed = vecLength(ship.angularVelocity);
+    if (angSpeed >= params.ARRIVAL_ANGULAR_SPEED) return false;
+
+    return true;
+  },
+
+  // -----------------------------------------------------------
+  // 艦を目的地の位置・姿勢へ完全固定する（速度・角速度もゼロ）。
+  // -----------------------------------------------------------
+  _lockShipAtTarget(ship, target) {
+    ship.position.x = target.position.x;
+    ship.position.y = target.position.y;
+    ship.position.z = target.position.z;
+    ship.quaternion.x = target.quaternion.x;
+    ship.quaternion.y = target.quaternion.y;
+    ship.quaternion.z = target.quaternion.z;
+    ship.quaternion.w = target.quaternion.w;
+    ship.velocity.x = 0;
+    ship.velocity.y = 0;
+    ship.velocity.z = 0;
+    ship.angularVelocity.x = 0;
+    ship.angularVelocity.y = 0;
+    ship.angularVelocity.z = 0;
+    // スラスター側の表示・演出もゼロに揃える（旧
+    // FlightPhysics._tryLockAtDockingArrivalから引き継いだ処理）。
+    if (ship.thrusters && ship.thrusterOutputRatios) {
+      for (const t of ship.thrusters) {
+        ship.thrusterOutputRatios[t.id] = 0;
+      }
+    }
+    ship.isAtMaxSpeed = false;
+    ship._dockingPhase = 'docked';
+  },
+
+  // =============================================================
+  // フェーズ判定: 現在のdistance/alongDist/lateral/フェーズ履歴から
+  // 今フレームのship._dockingPhaseを決定する。
+  // =============================================================
+  _resolveDockingPhase(ship, target, distance, alongDist, lateral, params) {
+    const prevPhase = ship._dockingPhase || 'cruise';
+
+    // --- docked状態の維持: 一度固定されたら、艦がその場から動く
+    //     要因はこのゲーム内には存在しないため、目的地が変わらない
+    //     限りdockedのまま維持する。_lockShipAtTargetが位置・姿勢を
+    //     直接target側へ揃えているため、通常はdistance≈0のまま。
+    //     何らかの理由でdistanceが動いてしまった場合のみ、安全側に
+    //     倒して通常のゾーン判定へ復帰させる。 ---
+    if (prevPhase === 'docked' && distance < this.DOCKED_STATE_DISTANCE_EPSILON) {
+      return 'docked';
+    }
+
+    // --- 奥側(alongDist<0)からの回り込み ---
+    // tunnel/overshoot（トンネル内部・オーバーシュート中）以外の
+    // 状況で艦が奥側にいる場合は、cruise/approach/adjustのような
+    // 「target.positionへの直線距離(distance)」だけを見るロジックを
+    // 使わせない。これらは艦が手前側にいる前提で組まれており、
+    // 奥側にいるまま使うと目的地に正面から向かい合う形になり、
+    // 「進入軸を逆走して入る」形になりかねない（要件で禁止されている）。
+    // 奥側にいる間は専用のreturn_to_axisフェーズで、まず手前側の
+    // 安全な位置まで回り込ませる。
+    // tunnel/overshoot自身の遷移ロジックは下のブロックで別途扱うため
+    // ここでは対象外とする。
+    const inTunnelHandling = prevPhase === 'tunnel' || prevPhase === 'overshoot';
+    if (!inTunnelHandling && alongDist < 0 && distance >= params.NO_ENTRY_RADIUS) {
+      return 'return_to_axis';
+    }
+    // 一度return_to_axisに入ったら、alongDistがわずかに0を超えた
+    // だけで即座に抜けさせない。中間地点（進入軸上、手前側
+    // VIRTUAL_WAYPOINT_OFFSET+AVOIDANCE_RADIUS距離）に向けて加速して
+    // きた勢いのまま通常フェーズへ戻すと、まだ大きな速度を持った
+    // ままapproach/adjustに合流し、再び行き過ぎてしまう（実際に
+    // 発生した不具合）。alongDistが中間地点の距離に近い水準まで
+    // 達するまではreturn_to_axisを維持し、十分に手前側へ戻り
+    // 切ってから通常フェーズへ合流させる。
+    if (!inTunnelHandling && prevPhase === 'return_to_axis') {
+      const midpointAlong = params.VIRTUAL_WAYPOINT_OFFSET + params.AVOIDANCE_RADIUS;
+      if (alongDist < midpointAlong) {
+        return 'return_to_axis';
+      }
+    }
+
+    // --- オーバーシュート/再アプローチ系の継続判定を先に見る ---
+    // トンネル内(旧distance<=NO_ENTRY_RADIUS)でalongDistが負に
+    // 転じたら奥側へ抜けている＝overshoot。
+    if (prevPhase === 'overshoot' || prevPhase === 'tunnel') {
+      if (alongDist < 0) {
+        // 奥側にいる間はovershoot継続。distanceがOVERSHOOT_REAPPROACH_
+        // DISTANCEを超えたら再アプローチへ切り替える。まだalongDistが
+        // 負(奥側)であればreturn_to_axisへ、既にalongDist>=0まで
+        // 戻れていればcruise/approachへ直接合流する。
+        if (distance >= params.OVERSHOOT_REAPPROACH_DISTANCE) {
+          // 再アプローチ発動: brake300/brake250のワンショット状態を
+          // リセットし、以降のアプローチで再度distance<=300/250の
+          // ブレーキポイントを正規の手順通りに踏ませる。
+          ship._dockingBrake300Done = false;
+          return 'return_to_axis';
+        }
+        return 'overshoot';
+      }
+      // alongDist>=0に戻った（トンネル内に留まったまま通過しなかった）
+      // 場合は通常通りtunnelとして扱う。
+    }
+
+    // --- brake300のワンショット継続判定（NO_ENTRY_RADIUSチェックより
+    //     優先する） ---
+    // brake300は「一度完全停止して軸に乗せる」フェーズ。停止・軸
+    // 合わせが完了する(_dockingBrake300Done=true)まで、ブレーキ中に
+    // distanceがNO_ENTRY_RADIUS未満まで多少沈み込んでも
+    // brake300自身を継続する（前後方向はブレーキするだけで特定の
+    // distanceに戻す制御をしていないため、横滑り除去の副作用等で
+    // わずかにdistanceが変動するのは正常な範囲であり、これを
+    // 「正規の手順を踏まない侵入」として弾いてしまうと、NO_ENTRY_
+    // RADIUS付近でadjustとbrake300を永遠に往復してしまう）。
+    // 完了(_dockingBrake300Done=true)した時点で初めて、以降は通常の
+    // ゾーン判定（NO_ENTRY_RADIUSチェック含む）に従う。
+    if (prevPhase === 'brake300' && !ship._dockingBrake300Done) {
+      return 'brake300';
+    }
+
+    // --- 侵入禁止半径のチェック: 半径NO_ENTRY_RADIUS以内は最終進入
+    //     (tunnel/overshoot)以外からの進入を禁止。まだtunnelに
+    //     入っていないのに何らかの理由でdistanceがNO_ENTRY_RADIUSを
+    //     下回った場合は、迂回のやり直しに送り返す（adjustへ）。
+    //     brake300/brake300完了直後は、既に正規の手順（停止して軸に
+    //     乗せる）を踏んだ上でdistanceがNO_ENTRY_RADIUS未満まで沈み
+    //     込んでいるだけなので、この弾き返しの対象に含めない
+    //     （含めてしまうと、_dockingBrake300Done完了直後にadjustへ
+    //     押し戻され、そこから再びbrake300へ戻って…を繰り返す）。 ---
+    const cameFromTunnel = prevPhase === 'tunnel' || prevPhase === 'overshoot' || prevPhase === 'docked'
+      || prevPhase === 'brake250' || prevPhase === 'final_approach' || prevPhase === 'brake300';
+    if (distance < params.NO_ENTRY_RADIUS && !cameFromTunnel) {
+      // 正規のフェーズ順序を踏まずに半径200以内へ入ってしまった
+      // （例: 外力、手動操縦からの切替直後）。迂回径として
+      // AVOIDANCE_RADIUSまで一旦引き戻す意味でadjustに送る。
+      return 'adjust';
+    }
+
+    // --- 通常のゾーン順序による遷移 ---
+    if (distance > params.ZONE_APPROACH_START) {
+      return 'cruise';
+    }
+    if (distance > params.ZONE_ADJUST_START) {
+      return 'approach';
+    }
+    if (distance > params.ZONE_BRAKE300) {
+      return 'adjust';
+    }
+
+    // distance <= ZONE_BRAKE300 の範囲。brake300は「一度完全停止して
+    // 軸に乗せる」ワンショットのブレーキポイント。停止・軸合わせが
+    // 完了する(_dockingBrake300Done=true)まで、慣性で距離が250を
+    // 割り込んでもbrake300の制御を継続する（distance帯だけで
+    // 判定すると、停止し切る前にdistanceがZONE_BRAKE250を通過して
+    // しまい、一度も止まらないままbrake250/final_approachへ抜けて
+    // しまう）。
+    if (!ship._dockingBrake300Done) {
+      return 'brake300';
+    }
+
+    if (distance > params.ZONE_BRAKE250) {
+      return 'final_approach';
+    }
+
+    // distance <= ZONE_BRAKE250。brake250も同様のワンショット判定だが、
+    // 「入港基準を満たすまでその場に留まる」ため、一度入ったら
+    // 基準を満たすまでbrake250のまま。基準を満たしたらtunnelへ。
+    if (distance > params.ZONE_FINAL_APPROACH) {
+      if (prevPhase === 'brake250') {
+        // tunnelへ進む条件は入港基準（速度・姿勢誤差・角速度）に
+        // 加えて、横ズレ(lateral)が十分小さいことも必須とする。
+        // _meetsArrivalCriteriaは横方向を見ないため、これを含めないと
+        // 「速度・姿勢だけ収まったが軸上には乗っていない」状態のまま
+        // トンネルに突入してしまう（トンネル内は横方向の力を一切
+        // 出さないため、一度入るとそのズレは永久に残ってしまう）。
+        if (this._meetsArrivalCriteria(ship, target, params) && lateral <= this.DOCKING_POSITION_MIN_DISTANCE) {
+          ship._dockingBrake300Done = false; // 次回入港に備えリセット
+          return 'tunnel';
+        }
+        return 'brake250';
+      }
+      return 'brake250';
+    }
+
+    // distance <= ZONE_FINAL_APPROACH（トンネル内部）。
+    if (alongDist < 0) {
+      return 'overshoot';
+    }
+    // 横ズレ(lateral)が十分小さいことを確認できていない場合は
+    // tunnelへ入れない（トンネル内は横方向の力を出さないため、
+    // 一度入ると横ズレが永久に残ってしまう）。brake250へ送り、
+    // 横方向・姿勢・速度をきっちり合わせ直させる。
+    if (lateral > this.DOCKING_POSITION_MIN_DISTANCE) {
+      return 'brake250';
+    }
+    return 'tunnel';
+  },
+
+  // =============================================================
+  // メインエントリ: 自動ドッキング用のdesiredForce/desiredTorqueを
+  // 組み立てる。
+  // =============================================================
+  _buildDesiredForAutoDocking(input, ship, dt) {
+    const target = State.dockingTarget;
+    const params = this._getDockingParams(target);
+
+    const toTargetWorld = {
+      x: target.position.x - ship.position.x,
+      y: target.position.y - ship.position.y,
+      z: target.position.z - ship.position.z,
+    };
+    const distance = vecLength(toTargetWorld);
+    const approachAxisWorld = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion));
+    const alongDist = vecDot(toTargetWorld, approachAxisWorld);
+    const lateralVec = {
+      x: toTargetWorld.x - approachAxisWorld.x * alongDist,
+      y: toTargetWorld.y - approachAxisWorld.y * alongDist,
+      z: toTargetWorld.z - approachAxisWorld.z * alongDist,
+    };
+    const lateral = vecLength(lateralVec);
+
+    const phase = this._resolveDockingPhase(ship, target, distance, alongDist, lateral, params);
+    ship._dockingPhase = phase;
+
+    // tunnelフェーズ中、入港判定基準（速度・姿勢誤差・角速度）を
+    // 満たした時点で艦を目的地へ完全固定する（要望「速度0.5,角度は
+    // それぞれの軸が誤差0.1度以下で、かつ角速度が0.01未満になったら
+    // 固定してあげる」）。tunnel内は既に姿勢固定・直進のみなので、
+    // 満たすのは基本的に前進速度がARRIVAL_SPEEDを下回った瞬間になる。
+    if (phase === 'tunnel' && this._meetsArrivalCriteria(ship, target, params)) {
+      this._lockShipAtTarget(ship, target);
+      return { desiredForce: { x: 0, y: 0, z: 0 }, desiredTorque: { x: 0, y: 0, z: 0 } };
+    }
+
+    const desiredForce = { x: 0, y: 0, z: 0 };
+    const desiredTorque = { x: 0, y: 0, z: 0 };
+
+    switch (phase) {
+      case 'cruise':
+        this._runCruisePhase(ship, target, approachAxisWorld, distance, params, desiredForce, desiredTorque, dt);
+        break;
+      case 'approach':
+        this._runApproachPhase(ship, target, approachAxisWorld, distance, lateral, params, desiredForce, desiredTorque, dt, params.APPROACH_MAX_BRAKING_DISTANCE);
+        break;
+      case 'adjust':
+        this._runApproachPhase(ship, target, approachAxisWorld, distance, lateral, params, desiredForce, desiredTorque, dt, params.ADJUST_MAX_BRAKING_DISTANCE);
+        break;
+      case 'brake300':
+        this._runBrakePhase(ship, target, approachAxisWorld, params, desiredForce, desiredTorque, dt, 'brake300', () => {
+          ship._dockingBrake300Done = true;
+        });
+        break;
+      case 'final_approach':
+        this._runFinalApproachAdjustPhase(ship, target, approachAxisWorld, params, desiredForce, desiredTorque, dt);
+        break;
+      case 'brake250':
+        this._runBrakePhase(ship, target, approachAxisWorld, params, desiredForce, desiredTorque, dt, 'brake250', null);
+        break;
+      case 'tunnel':
+        this._runTunnelPhase(ship, target, approachAxisWorld, distance, params, desiredForce, desiredTorque, dt);
+        break;
+      case 'overshoot':
+        this._runOvershootPhase(ship, target, approachAxisWorld, params, desiredForce, desiredTorque, dt);
+        break;
+      case 'return_to_axis':
+        this._runReturnToAxisPhase(ship, target, approachAxisWorld, distance, lateral, params, desiredForce, desiredTorque, dt);
+        break;
+      case 'docked':
+        // 既に_lockShipAtTargetで位置・姿勢・速度を固定済み。維持の
+        // ためフォース・トルクは常に0（何もしない）。
+        break;
+      default:
+        break;
     }
 
     return { desiredForce, desiredTorque };
   },
 
   // -----------------------------------------------------------
-  // v17: 最終進入フェーズ（距離≤DOCKING_FINAL_APPROACH_DISTANCE）専用の
-  // 並進力を計算し、desiredForceへ書き込む。
-  //
-  //   横方向(X/Y): 目的地の進入軸（船首方向）を基準に、艦が軸から
-  //   どれだけ横に外れているかをローカルX/Y換算で求め、位置ずれ・
-  //   速度の両方を打ち消す方向へ推力を出す。これにより「まっすぐ
-  //   入港する」動きになる。
-  //
-  //   前後方向(Z): 単純な比例ブレーキではなく、
-  //     制動距離 = 現在速度^2 / (2 × 艦の最大減速度)
-  //   を実際に計算し、残り距離がその制動距離を下回った時点で
-  //   フルブレーキへ切り替える（stopping-distanceベース）。
-  //   これにより「まだ大丈夫」と接近を続けて距離0付近で減速力が
-  //   足りなくなる＝目的地を通り越す、という不具合を防ぐ。
-  //   制動距離に余裕がある間は、DOCKING_FINAL_APPROACH_MAX_SPEED_RATIO
-  //   で頭打ちした穏やかな接近速度を目標にする（最終進入フェーズは
-  //   姿勢合わせ優先のため、遠方フェーズほどの高速接近は行わない）。
+  // cruise: 自由巡航。仕想WPへの最短ベクトルへ向け、加速・最高速
+  // 巡航・制動距離で減速する単純なボング＝ボング制御（速度上限
+  // なし＝自艦の実性能そのものが上限になる）。姿勢もできれば
+  // 早めに整えたいが強制はしない（DOCKING_HEADING_FULL_TORQUE_ANGLE
+  // の緩い閾値のまま）。
   // -----------------------------------------------------------
-  // v21: 「距離200を切った瞬間、姿勢のズレを回頭ではなく船体の
-  // 横スライドで無理やり合わせにいく」→ユーザーの言う「姿勢の
-  // 固定」に見える、という報告への対応。
+  _runCruisePhase(ship, target, approachAxisWorld, distance, params, desiredForce, desiredTorque, dt) {
+    const virtualWP = this._computeVirtualWaypoint(target, approachAxisWorld, distance, params);
+    const toWP = {
+      x: virtualWP.x - ship.position.x,
+      y: virtualWP.y - ship.position.y,
+      z: virtualWP.z - ship.position.z,
+    };
+    const wpDist = vecLength(toWP);
+    const headingTargetWorld = wpDist > 1e-4 ? vecScale(toWP, 1 / wpDist) : approachAxisWorld;
+
+    this._applyHeadingTorque(ship, headingTargetWorld, this.DOCKING_HEADING_FULL_TORQUE_ANGLE, desiredTorque);
+    this._applyRollTorque(ship, target, desiredTorque);
+    this._applyAngularDamping(ship, desiredTorque, dt, params.ARRIVAL_ANGULAR_SPEED);
+
+    // 速度上限なし(null)で、仕想WPへの制動距離ベースの加減速のみ。
+    this._applyApproachForce(ship, virtualWP, null, desiredForce);
+  },
+
+  // -----------------------------------------------------------
+  // approach / adjust: 共通ロジック。maxBrakingDistanceで指定された
+  // 速度上限を守りつつ、仕想WPへ向かう。並進・旋回・逆噴射すべて可。
+  // 半径AVOIDANCE_RADIUS以上かつまだ軸上に乗っていない場合は、
+  // 仕想WPそのものではなく、進入軸上の固定中間地点
+  // （_computeAvoidanceWaypoint）を経由する。
   //
-  // 横方向の"位置"ずれ補正（posStrength、下記）は、艦の姿勢が
-  // まだ進入軸から大きくズレている間は弱め、回頭が追いついて
-  // 姿勢が揃うにつれ通常の強さへ戻す。速度側の横滑りブレーキは
-  // 常時フルで効かせる（これは安全のための制動であり、能動的な
-  // 位置合わせスライドではないため）。「横移動補正も少しは残したい」
-  // 要望に合わせ、姿勢が大きくズレていてもゼロにはせず最低限は残す。
-  HEADING_ERROR_FULL_LATERAL_ANGLE: 0.35, // この角度(rad)以上ズレている間は横方向位置補正をMIN倍率まで弱める（約20°）
-  HEADING_ERROR_LATERAL_MIN_MULT: 0.25, // 姿勢が大きくズレている時でも残す横方向位置補正の下限倍率
+  // 二段階方式: 艦が中間地点よりtargetから見て遠い側にいる間は
+  // 中間地点そのものを目指す。艦が既に中間地点よりtargetに近い
+  // 位置まで進んでいる場合は、中間地点を目指す意味がない（それは
+  // 「もう通り過ぎた地点まで戻れ」という逆走の指示になってしまう
+  // ため、過去に実際に不具合として発生した）ので、通常の仕想WPを
+  // 目指す。
+  // -----------------------------------------------------------
+  _runApproachPhase(ship, target, approachAxisWorld, distance, lateral, params, desiredForce, desiredTorque, dt, maxBrakingDistance) {
+    const virtualWP = this._computeVirtualWaypoint(target, approachAxisWorld, distance, params);
 
-  // v28: 艦の最大減速度(maxDecel)から、最終進入フェーズ専用の
-  // 「速度誤差→推力」スロットル基準を動的に算出する。
-  // DOCKING_FINAL_APPROACH_THROTTLE_REF_DECELを基準減速度とし、
-  // 実際のmaxDecelがそれよりΓ倍強ければ基準もΓ倍緩める（比例）。
-  // 減速力の強い艦ほど「多少の速度差なら緩やかに埋めればいずれ
-  // 間に合う」ため基準を大きく、弱い艦ほど「早めにフル出力に
-  // 入らないと制動が追いつかない」ため基準を小さくする、という
-  // 方向性。MIN/MAXでクランプして極端な艦種でも安定させる。
-  _computeFinalApproachThrottleErrorRef(maxDecel) {
-    const refDecel = Math.max(1e-3, this.DOCKING_FINAL_APPROACH_THROTTLE_REF_DECEL);
-    const scaled =
-      this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR * (maxDecel / refDecel);
-    return clamp(
-      scaled,
-      this.DOCKING_FINAL_APPROACH_THROTTLE_REF_MIN,
-      this.DOCKING_FINAL_APPROACH_THROTTLE_REF_MAX
+    const avoidanceWP = this._computeAvoidanceWaypoint(ship, target, approachAxisWorld, params);
+    // 艦から見て中間地点がまだ「target方向」にある（＝艦がまだ
+    // 中間地点を通り過ぎていない）かどうかを、進入軸方向の位置
+    // 関係で判定する。
+    const toShip = {
+      x: ship.position.x - target.position.x,
+      y: ship.position.y - target.position.y,
+      z: ship.position.z - target.position.z,
+    };
+    const shipAlong = -vecDot(toShip, approachAxisWorld); // 艦の「手前距離」(正なら手前側)
+    const avoidanceAlong = params.VIRTUAL_WAYPOINT_OFFSET + params.AVOIDANCE_RADIUS; // 中間地点の「手前距離」(固定)
+    const shipStillBehindAvoidance = shipAlong > avoidanceAlong + 1e-3;
+
+    const needsAvoidance = lateral > 1e-3 && shipStillBehindAvoidance;
+    const steerTarget = needsAvoidance ? avoidanceWP : virtualWP;
+
+    const toSteer = {
+      x: steerTarget.x - ship.position.x,
+      y: steerTarget.y - ship.position.y,
+      z: steerTarget.z - ship.position.z,
+    };
+    const steerDist = vecLength(toSteer);
+    const headingTargetWorld = steerDist > 1e-4 ? vecScale(toSteer, 1 / steerDist) : approachAxisWorld;
+
+    const fullTorqueAngle = this._computeHeadingFullTorqueAngle(distance, params);
+    this._applyHeadingTorque(ship, headingTargetWorld, fullTorqueAngle, desiredTorque);
+    this._applyRollTorque(ship, target, desiredTorque);
+    this._applyAngularDamping(ship, desiredTorque, dt, params.ARRIVAL_ANGULAR_SPEED);
+
+    // 減速の基準はtarget.positionへの実距離(distance)を使う
+    // （操舵方向は仕想WP/迂回点だが、停止の基準は実際の目的地への
+    // 距離であるべき。_applyApproachForceのコメント参照）。
+    this._applyApproachForce(ship, steerTarget, maxBrakingDistance, desiredForce, distance);
+  },
+
+  // フルトルクになる角度閾値を、ZONE_APPROACH_START→ZONE_BRAKE300の
+  // 間で緩め(DOCKING_HEADING_FULL_TORQUE_ANGLE)から厳しめ
+  // (DOCKING_FINAL_HEADING_FULL_TORQUE_ANGLE)へ線形補間する。
+  _computeHeadingFullTorqueAngle(distance, params) {
+    const start = params.ZONE_APPROACH_START;
+    const end = params.ZONE_BRAKE300;
+    const blendRange = Math.max(1e-6, start - end);
+    const t = clamp((start - distance) / blendRange, 0, 1);
+    return (
+      this.DOCKING_HEADING_FULL_TORQUE_ANGLE +
+      (this.DOCKING_FINAL_HEADING_FULL_TORQUE_ANGLE - this.DOCKING_HEADING_FULL_TORQUE_ANGLE) * t
     );
   },
 
-  // v28: 速度超過側（speedError<0）のブレーキ出力を、緊急度
-  // （実際の制動距離／残り距離）に応じて弱い比例ブレーキから
-  // フルブレーキへ滑らかにブレンドする。speedError>=0（加速側）は
-  // 素通しする（呼び出し側の従来ロジックをそのまま使う）。
-  // DOCKING_FINAL_APPROACH_URGENCY_BLEND_START/FULL参照。
-  _blendFinalApproachBrake(speedError, closingSpeed, remainingDist, maxDecel, throttleErrorRef) {
-    const proportional = clamp(speedError / throttleErrorRef, -1, 0);
-    if (speedError >= 0 || closingSpeed <= 0 || remainingDist <= 1e-6) {
-      return proportional;
-    }
-    const stoppingDist =
-      (closingSpeed * closingSpeed) / (2 * maxDecel * this.DOCKING_FINAL_APPROACH_BRAKE_MARGIN);
-    const urgency = stoppingDist / remainingDist;
-    const blendRange = Math.max(
-      1e-6,
-      this.DOCKING_FINAL_APPROACH_URGENCY_BLEND_FULL - this.DOCKING_FINAL_APPROACH_URGENCY_BLEND_START
-    );
-    const urgencyT = clamp(
-      (urgency - this.DOCKING_FINAL_APPROACH_URGENCY_BLEND_START) / blendRange,
-      0,
-      1
-    );
-    return proportional * (1 - urgencyT) + -1 * urgencyT;
+  // -----------------------------------------------------------
+  // 位置合わせ専用の並進制御。目標位置(targetPosWorld)への距離に
+  // 比例した目標速度（近いほど遅く、DOCKING_POSITION_MIN_DISTANCE
+  // 以下では0）を立て、実際の速度をその目標速度に一致させる
+  // 速度フィードバック制御。
+  //
+  // _applyApproachForceとの違い: _applyApproachForceは「制動距離
+  // ベースの速度上限」を守りつつ自由に加速することを許す（cruise/
+  // approach/adjustのような、まだ大きく移動する必要があるフェーズ
+  // 向け）。対してこちらは「最終的に位置誤差ゼロ・速度ゼロで静止
+  // させる」ことだけを目的にした収束制御で、距離に比例した目標
+  // 速度を必ず下回らせるため、位置誤差が小さければ速度も必ず
+  // 小さくなることが保証される（brake300/brake250のような、
+  // その場でピタリと止めたいフェーズ向け）。
+  // -----------------------------------------------------------
+  DOCKING_SETTLE_APPROACH_GAIN: 0.5, // 距離に対する目標速度の比例ゲイン(1/s)
+  DOCKING_SETTLE_MAX_SPEED: 15.0,    // 目標速度の上限（遠距離でも暴走しないため）
+
+  _applySettlingForce(ship, targetPosWorld, desiredForce) {
+    const toTargetWorld = {
+      x: targetPosWorld.x - ship.position.x,
+      y: targetPosWorld.y - ship.position.y,
+      z: targetPosWorld.z - ship.position.z,
+    };
+    const distance = vecLength(toTargetWorld);
+    if (distance <= this.DOCKING_POSITION_MIN_DISTANCE) return;
+
+    const dirWorld = vecScale(toTargetWorld, 1 / distance);
+    const targetSpeed = Math.min(this.DOCKING_SETTLE_MAX_SPEED, distance * this.DOCKING_SETTLE_APPROACH_GAIN);
+    const targetVelWorld = vecScale(dirWorld, targetSpeed);
+
+    const targetVelLocal = rotateVecByQuat(targetVelWorld, conjugateQuat(ship.quaternion));
+    const localVel = rotateVecByQuat(ship.velocity, conjugateQuat(ship.quaternion));
+    const errLocal = {
+      x: targetVelLocal.x - localVel.x,
+      y: targetVelLocal.y - localVel.y,
+      z: targetVelLocal.z - localVel.z,
+    };
+    const errMag = vecLength(errLocal);
+    if (errMag < 1e-4) return;
+    const dir = vecScale(errLocal, 1 / errMag);
+    const strength = Math.min(1, errMag / this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR);
+    desiredForce.x += dir.x * strength;
+    desiredForce.y += dir.y * strength;
+    desiredForce.z += dir.z * strength;
   },
 
-  _buildFinalApproachForce(desiredForce, ship, target, toTargetWorld, localVel, dt, forwardDamping) {
-    const toTargetLocal = rotateVecByQuat(toTargetWorld, conjugateQuat(ship.quaternion));
+  // -----------------------------------------------------------
+  // brake300 / brake250: 完全静止してから、軸上への位置合わせ・
+  // 姿勢合わせを行う。
+  //
+  // 並進は前後方向(Z、進入軸方向)と横方向(X/Y、進入軸に垂直)を
+  // 分離して制御する:
+  //   - 前後方向: ワールド速度のうち進入軸方向の成分だけを0へ
+  //     ブレーキする（distanceそのものは変えない）。
+  //   - 横方向: 進入軸への垂線距離(lateralDist)を0へ詰める収束制御
+  //     （_applySettlingForce。距離に比例した目標速度に確実に
+  //     追従させ、位置・速度とも0へ収束することを保証する）。
+  // 前後・横方向を分離するのは、艦によって前後方向(主機)と横方向
+  // (RCS)の推力が大きく異なるため（横方向が主機よりずっと弱い艦は
+  // 珍しくない）、「全方位まとめて完全停止するまで待ってから横方向を
+  // 直す」という二段階方式だと、横方向の速度がなかなか完全な0へ
+  // 収束せず横方向補正が実質発火しない膠着を起こしうるため。
+  // 前後・横方向とも常時・独立に制御することで、この膠着を避ける。
+  //
+  //   phaseKind: 'brake300' | 'brake250'（ログ・将来拡張用、現状は
+  //              挙動は共通）
+  //   onSettled: 前後方向速度・横方向位置誤差とも十分収まった際に
+  //              一度だけ呼ぶコールバック（brake300が「完了済み」
+  //              フラグを立てるために使う）
+  // -----------------------------------------------------------
+  _runBrakePhase(ship, target, approachAxisWorld, params, desiredForce, desiredTorque, dt, phaseKind, onSettled) {
+    // 姿勢は常にtarget.quaternion方向へ合わせにいく（厳しめ角度）。
+    const headingTargetWorld = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion));
+    this._applyHeadingTorque(ship, headingTargetWorld, this.DOCKING_FINAL_HEADING_FULL_TORQUE_ANGLE, desiredTorque);
+    this._applyRollTorque(ship, target, desiredTorque);
+    this._applyAngularDamping(ship, desiredTorque, dt, params.ARRIVAL_ANGULAR_SPEED);
 
-    // 目的地の進入軸（船首方向、ワールド→ローカル）
-    const approachAxisWorld = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion));
-    const approachAxisLocal = vecNormalize(rotateVecByQuat(approachAxisWorld, conjugateQuat(ship.quaternion)));
-
-    // toTargetLocalを「進入軸に沿った成分」と「軸に垂直な横ずれ成分」に分解
-    const alongDist = vecDot(toTargetLocal, approachAxisLocal);
-    const alongVec = vecScale(approachAxisLocal, alongDist);
-    const lateralOffset = {
-      x: toTargetLocal.x - alongVec.x,
-      y: toTargetLocal.y - alongVec.y,
-      z: toTargetLocal.z - alongVec.z,
+    const toTargetWorld = {
+      x: target.position.x - ship.position.x,
+      y: target.position.y - ship.position.y,
+      z: target.position.z - ship.position.z,
     };
-    const lateralDist = vecLength(lateralOffset);
-
-    // v21: 船首(-Z)が進入軸(approachAxisLocal)からどれだけズレているか。
-    // このズレが大きいほど「今はまだ回頭中」と判断し、横方向の
-    // 位置合わせスライドを控えめにする。
-    const headingAngle = Math.acos(clamp(-approachAxisLocal.z, -1, 1));
-    const headingErrorT = clamp(headingAngle / this.HEADING_ERROR_FULL_LATERAL_ANGLE, 0, 1);
-    const lateralPosMult = this.HEADING_ERROR_LATERAL_MIN_MULT +
-      (1 - this.HEADING_ERROR_LATERAL_MIN_MULT) * headingErrorT;
-
-    // --- 横方向: 位置ずれ + 速度の両方を打ち消す（PD制御的に合成） ---
-    if (lateralDist > 1e-4) {
-      const lateralDirLocal = vecScale(lateralOffset, 1 / lateralDist); // 目的軸へ戻る方向
-      const posStrength =
-        Math.min(1, lateralDist / this.DOCKING_LATERAL_CORRECTION_FULL_THRUST_OFFSET) * lateralPosMult;
-      desiredForce.x += lateralDirLocal.x * posStrength;
-      desiredForce.y += lateralDirLocal.y * posStrength;
-    }
-    // 横方向速度成分（進入軸に垂直な速度）を制動
-    const velAlong = vecDot(localVel, approachAxisLocal);
-    const velAlongVec = vecScale(approachAxisLocal, velAlong);
-    const lateralVel = {
-      x: localVel.x - velAlongVec.x,
-      y: localVel.y - velAlongVec.y,
-      z: localVel.z - velAlongVec.z,
+    const alongDist = vecDot(toTargetWorld, approachAxisWorld);
+    const lateralVec = {
+      x: toTargetWorld.x - approachAxisWorld.x * alongDist,
+      y: toTargetWorld.y - approachAxisWorld.y * alongDist,
+      z: toTargetWorld.z - approachAxisWorld.z * alongDist,
     };
-    const lateralSpeed = vecLength(lateralVel);
-    if (lateralSpeed > 1e-4) {
-      const brakeStrength = Math.min(1, lateralSpeed / this.STRAFE_DAMPING_FULL_BRAKE_SPEED);
-      const brakeDirLocal = vecScale(lateralVel, -brakeStrength / lateralSpeed);
-      desiredForce.x += brakeDirLocal.x;
-      desiredForce.y += brakeDirLocal.y;
+    const lateralDist = vecLength(lateralVec);
+
+    // --- 前後方向(進入軸方向)の速度を0へブレーキ ---
+    const alongSpeedWorld = vecDot(ship.velocity, approachAxisWorld); // 手前側(+)/奥側(-)への速度
+    const alongVelWorld = vecScale(approachAxisWorld, alongSpeedWorld);
+    const alongVelLocal = rotateVecByQuat(alongVelWorld, conjugateQuat(ship.quaternion));
+    const alongErrLocal = { x: -alongVelLocal.x, y: -alongVelLocal.y, z: -alongVelLocal.z };
+    const alongErrMag = vecLength(alongErrLocal);
+    if (alongErrMag > 1e-4) {
+      const dir = vecScale(alongErrLocal, 1 / alongErrMag);
+      const strength = Math.min(1, alongErrMag / this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR);
+      desiredForce.x += dir.x * strength;
+      desiredForce.y += dir.y * strength;
+      desiredForce.z += dir.z * strength;
     }
-    desiredForce.x = clamp(desiredForce.x, -1, 1);
-    desiredForce.y = clamp(desiredForce.y, -1, 1);
 
-    // --- 前後方向(進入軸): 距離に応じて連続的に変化する目標接近速度への
-    //     比例制御（単一の制御則。フルブレーキ/フル前進の二値切り替えは
-    //     行わない） ---
-    // alongDistは「艦から見て目的地が進入軸方向にどれだけ先にあるか」。
-    // 通常は正（まだ手前にいる）。速度は艦が進入軸方向へ進んでいれば正。
-    //
-    // v25: 従来は「制動距離 >= 残り距離ならフルブレーキ(-1)、それ未満
-    // なら固定目標速度への比例制御」という2つの制御則をハード
-    // スイッチしていた。この閾値をまたぐ瞬間に主機関(+1)と逆噴射(-1)
-    // が交互に全力で切り替わり、ガクガクした挙動になっていた
-    // （「主機関と逆噴射がフルパワーで交互に切り替わる」報告）。
-    //
-    // 対策: 目標接近速度そのものを、残り距離から逆算した
-    // 「その距離で安全に止まり切れる速度」で滑らかに頭打ちする
-    // 一本の関数にする。v = sqrt(2 * maxDecel * remainingDist) は
-    // 制動距離の式の逆算そのものなので、残り距離が減るにつれ
-    // targetSpeedも連続的に絞られていき、閾値をまたぐ瞬間の
-    // 不連続な切り替えが起きない。速度がその目標を上回れば
-    // speedErrorが自然に負になりブレーキ側に働くので、フルブレーキ
-    // 分岐を別途持つ必要も無くなる。
-    const maxDecel = this._estimateMaxLinearDecel(ship);
-    // 艦のローカルZ速度のうち進入軸成分を「接近速度」として扱う
-    // （ローカルZは-1が前進方向なので、-approachAxisLocal.zの符号に注意
-    // する必要はなく、velAlongをそのまま接近速度の代理として使う—
-    // alongDistが正のとき艦は目的地の手前にいるので、alongDistを
-    // 減らす方向＝velAlongが正の方向が「接近している」に対応する）。
-    const closingSpeed = velAlong;
-    const remainingDist = Math.max(0, alongDist);
-
-    if (remainingDist > this.DOCKING_POSITION_MIN_DISTANCE) {
-      // 「この残り距離でちょうど止まり切れる」速度を物理的な安全上限とし、
-      // 姿勢合わせ優先の巡航速度上限（maxSpeed×RATIO）と比べて小さい方を
-      // 目標接近速度にする。DOCKING_FINAL_APPROACH_BRAKE_MARGINで少し
-      // 手前から絞り始めることで、理論値ぎりぎりまで詰めてオーバー
-      // シュートすることも防ぐ。
-      const physicalSafeSpeed = Math.sqrt(
-        2 * maxDecel * remainingDist * this.DOCKING_FINAL_APPROACH_BRAKE_MARGIN
-      );
-      // v28: 艦種によってmaxSpeedが大きく異なるため、比率(RATIO)だけに
-      // 頼ると距離200時点の巡航速度が艦によって過大になりオーバー
-      // シュートの一因になっていた。絶対値の上限(MAX_SPEED_ABS)も
-      // 併せてクランプする。
-      const cruiseSpeed = Math.min(
-        ship.maxSpeed * this.DOCKING_FINAL_APPROACH_MAX_SPEED_RATIO,
-        this.DOCKING_FINAL_APPROACH_MAX_SPEED_ABS
-      );
-      const targetSpeed = Math.min(cruiseSpeed, physicalSafeSpeed);
-
-      const speedError = targetSpeed - closingSpeed;
-      // v28: 固定基準(40)ではなく艦の減速性能に応じたスロットル基準を
-      // 使う（_computeFinalApproachThrottleErrorRef参照）。これにより
-      // 「速度差が少し出ただけで即フル主機関」を防ぎ、ブレーキ側も
-      // 同じ基準で滑らかに効くため喧嘩が起きにくくなる。
-      const throttleErrorRef = this._computeFinalApproachThrottleErrorRef(maxDecel);
-      let thrustStrength;
-      if (speedError >= 0) {
-        thrustStrength = clamp(speedError / throttleErrorRef, -1, 1);
-      } else {
-        // v28: 速度超過側は緊急度ベースのブレンドブレーキに委ねる
-        // （_blendFinalApproachBrake参照）。目標速度がremainingDist→0で
-        // 0に張り付いても、間に合わなくなりそうなら滑らかにフル
-        // ブレーキへ寄っていくため、通常の比例制御だけでは間に合わず
-        // 通り越していた問題を解消する。
-        thrustStrength = this._blendFinalApproachBrake(
-          speedError,
-          closingSpeed,
-          remainingDist,
-          maxDecel,
-          throttleErrorRef
-        );
-      }
-      // v21: 勢いキル退出直後は加速側だけクールダウン倍率で絞る
-      // （減速側=thrustStrength<0はそのまま。既に速すぎる場合の
-      // ブレーキを弱めては本末転倒なので、絞るのは正方向のみ）。
-      if (thrustStrength > 0) {
-        thrustStrength *= this._tickApproachCooldownMultiplier(ship, dt);
-        // v21: headingHold中（姿勢がまだ整っていない状態でこの
-        // 関数が呼ばれた場合）は加速側をforwardDampingでさらに
-        // 絞り、その場に留まりながら回頭を優先させる。ブレーキ側
-        // (thrustStrength<0、通り越し防止)には掛けない。
-        if (forwardDamping !== undefined) {
-          thrustStrength *= forwardDamping;
-        }
-      }
-      const approachDirLocal = vecScale(approachAxisLocal, thrustStrength);
-      desiredForce.x += approachDirLocal.x;
-      desiredForce.y += approachDirLocal.y;
-      desiredForce.z += approachDirLocal.z;
-    } else {
-      // v25: 「目的地にほぼ到達」の残留速度制動。
-      //
-      // 旧実装はMath.sign(closingSpeed)で常にフル出力(±1)のブレーキを
-      // かけていた。これだと1つ上の分岐（比例制御、通常は小さな出力）
-      // との境界(DOCKING_POSITION_MIN_DISTANCE=0.15)を艦がわずかに
-      // 前後するだけで、「小さな比例出力」⇔「符号だけを見た全力出力」が
-      // 不連続に入れ替わり、主機関と逆噴射がフルパワーで交互に切り替わる
-      // 発振の原因になっていた（報告された不具合の本体）。
-      //
-      // 対策: ここでも同じ比例制御を使う（目標速度0への収束）。
-      // 速度が小さいほど出力も小さくなるので、1つ上の分岐との境界
-      // でも出力の大きさが連続につながり、不連続なフル出力への
-      // 切り替わりが起きない。
-      // v28: 基準をFORWARD_VELOCITY_FULL_THROTTLE_ERROR固定値から
-      // 艦の減速性能ベースのthrottleErrorRefに統一し、速度超過側は
-      // 上の分岐と同じ_blendFinalApproachBrakeを使う（remainingDistは
-      // ここでは0付近の実際値をそのまま渡す）ことで、
-      // DOCKING_POSITION_MIN_DISTANCEの境界をまたいでも出力が
-      // 連続につながるようにする。
-      const speedError = -closingSpeed; // 目標速度0
-      const throttleErrorRef = this._computeFinalApproachThrottleErrorRef(maxDecel);
-      let thrustStrength =
-        speedError >= 0
-          ? clamp(speedError / throttleErrorRef, -1, 1)
-          : this._blendFinalApproachBrake(
-              speedError,
-              closingSpeed,
-              remainingDist,
-              maxDecel,
-              throttleErrorRef
-            );
-
-      // v28: 「ほぼ到達」判定に入った瞬間、艦の性能によっては1フレームで
-      // MIN_DISTANCEを大きく飛び越すことがあり（減速力の強い艦ほど
-      // 顕著）、この分岐は元々速度制動のみで位置は見ていなかったため、
-      // 飛び越した分の位置ズレが永続的に残ってしまっていた。alongDist
-      // （クランプ前の符号付き値、負＝通り越し）がMIN_DISTANCEを超えて
-      // いる間は、速度制動に軽い位置復帰力を上乗せしてじわじわ戻す
-      // （急な押し戻しで再度通り越さないよう、比例制御のまま弱めに）。
-      if (alongDist < -this.DOCKING_POSITION_MIN_DISTANCE) {
-        const overshootDist = -alongDist;
-        const positionCorrection = clamp(
-          overshootDist / this.DOCKING_LATERAL_CORRECTION_FULL_THRUST_OFFSET,
-          0,
-          1
-        );
-        // 通り越した先(alongDist<0)から目的地へ戻るには、進入軸方向
-        // (approachAxisLocal、前進方向)と逆＝マイナス側の推力が要る。
-        thrustStrength = clamp(thrustStrength - positionCorrection, -1, 1);
-      }
-      const brakeDirLocal = vecScale(approachAxisLocal, thrustStrength);
-      desiredForce.x += brakeDirLocal.x;
-      desiredForce.y += brakeDirLocal.y;
-      desiredForce.z += brakeDirLocal.z;
-    }
+    // --- 横方向(進入軸に垂直)は位置・速度とも0へ収束する制御 ---
+    // 「進入軸上、艦の現在のalongDistと同じ位置」を横方向の目標点
+    // とすることで、前後方向には影響を与えず横ズレだけを縮める。
+    const lateralTargetWorld = {
+      x: ship.position.x + lateralVec.x,
+      y: ship.position.y + lateralVec.y,
+      z: ship.position.z + lateralVec.z,
+    };
+    this._applySettlingForce(ship, lateralTargetWorld, desiredForce);
 
     desiredForce.x = clamp(desiredForce.x, -1, 1);
     desiredForce.y = clamp(desiredForce.y, -1, 1);
     desiredForce.z = clamp(desiredForce.z, -1, 1);
+
+    // 完了判定: 前後方向速度・横方向位置誤差とも十分小さいこと。
+    const alongSpeed = Math.abs(alongSpeedWorld);
+    const settled = alongSpeed < params.STOP_SPEED_EPSILON && lateralDist <= this.DOCKING_POSITION_MIN_DISTANCE;
+    if (settled && onSettled) {
+      onSettled();
+    }
+  },
+
+
+  // -----------------------------------------------------------
+  // final_approach: distance 300→250。並進・旋回・逆噴射可、
+  // 停止はしない。姿勢をtarget.quaternionへ整え続ける。距離250へ
+  // 到達した時点でまだ入港基準を満たしていなければbrake250へ
+  // 遷移する（_resolveDockingPhase側で処理済み、ここでは通常の
+  // 前進+姿勢合わせのみ行えばよい）。
+  // -----------------------------------------------------------
+  _runFinalApproachAdjustPhase(ship, target, approachAxisWorld, params, desiredForce, desiredTorque, dt) {
+    const headingTargetWorld = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion));
+    this._applyHeadingTorque(ship, headingTargetWorld, this.DOCKING_FINAL_HEADING_FULL_TORQUE_ANGLE, desiredTorque);
+    this._applyRollTorque(ship, target, desiredTorque);
+    this._applyAngularDamping(ship, desiredTorque, dt, params.ARRIVAL_ANGULAR_SPEED);
+
+    // 並進: target.positionへ、ADJUST_MAX_BRAKING_DISTANCE程度の
+    // 控えめな速度上限で進む。横方向はフルで補正、前後は緩やかに。
+    this._applyApproachForce(ship, target.position, params.ADJUST_MAX_BRAKING_DISTANCE, desiredForce);
+  },
+
+  // -----------------------------------------------------------
+  // tunnel: 最終進入（トンネル内部）。旋回・並進・逆噴射すべて禁止。
+  // 姿勢はtarget.quaternionへ完全固定（トルク要求を出さず、角速度も
+  // 強制的にゼロへ吸収する — トンネル内は物理的に旋回不可という
+  // 前提のため、通常の比例トルクではなく直接ロックする）。
+  // 前後方向のみ、distance=ZONE_FINAL_APPROACH地点でFINAL_APPROACH_
+  // ENTRY_SPEED、そこからFINAL_APPROACH_BRAKING_DISTANCEで速度0へ
+  // 収束するプロファイルで前進する。
+  // -----------------------------------------------------------
+  _runTunnelPhase(ship, target, approachAxisWorld, distance, params, desiredForce, desiredTorque, dt) {
+    // 姿勢: 常に目的地姿勢へ強制固定（旋回禁止のため、通常の比例
+    // トルクは使わず角速度そのものを毎フレーム0にする）。
+    ship.quaternion.x = target.quaternion.x;
+    ship.quaternion.y = target.quaternion.y;
+    ship.quaternion.z = target.quaternion.z;
+    ship.quaternion.w = target.quaternion.w;
+    ship.angularVelocity.x = 0;
+    ship.angularVelocity.y = 0;
+    ship.angularVelocity.z = 0;
+    // desiredTorqueは0のまま（トルク要求そのものを出さない）。
+
+    // 並進: 横方向(X/Y、進入軸に垂直)は完全に禁止（並進0を維持する
+    // ため何もしない＝横方向の力は一切出さない）。前後方向(Z、
+    // 進入軸方向)のみ、目標速度プロファイルへ追従する。
+    const maxDecel = this._estimateMaxLinearDecel(ship);
+    // distance=ZONE_FINAL_APPROACHで速度ENTRY_SPEED、そこから
+    // FINAL_APPROACH_BRAKING_DISTANCEで0になる速度プロファイル:
+    // v(d) = ENTRY_SPEED * sqrt(d / BRAKING_DISTANCE) （d: 残り距離）
+    // 単純な線形減速（v(d) = ENTRY_SPEED * d/BRAKING_DISTANCE）でも
+    // 良いが、艦の実際の制動能力を無視して間に合わない可能性を
+    // 避けるため、艦の制動距離から出せる速度と、要求プロファイルの
+    // 小さい方を採用する。
+    const profileSpeed =
+      distance >= params.FINAL_APPROACH_BRAKING_DISTANCE
+        ? params.FINAL_APPROACH_ENTRY_SPEED
+        : params.FINAL_APPROACH_ENTRY_SPEED * (distance / Math.max(1e-6, params.FINAL_APPROACH_BRAKING_DISTANCE));
+    const physicalSafeSpeed = this._speedForBrakingDistance(maxDecel, distance);
+    const targetSpeed = Math.max(0, Math.min(profileSpeed, physicalSafeSpeed));
+
+    const targetVelWorld = vecScale(approachAxisWorld, -targetSpeed); // 進入軸のマイナス方向＝目的地へ向かう方向
+    // 実際に使うのは目標「速度」ではなく目標「速度との差」を前後
+    // 方向だけに使う（横方向はそもそも力を出さない）ので、専用に
+    // Z成分だけ処理する。
+    const localVel = rotateVecByQuat(ship.velocity, conjugateQuat(ship.quaternion));
+    const targetVelLocal = rotateVecByQuat(targetVelWorld, conjugateQuat(ship.quaternion));
+    const zError = targetVelLocal.z - localVel.z;
+    const thrustStrength = Math.min(1, Math.abs(zError) / this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR);
+    desiredForce.z = Math.sign(zError) * thrustStrength;
+    // desiredForce.x/yは0のまま（並進禁止）。
+  },
+
+  // -----------------------------------------------------------
+  // overshoot: トンネル内でオーバーシュートし、奥側へ抜けていく間。
+  // 姿勢は目的地姿勢に固定（tunnelと同じ強制ロック）、直進のみ。
+  //
+  // 「進入軸の逆走禁止」は「手前側へ戻る方向（approachAxisWorld
+  // 方向、艦が入港時に向く方向とは逆）への推力」の禁止であり、
+  // 奥へ進む方向（-approachAxisWorld方向、既存の前進の続き）への
+  // 推力までは禁止しない。トンネル内の通常の減速プロセスの結果、
+  // 奥方向速度がほぼ0まで落ちた状態でわずかに奥側に入り込んだ
+  // ケースでは、慣性だけに頼ると永久に立ち往生してしまうため、
+  // 主機（奥方向への推力）を使ってOVERSHOOT_REAPPROACH_DISTANCEまで
+  // 確実に進めるようにする。
+  // -----------------------------------------------------------
+  DOCKING_OVERSHOOT_MIN_SPEED: 5.0, // 奥方向速度がこれ未満なら主機で下限速度まで押し出す
+
+  _runOvershootPhase(ship, target, approachAxisWorld, params, desiredForce, desiredTorque, dt) {
+    ship.quaternion.x = target.quaternion.x;
+    ship.quaternion.y = target.quaternion.y;
+    ship.quaternion.z = target.quaternion.z;
+    ship.quaternion.w = target.quaternion.w;
+    ship.angularVelocity.x = 0;
+    ship.angularVelocity.y = 0;
+    ship.angularVelocity.z = 0;
+
+    // 奥方向(-approachAxisWorld方向)の現在速度を求める。
+    const outwardSpeed = -vecDot(ship.velocity, approachAxisWorld);
+    if (outwardSpeed < this.DOCKING_OVERSHOOT_MIN_SPEED) {
+      // 奥方向速度が下限を割っている＝慣性だけでは通過完了まで
+      // 進みきれない可能性があるため、主機で奥方向へ押し出す。
+      // （手前方向=approachAxisWorld方向への推力は一切出さない
+      // ＝逆走禁止を維持する。）
+      const outwardDirWorld = vecScale(approachAxisWorld, -1);
+      const outwardDirLocal = rotateVecByQuat(outwardDirWorld, conjugateQuat(ship.quaternion));
+      const speedErr = this.DOCKING_OVERSHOOT_MIN_SPEED - outwardSpeed;
+      const thrustStrength = Math.min(1, speedErr / this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR);
+      desiredForce.x = outwardDirLocal.x * thrustStrength;
+      desiredForce.y = outwardDirLocal.y * thrustStrength;
+      desiredForce.z = outwardDirLocal.z * thrustStrength;
+    }
+    // 奥方向速度が既に下限以上なら、desiredForceは0のまま
+    // （既存の慣性のみで通過させる）。
+  },
+
+  // -----------------------------------------------------------
+  // return_to_axis: 艦が進入軸の奥側(alongDist<0)にいる場合の回り込み
+  // フェーズ。cruise/approach/adjustはdistance（target.positionへの
+  // 直線距離）だけを見ており艦が手前側にいる前提で組まれているため、
+  // 奥側にいるままこれらを使うと目的地に正面から向かい合う形になり、
+  // 「進入軸を逆走して入る」形になりかねない。
+  //
+  // 回り込み先は、進入軸上の固定中間地点（_computeAvoidanceWaypoint、
+  // target.positionから手前側にVIRTUAL_WAYPOINT_OFFSET+
+  // AVOIDANCE_RADIUS離れた、横方向オフセットを持たない点）。
+  // これを目指すことで、艦はNO_ENTRY_RADIUS圏内を横切らずに軸の
+  // 手前側へ戻る。速度上限はcruiseと同様に設けない（最短時間で
+  // 回り込みたいため）。
+  // -----------------------------------------------------------
+  _runReturnToAxisPhase(ship, target, approachAxisWorld, distance, lateral, params, desiredForce, desiredTorque, dt) {
+    const returnTarget = this._computeAvoidanceWaypoint(ship, target, approachAxisWorld, params);
+
+    const toReturnTarget = {
+      x: returnTarget.x - ship.position.x,
+      y: returnTarget.y - ship.position.y,
+      z: returnTarget.z - ship.position.z,
+    };
+    const steerDist = vecLength(toReturnTarget);
+    const headingTargetWorld = steerDist > 1e-4 ? vecScale(toReturnTarget, 1 / steerDist) : approachAxisWorld;
+
+    this._applyHeadingTorque(ship, headingTargetWorld, this.DOCKING_HEADING_FULL_TORQUE_ANGLE, desiredTorque);
+    this._applyRollTorque(ship, target, desiredTorque);
+    this._applyAngularDamping(ship, desiredTorque, dt, params.ARRIVAL_ANGULAR_SPEED);
+
+    // 速度上限なし(null)。cruiseと同じく最短時間で回り込みを完了
+    // させたいため、制動距離ベースの上限のみで加減速する。
+    this._applyApproachForce(ship, returnTarget, null, desiredForce);
   },
 };

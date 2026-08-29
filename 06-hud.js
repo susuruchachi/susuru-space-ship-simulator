@@ -455,23 +455,9 @@ const HUD = {
     const euler = quatToEulerDegrees(ship.quaternion);
     const angVel = ship.angularVelocity;
 
-    // v08: 自動操船中は目的地までの距離もあわせて表示する
-    // v17: 距離200（DOCKING_FINAL_APPROACH_DISTANCE）を境に「接近中」
-    // →「最終進入」フェーズへ切り替わったことがHUD上でも分かるように、
-    // フェーズ名を併記する。判定はThrusterSolver側の実際の判定条件
-    // （距離だけでなく、目的地を通り越していないかも見る）と揃える。
-    // v20: 「勢い殺しモード」中はship._momentumKillActiveにフラグが
-    // 立つ（ThrusterSolver._updateMomentumKillState参照）。ここでは
-    // 判定を再計算せず、そのキャッシュ済みフラグをそのまま読む。
-    // v21: 距離800(DOCKING_HEADING_BLEND_START_DISTANCE)を切ったら
-    // 手動操作を全軸拒否して自動制御に姿勢・並進を委ねるのに合わせ、
-    // HUD表示もまず大枠で「アプローチ中」に切り替える。従来の
-    // 「接近中／最終進入／勢い殺し中」という細かいフェーズ名は
-    // その後（主に距離200圏内）、今まで通り表示する。
-    // また、最終進入(inFinalApproach)は「距離だけでなく姿勢も
-    // 実際に揃っていること」まで含めてThrusterSolver側で判定する
-    // ようになった（v21のheadingHold）ため、ここでも同じ条件で
-    // 再現し、姿勢待ち中は「姿勢調整中」として区別する。
+    // v46: フェーズ判定はThrusterSolver側のステートマシン
+    // （ship._dockingPhase）に一本化されたため、HUDはそれを読んで
+    // 日本語ラベルに変換するだけでよい。
     let dockingLine = '';
     if (ship.autoDockingEnabled && State.dockingTarget) {
       const target = State.dockingTarget;
@@ -480,53 +466,19 @@ const HUD = {
       const dz = target.position.z - ship.position.z;
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-      const approachAxisWorld = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion));
-
-      const approachAxisLocal = rotateVecByQuat(approachAxisWorld, conjugateQuat(ship.quaternion));
-      const headingErrorFromAxis = Math.acos(clamp(-approachAxisLocal.z, -1, 1));
-      const headingReadyForFinalApproach =
-        headingErrorFromAxis <= ThrusterSolver.DOCKING_FINAL_APPROACH_HEADING_READY_ANGLE;
-
-      // v31: 「船が出口側（進入軸の奥側）に出るとonApproachSideが
-      // falseになり、距離800/200を切っていても'接近中'のままになる」
-      // との報告への対応。'アプローチ中'・'最終進入'系の表示は
-      // onApproachSideを見ず、距離のみで判定する（本体側
-      // ThrusterSolver._buildDesiredForAutoDockingの同名変数と揃えた。
-      // 詳細な経緯は03-thruster-solver.js側のコメント参照）。
-      const inFinalApproachZone = dist <= ThrusterSolver.DOCKING_FINAL_APPROACH_DISTANCE;
-      const inFinalApproach = inFinalApproachZone && headingReadyForFinalApproach;
-      const headingHold = inFinalApproachZone && !headingReadyForFinalApproach;
-      const insideApproachZone =
-        dist <= ThrusterSolver.DOCKING_HEADING_BLEND_START_DISTANCE;
-
-      // v34: 実際の固定条件（04-flight-physics.js._tryLockAtDockingArrival）
-      // に合わせ、距離・速度だけでなく「直前フレームが最終進入
-      // フェーズだったか」「姿勢(heading・roll)が揃っているか」も
-      // 表示側の判定に含める。これがズレると、まだ固定されていない
-      // のにHUDだけ「到着（固定）」と表示してしまう。
-      const hasArrived =
-        dist < FlightPhysics.DOCKING_ARRIVAL_DISTANCE &&
-        speed < FlightPhysics.DOCKING_ARRIVAL_SPEED &&
-        !!ship._dockingWasInFinalApproach &&
-        FlightPhysics._isAttitudeReadyForArrival(ship, target);
-      // v27: オーバーシュート直後はship._dockingReapproachingがtrueに
-      // なる（ThrusterSolver._computeOnApproachSideWithHysteresis参照）。
-      // このフェーズ名を他より優先表示し、「通り越して接近中に戻った
-      // だけ」ではなく「再アプローチ中」であることをHUD上でも
-      // はっきり示す。
-      const phaseLabel = hasArrived
-        ? '到着（固定）'
-        : ship._dockingReapproaching
-        ? '再アプローチ中（進入軸へ戻り中）'
-        : ship._momentumKillActive
-        ? '勢い殺し中（速度方向へ旋回）'
-        : inFinalApproach
-        ? '最終進入（姿勢固定）'
-        : headingHold
-        ? '姿勢調整中（回頭優先）'
-        : insideApproachZone
-        ? 'アプローチ中'
-        : '接近中';
+      const phaseLabels = {
+        cruise: '自由巡航中',
+        approach: 'アプローチ中',
+        adjust: '軸合わせ調整中',
+        brake300: '停止中（距離300・軸合わせ）',
+        final_approach: '最終アプローチ（姿勢調整）',
+        brake250: '停止中（距離250・姿勢調整）',
+        tunnel: '最終進入（トンネル内・姿勢固定）',
+        overshoot: 'オーバーシュート通過中',
+        return_to_axis: '進入軸へ回り込み中',
+        docked: '到着（固定）',
+      };
+      const phaseLabel = phaseLabels[ship._dockingPhase] || ship._dockingPhase || '-';
 
       dockingLine = `<div>自動操船: 目的地まで ${dist.toFixed(1)} [${phaseLabel}]</div>`;
     }
