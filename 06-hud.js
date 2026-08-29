@@ -54,6 +54,56 @@ const HUD = {
     el.className = 'hud-debug-panel';
     domRoot.appendChild(el);
     this._debugEl = el;
+    this._buildDockingLogButton(domRoot);
+  },
+
+  // -----------------------------------------------------------
+  // デバッグ用: 自動ドッキングのフェーズ判定に使われた生の物理量
+  // （ThrusterSolver._dockingLog）をJSON/CSVでダウンロードする
+  // ボタン。原因調査用の一時UI。
+  // -----------------------------------------------------------
+  _buildDockingLogButton(domRoot) {
+    const wrap = document.createElement('div');
+    wrap.className = 'hud-docking-log-controls';
+    wrap.style.cssText = 'position:fixed; top:8px; right:8px; z-index:9999; display:flex; gap:6px;';
+    wrap.innerHTML = `
+      <button class="btn-docking-log-dl" style="font-size:12px; padding:4px 8px;">ログDL</button>
+      <button class="btn-docking-log-clear" style="font-size:12px; padding:4px 8px;">ログ消去</button>
+    `;
+    domRoot.appendChild(wrap);
+
+    wrap.querySelector('.btn-docking-log-dl').addEventListener('click', () => {
+      this._downloadDockingLog();
+    });
+    wrap.querySelector('.btn-docking-log-clear').addEventListener('click', () => {
+      ThrusterSolver.clearDockingLog();
+    });
+  },
+
+  _downloadDockingLog() {
+    const log = ThrusterSolver.getDockingLog();
+    if (!log || log.length === 0) {
+      alert('ドッキングログが空です（自動ドッキングを有効にして少し飛んでから押してください）');
+      return;
+    }
+
+    // CSV（Excel/スプレッドシートでそのまま開ける形式）
+    const headers = Object.keys(log[0]);
+    const csvLines = [headers.join(',')];
+    for (const row of log) {
+      csvLines.push(headers.map((h) => (row[h] === null || row[h] === undefined ? '' : row[h])).join(','));
+    }
+    const csvBlob = new Blob([csvLines.join('\n')], { type: 'text/csv' });
+    const csvUrl = URL.createObjectURL(csvBlob);
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+
+    const a = document.createElement('a');
+    a.href = csvUrl;
+    a.download = `docking-log-${ts}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(csvUrl);
   },
 
   // v42: 「航路トグル（航跡もまとめて対象になった）を、進入軸トグルの

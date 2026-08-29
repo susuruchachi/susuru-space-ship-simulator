@@ -21,6 +21,33 @@
 // =============================================================
 
 const ThrusterSolver = {
+  // -----------------------------------------------------------
+  // デバッグ用ドッキングログ（一時的な調査機能）。
+  // _buildDesiredForAutoDockingが呼ばれるたびに、フェーズ判定に
+  // 使った生の物理量をリングバッファへ積む。HUDの「ログDL」
+  // ボタン（06-hud.js）から任意のタイミングでJSON/CSVとして
+  // ダウンロードできる。原因調査用の一時コードなので、原因が
+  // 特定できたら削除して構わない。
+  // -----------------------------------------------------------
+  DOCKING_LOG_MAX_ENTRIES: 20000,
+  _dockingLog: [],
+
+  _logDockingFrame(entry) {
+    this._dockingLog.push(entry);
+    if (this._dockingLog.length > this.DOCKING_LOG_MAX_ENTRIES) {
+      // 古いものから間引く（先頭を捨てる）。
+      this._dockingLog.splice(0, this._dockingLog.length - this.DOCKING_LOG_MAX_ENTRIES);
+    }
+  },
+
+  clearDockingLog() {
+    this._dockingLog = [];
+  },
+
+  getDockingLog() {
+    return this._dockingLog;
+  },
+
   // 並進のみを要求している時（ユーザーがrotate入力をしていない時）に
   // 発生する「意図しない残留トルク」を、これ未満なら無視する閾値。
   // ゼロにすると浮動小数点誤差レベルの極小トルクにまで補正パスが
@@ -1365,6 +1392,50 @@ const ThrusterSolver = {
 
     const phase = this._resolveDockingPhase(ship, target, distance, alongDist, lateral, params);
     ship._dockingPhase = phase;
+
+    // デバッグ用ログ（一時調査コード）: フェーズ判定に使った生の
+    // 物理量と、return_to_axis中はその目標点までの距離・速度成分も
+    // あわせて記録する。
+    {
+      const speed = vecLength(ship.velocity);
+      let returnTargetAlong = null;
+      let returnTargetDist = null;
+      let closingSpeedToReturnTarget = null;
+      if (phase === 'return_to_axis') {
+        const returnTarget = this._computeAvoidanceWaypoint(ship, target, approachAxisWorld, params);
+        const toReturnTarget = {
+          x: returnTarget.x - ship.position.x,
+          y: returnTarget.y - ship.position.y,
+          z: returnTarget.z - ship.position.z,
+        };
+        returnTargetDist = vecLength(toReturnTarget);
+        returnTargetAlong = params.VIRTUAL_WAYPOINT_OFFSET + params.AVOIDANCE_RADIUS;
+        if (returnTargetDist > 1e-4) {
+          const dir = vecScale(toReturnTarget, 1 / returnTargetDist);
+          closingSpeedToReturnTarget = vecDot(ship.velocity, dir);
+        }
+      }
+      this._logDockingFrame({
+        t: (typeof performance !== 'undefined' ? performance.now() : Date.now()),
+        phase,
+        prevPhase: ship._dockingPhasePrevForLog || null,
+        distance,
+        alongDist,
+        lateral,
+        speed,
+        posX: ship.position.x,
+        posY: ship.position.y,
+        posZ: ship.position.z,
+        velX: ship.velocity.x,
+        velY: ship.velocity.y,
+        velZ: ship.velocity.z,
+        returnTargetAlong,
+        returnTargetDist,
+        closingSpeedToReturnTarget,
+        dockingBrake300Done: !!ship._dockingBrake300Done,
+      });
+      ship._dockingPhasePrevForLog = phase;
+    }
 
     // tunnelフェーズ中、入港判定基準（速度・姿勢誤差・角速度）を
     // 満たした時点で艦を目的地へ完全固定する（要望「速度0.5,角度は
