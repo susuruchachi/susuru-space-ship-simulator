@@ -1271,11 +1271,11 @@ const ThrusterSolver = {
     // brake300は「一度完全停止して軸に乗せる」フェーズ。停止・軸
     // 合わせが完了する(_dockingBrake300Done=true)まで、ブレーキ中に
     // distanceがNO_ENTRY_RADIUS未満まで多少沈み込んでも
-    // brake300自身を継続する（前後方向はブレーキするだけで特定の
-    // distanceに戻す制御をしていないため、横滑り除去の副作用等で
-    // わずかにdistanceが変動するのは正常な範囲であり、これを
-    // 「正規の手順を踏まない侵入」として弾いてしまうと、NO_ENTRY_
-    // RADIUS付近でadjustとbrake300を永遠に往復してしまう）。
+    // brake300自身を継続する。v50-fix3でbrake300の前後方向にも
+    // distance=ZONE_BRAKE300への位置収束制御を追加したが、収束の
+    // 過程で行き過ぎ・戻りのわずかなオーバーシュートが起こりうる
+    // ため、それを「正規の手順を踏まない侵入」として弾いてしまうと、
+    // NO_ENTRY_RADIUS付近でadjustとbrake300を永遠に往復してしまう。
     // 完了(_dockingBrake300Done=true)した時点で初めて、以降は通常の
     // ゾーン判定（NO_ENTRY_RADIUSチェック含む）に従う。
     if (prevPhase === 'brake300' && !ship._dockingBrake300Done) {
@@ -1492,15 +1492,15 @@ const ThrusterSolver = {
         this._runApproachPhase(ship, target, approachAxisWorld, distance, lateral, params, desiredForce, desiredTorque, dt, params.ADJUST_MAX_BRAKING_DISTANCE, params.ZONE_BRAKE300);
         break;
       case 'brake300':
-        this._runBrakePhase(ship, target, approachAxisWorld, params, desiredForce, desiredTorque, dt, 'brake300', () => {
+        this._runBrakePhase(ship, target, approachAxisWorld, params, desiredForce, desiredTorque, dt, 'brake300', params.ZONE_BRAKE300, () => {
           ship._dockingBrake300Done = true;
         });
         break;
       case 'final_approach':
-        this._runFinalApproachAdjustPhase(ship, target, approachAxisWorld, params, desiredForce, desiredTorque, dt);
+        this._runFinalApproachAdjustPhase(ship, target, approachAxisWorld, distance, params, desiredForce, desiredTorque, dt);
         break;
       case 'brake250':
-        this._runBrakePhase(ship, target, approachAxisWorld, params, desiredForce, desiredTorque, dt, 'brake250', null);
+        this._runBrakePhase(ship, target, approachAxisWorld, params, desiredForce, desiredTorque, dt, 'brake250', params.ZONE_BRAKE250, null);
         break;
       case 'tunnel':
         this._runTunnelPhase(ship, target, approachAxisWorld, distance, params, desiredForce, desiredTorque, dt);
@@ -1754,11 +1754,28 @@ const ThrusterSolver = {
   //
   //   phaseKind: 'brake300' | 'brake250'（ログ・将来拡張用、現状は
   //              挙動は共通）
+  //   targetDistance: このフェーズで艦を静止させたい、target.position
+  //     までの距離（brake300ならZONE_BRAKE300=300、brake250なら
+  //     ZONE_BRAKE250=250）。進入軸上のこの距離の点を目標位置とする。
   //   onSettled: 前後方向速度・横方向位置誤差とも十分収まった際に
   //              一度だけ呼ぶコールバック（brake300が「完了済み」
   //              フラグを立てるために使う）
+  //
+  // v50-fix3: 従来は前後方向を「今の速度を0にする」ブレーキだけで
+  // 処理しており、目標distance（300/250）への位置補正が一切
+  // なかった。直前のadjust/final_approachフェーズの事前減速だけでは
+  // フレーム単位の誤差や安全マージンの影響でdistanceがぴったり
+  // targetDistanceに一致した瞬間に速度0になるとは限らず、わずかに
+  // 行き過ぎた（または届く前で速度が残っている）位置でbrake300/250に
+  // 切り替わると、前後方向はその位置のままの速度を0にするだけ
+  // だったため、行き過ぎた位置に居座り続けてしまっていた
+  // （「-300、-250でブレーキをかけ始めている」という報告の原因）。
+  // 横方向で既に使っている_applySettlingForce（位置誤差に比例した
+  // 目標速度を作り、位置・速度とも0へ収束させる関数）を前後方向にも
+  // 使うことで、多少の行き過ぎがあっても最終的にdistance=
+  // targetDistanceへ正確に収束するようにする。
   // -----------------------------------------------------------
-  _runBrakePhase(ship, target, approachAxisWorld, params, desiredForce, desiredTorque, dt, phaseKind, onSettled) {
+  _runBrakePhase(ship, target, approachAxisWorld, params, desiredForce, desiredTorque, dt, phaseKind, targetDistance, onSettled) {
     // 姿勢は常にtarget.quaternion方向へ合わせにいく（厳しめ角度）。
     const headingTargetWorld = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion));
     this._applyHeadingTorque(ship, headingTargetWorld, this.DOCKING_FINAL_HEADING_FULL_TORQUE_ANGLE, desiredTorque);
@@ -1770,11 +1787,8 @@ const ThrusterSolver = {
       y: target.position.y - ship.position.y,
       z: target.position.z - ship.position.z,
     };
-    // v50-fix2: 上のalongDist修正と同じ理由でrawAlongをそのまま使う
-    // （このalongDistは本関数内では未使用だが、他箇所との規約統一のため
-    // 同じ形にしておく）。
     const rawAlong = vecDot(toTargetWorld, approachAxisWorld);
-    const alongDist = rawAlong;
+    const alongDist = rawAlong; // 正=手前側, 負=奥側
     const lateralVec = {
       x: toTargetWorld.x - approachAxisWorld.x * rawAlong,
       y: toTargetWorld.y - approachAxisWorld.y * rawAlong,
@@ -1782,19 +1796,21 @@ const ThrusterSolver = {
     };
     const lateralDist = vecLength(lateralVec);
 
-    // --- 前後方向(進入軸方向)の速度を0へブレーキ ---
-    const alongSpeedWorld = vecDot(ship.velocity, approachAxisWorld); // 手前側(+)/奥側(-)への速度
-    const alongVelWorld = vecScale(approachAxisWorld, alongSpeedWorld);
-    const alongVelLocal = rotateVecByQuat(alongVelWorld, conjugateQuat(ship.quaternion));
-    const alongErrLocal = { x: -alongVelLocal.x, y: -alongVelLocal.y, z: -alongVelLocal.z };
-    const alongErrMag = vecLength(alongErrLocal);
-    if (alongErrMag > 1e-4) {
-      const dir = vecScale(alongErrLocal, 1 / alongErrMag);
-      const strength = Math.min(1, alongErrMag / this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR);
-      desiredForce.x += dir.x * strength;
-      desiredForce.y += dir.y * strength;
-      desiredForce.z += dir.z * strength;
-    }
+    // --- 前後方向(進入軸方向): distance=targetDistanceの点へ ---
+    // 進入軸上、target.positionからtargetDistanceだけ手前
+    // （-approachAxisWorld方向）の点を目標位置とし、_applySettlingForce
+    // で位置・速度とも0へ収束させる。alongDistがtargetDistanceより
+    // 大きい（まだ手前すぎる）場合は前進、小さい（行き過ぎ・奥寄り）
+    // 場合は後退方向の力が自動的に出る。
+    // 横方向にはズレさせたくないので、目標点の横方向成分は艦の現在の
+    // 横ズレ(lateralVec)に置き換える（横方向は下の_applySettlingForce
+    // で別途扱うため、ここでは前後方向だけを動かす目標点にする）。
+    const alongOnlyTargetWorld = {
+      x: ship.position.x + lateralVec.x + approachAxisWorld.x * (alongDist - targetDistance),
+      y: ship.position.y + lateralVec.y + approachAxisWorld.y * (alongDist - targetDistance),
+      z: ship.position.z + lateralVec.z + approachAxisWorld.z * (alongDist - targetDistance),
+    };
+    this._applySettlingForce(ship, alongOnlyTargetWorld, desiredForce);
 
     // --- 横方向(進入軸に垂直)は位置・速度とも0へ収束する制御 ---
     // 「進入軸上、艦の現在のalongDistと同じ位置」を横方向の目標点
@@ -1810,9 +1826,14 @@ const ThrusterSolver = {
     desiredForce.y = clamp(desiredForce.y, -1, 1);
     desiredForce.z = clamp(desiredForce.z, -1, 1);
 
-    // 完了判定: 前後方向速度・横方向位置誤差とも十分小さいこと。
+    // 完了判定: 前後方向の位置誤差・速度・横方向位置誤差とも十分小さいこと。
+    const alongPosError = Math.abs(targetDistance - alongDist);
+    const alongSpeedWorld = vecDot(ship.velocity, approachAxisWorld);
     const alongSpeed = Math.abs(alongSpeedWorld);
-    const settled = alongSpeed < params.STOP_SPEED_EPSILON && lateralDist <= this.DOCKING_POSITION_MIN_DISTANCE;
+    const settled =
+      alongSpeed < params.STOP_SPEED_EPSILON &&
+      alongPosError <= this.DOCKING_POSITION_MIN_DISTANCE &&
+      lateralDist <= this.DOCKING_POSITION_MIN_DISTANCE;
     if (settled && onSettled) {
       onSettled();
     }
@@ -1825,8 +1846,16 @@ const ThrusterSolver = {
   // 到達した時点でまだ入港基準を満たしていなければbrake250へ
   // 遷移する（_resolveDockingPhase側で処理済み、ここでは通常の
   // 前進+姿勢合わせのみ行えばよい）。
+  //
+  // v50-fix3: 従来はtarget.position（distance=0）を減速基準にして
+  // いたため、distance=250に到達する時点ではまだ「制動距離の余裕」
+  // が残っており、速度が十分落ちきらないままbrake250へ切り替わって
+  // いた（brake300のときと同じ理由の不具合）。adjustフェーズの
+  // stopAtDistanceと同じ考え方で、減速基準を「distance=ZONE_BRAKE250
+  // までの残り距離」に変更し、distance=250でほぼ速度0になるよう
+  // 事前減速する。
   // -----------------------------------------------------------
-  _runFinalApproachAdjustPhase(ship, target, approachAxisWorld, params, desiredForce, desiredTorque, dt) {
+  _runFinalApproachAdjustPhase(ship, target, approachAxisWorld, distance, params, desiredForce, desiredTorque, dt) {
     const headingTargetWorld = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion));
     this._applyHeadingTorque(ship, headingTargetWorld, this.DOCKING_FINAL_HEADING_FULL_TORQUE_ANGLE, desiredTorque);
     this._applyRollTorque(ship, target, desiredTorque);
@@ -1834,7 +1863,10 @@ const ThrusterSolver = {
 
     // 並進: target.positionへ、ADJUST_MAX_BRAKING_DISTANCE程度の
     // 控えめな速度上限で進む。横方向はフルで補正、前後は緩やかに。
-    this._applyApproachForce(ship, target.position, params.ADJUST_MAX_BRAKING_DISTANCE, desiredForce);
+    // 減速の基準はdistance=ZONE_BRAKE250までの残り距離
+    // （stoppingDistanceForCapOverride）にする。
+    const stoppingBasisDistance = Math.max(0, distance - params.ZONE_BRAKE250);
+    this._applyApproachForce(ship, target.position, params.ADJUST_MAX_BRAKING_DISTANCE, desiredForce, stoppingBasisDistance);
   },
 
   // -----------------------------------------------------------

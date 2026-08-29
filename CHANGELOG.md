@@ -112,6 +112,52 @@ v50以降、変更のたびにここへ追記していく想定です（それ�
 
 ---
 
+## v50-fix3 - 2026-08-29
+
+### 修正: brake300・brake250でオーバーシュートした位置に停止してしまう不具合
+
+- **症状**: 距離300ブレーキポイント・距離250ブレーキポイントの両方で、
+  ちょうどその距離でピタリと止まらず、行き過ぎた（あるいは届く前の）
+  位置でそのまま停止してしまう。体感として「distance=300や250で
+  ブレーキをかけ始めている」ように見える。
+- **原因**: 2つ複合していた。
+  1. `_runBrakePhase`（brake300/brake250共通の実装）は、前後方向
+     （進入軸方向）について「その時点の速度を0にする」ブレーキのみ
+     行っており、目標distance（300 or 250）へ位置そのものを戻す
+     制御が存在しなかった。直前のフェーズの事前減速で理論上は
+     ちょうどそのdistanceで速度が0になるよう作られていても、
+     フレーム単位の誤差や安全マージンの影響でわずかに行き過ぎた
+     （またはまだ届いていない）位置・速度でbrake300/250へ切り替わる
+     と、そのズレがそのまま最終停止位置として固定されてしまって
+     いた。横方向（lateral）は`_applySettlingForce`で位置・速度とも
+     0へ収束する制御が既にあったが、前後方向には同様の仕組みが
+     なかった。
+  2. `_runFinalApproachAdjustPhase`（final_approach、distance
+     300→250）は減速の基準を`target.position`（distance=0）に
+     していたため、distance=250に到達する時点でもまだ「制動距離の
+     余裕」が残っており、速度が十分に落ちきらないままbrake250へ
+     突入していた（adjustフェーズがdistance=300を基準にしていな
+     かった旧不具合と同種の原因）。
+- **対応**: `03-thruster-solver.js`を修正。
+  - `_runBrakePhase`に`targetDistance`引数を追加し、前後方向にも
+    横方向と同じ`_applySettlingForce`を使った位置・速度収束制御を
+    追加。目標点は「進入軸上、艦の現在の横ズレを保ったまま、
+    distance=targetDistanceになる点」とし、前後方向だけを動かす。
+    呼び出し側（`brake300`は`params.ZONE_BRAKE300`、`brake250`は
+    `params.ZONE_BRAKE250`）でそれぞれ渡す。完了判定
+    （`onSettled`呼び出し条件）にも前後方向の位置誤差
+    （`DOCKING_POSITION_MIN_DISTANCE`以内）を追加。
+  - `_runFinalApproachAdjustPhase`に`distance`引数を追加し、
+    `_applyApproachForce`の`stoppingDistanceForCapOverride`に
+    `distance - params.ZONE_BRAKE250`（残り距離）を渡すよう変更。
+    adjustフェーズの`stopAtDistance`と同じ考え方で、distance=250へ
+    到達する時点でほぼ速度0になるよう事前減速する。
+- 簡易シミュレーションで、distance=280（意図的に20行き過ぎた状態）
+  からスタートしても、最終的にdistance≈300・速度≈0.09まで収束する
+  ことを確認済み。
+
+---
+
 ## v50より前
 
 このファイルが存在する前の変更履歴は、各JSファイルの冒頭・該当箇所の
