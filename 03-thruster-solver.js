@@ -1364,7 +1364,28 @@ const ThrusterSolver = {
     // それぞれの軸が誤差0.1度以下で、かつ角速度が0.01未満になったら
     // 固定してあげる」）。tunnel内は既に姿勢固定・直進のみなので、
     // 満たすのは基本的に前進速度がARRIVAL_SPEEDを下回った瞬間になる。
-    if (phase === 'tunnel' && this._meetsArrivalCriteria(ship, target, params)) {
+    //
+    // v50: 設計書の「入港: distance <= ZONE_FINAL_APPROACHかつ入港
+    // 判定達成」に合わせ、distance条件をここに追加する。従来は
+    // _meetsArrivalCriteria（速度・姿勢誤差・角速度のみ、distanceは
+    // 見ない）だけで判定していたため、brake250からtunnelへ切り替わった
+    // 直後（distanceがまだ200〜250のどこか）に、brake250側で既に
+    // 速度・姿勢を収束させきっていると、tunnel本来の前進スラスト
+    // （distance=ZONE_FINAL_APPROACH地点でFINAL_APPROACH_ENTRY_SPEEDへ
+    // 加速し直す設計）が一度も働く前の同一フレームで即座に固定されて
+    // しまい、「最終進入(トンネル)の条件を飛ばして距離200〜250の
+    // どこかで入港・固定される」不具合になっていた。distance <=
+    // ZONE_FINAL_APPROACHを追加することで、実際にトンネルを通過して
+    // distanceが200以下になるまでは固定されず、_runTunnelPhaseの
+    // 前進プロファイルが必ず一度は働くようになる。_meetsArrivalCriteria
+    // 自体にdistanceを含めない理由は同関数のコメント参照（brake250→
+    // tunnel遷移判定とも共用しており、あちらにdistance条件を混ぜると
+    // 別の不具合が再発する）。
+    if (
+      phase === 'tunnel' &&
+      distance <= params.ZONE_FINAL_APPROACH &&
+      this._meetsArrivalCriteria(ship, target, params)
+    ) {
       this._lockShipAtTarget(ship, target);
       return { desiredForce: { x: 0, y: 0, z: 0 }, desiredTorque: { x: 0, y: 0, z: 0 } };
     }
@@ -1380,7 +1401,11 @@ const ThrusterSolver = {
         this._runApproachPhase(ship, target, approachAxisWorld, distance, lateral, params, desiredForce, desiredTorque, dt, params.APPROACH_MAX_BRAKING_DISTANCE);
         break;
       case 'adjust':
-        this._runApproachPhase(ship, target, approachAxisWorld, distance, lateral, params, desiredForce, desiredTorque, dt, params.ADJUST_MAX_BRAKING_DISTANCE);
+        // v50: distance=ZONE_BRAKE300でほぼ停止させておく
+        // （brake300が「そこからブレーキ開始」ではなく「軸合わせの
+        // 微調整だけ」で済むようにする設計要件。_runApproachPhase側の
+        // stopAtDistanceコメント参照）。
+        this._runApproachPhase(ship, target, approachAxisWorld, distance, lateral, params, desiredForce, desiredTorque, dt, params.ADJUST_MAX_BRAKING_DISTANCE, params.ZONE_BRAKE300);
         break;
       case 'brake300':
         this._runBrakePhase(ship, target, approachAxisWorld, params, desiredForce, desiredTorque, dt, 'brake300', () => {
@@ -1483,8 +1508,21 @@ const ThrusterSolver = {
   // 「もう通り過ぎた地点まで戻れ」という逆走の指示になってしまう
   // ため、過去に実際に不具合として発生した）ので、通常の仕想WPを
   // 目指す。
+  //
+  // v50: stopAtDistance（省略可）。approachフェーズはtarget.position
+  // （distance=0）へ向けて自然に減速する挙動でよいが、adjustフェーズ
+  // には「distance=300（ZONE_BRAKE300）到達時にほぼ停止させておき、
+  // brake300では最後の微調整だけで済ませる」という設計要件がある。
+  // 従来は両フェーズともdistanceそのもの（＝distance=0基準）を
+  // 減速の基準にしていたため、adjust中はdistance=300を跨ぐ時点でも
+  // まだ「そこまでの制動距離」に余裕があり速度が落ちきらず、結果
+  // 「距離300から止まろうとする」（＝300地点でようやく本格的な
+  // 停止動作を始める）体感になっていた。stopAtDistanceを指定すると
+  // 減速の基準を「そこまでの残り距離(distance-stopAtDistance)」に
+  // 置き換え、ちょうどdistance=stopAtDistanceで速度が0へ収束する
+  // ようにする。
   // -----------------------------------------------------------
-  _runApproachPhase(ship, target, approachAxisWorld, distance, lateral, params, desiredForce, desiredTorque, dt, maxBrakingDistance) {
+  _runApproachPhase(ship, target, approachAxisWorld, distance, lateral, params, desiredForce, desiredTorque, dt, maxBrakingDistance, stopAtDistance) {
     const virtualWP = this._computeVirtualWaypoint(target, approachAxisWorld, distance, params);
 
     const avoidanceWP = this._computeAvoidanceWaypoint(ship, target, approachAxisWorld, params);
@@ -1519,7 +1557,14 @@ const ThrusterSolver = {
     // 減速の基準はtarget.positionへの実距離(distance)を使う
     // （操舵方向は仕想WP/迂回点だが、停止の基準は実際の目的地への
     // 距離であるべき。_applyApproachForceのコメント参照）。
-    this._applyApproachForce(ship, steerTarget, maxBrakingDistance, desiredForce, distance);
+    // v50: stopAtDistance指定時は、target.positionではなくそこまでの
+    // 残り距離を基準にする（adjustフェーズをdistance=ZONE_BRAKE300で
+    // ほぼ停止させるため。距離が既にstopAtDistanceを下回っていても
+    // 0未満にはしない — _speedForBrakingDistance側でも安全側にクランプ
+    // されるが、ここでも明示しておく）。
+    const stoppingBasisDistance =
+      stopAtDistance !== undefined ? Math.max(0, distance - stopAtDistance) : distance;
+    this._applyApproachForce(ship, steerTarget, maxBrakingDistance, desiredForce, stoppingBasisDistance);
   },
 
   // フルトルクになる角度閾値を、ZONE_APPROACH_START→ZONE_BRAKE300の
