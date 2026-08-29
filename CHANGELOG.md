@@ -70,6 +70,48 @@ v50以降、変更のたびにここへ追記していく想定です（それ�
 
 ---
 
+## v50-fix2 - 2026-08-29
+
+### 修正: `return_to_axis`から永久に抜けられない不具合（v50-fixの符号再反転バグ）
+
+- **症状**: 進入軸の奥側から回り込む`return_to_axis`フェーズに入ると、
+  艦は迂回中間地点（`target.position`から手前側へ750の固定点）へ
+  物理的にはほぼ正確に到達しているにもかかわらず、いつまで経っても
+  `return_to_axis`から抜けられず「進入軸へ回り込み中」のまま張り
+  付き続ける（HUD表示上は`alongDist`が-750付近で反復しているように
+  見えた）。
+- **原因**: 直前のv50-fixが、上のセクション（55〜65行目）の説明とは
+  逆に、実際には**正しかった符号を再び反転させてしまっていた**。
+  `rawAlong = vecDot(toTargetWorld, approachAxisWorld)`
+  （`toTargetWorld = target.position - ship.position`）は、艦が
+  手前側にいるとき既にプラスになる（v50-fixのコメントの前提が誤り
+  だった）。それを`alongDist = -rawAlong`としてしまったことで、
+  手前側にいるほど`alongDist`がマイナスに振れる形になっていた。
+  `return_to_axis`の離脱条件は`alongDist >= 750`（迂回中間点に
+  十分近づいたら抜ける）だが、この符号バグにより艦がどれだけ目標点
+  に近づいても`alongDist`は-750付近にしか届かず、条件を満たすことが
+  なかった。実測ログ（ドッキングログDL機能で採取）でも、艦の
+  `returnTargetDist`（目標点までの実距離）は約8まで縮まっていたのに
+  `alongDist`は-749のまま推移していたことを確認した。`_runApproachPhase`
+  内の`shipAlong`（v50-fixで符号修正を試みた箇所）も同様に、実際には
+  逆方向へ直してしまっていた。
+- **対応**: `03-thruster-solver.js`内の3箇所を修正。
+  - `_buildDesiredForAutoDocking`: `alongDist = -rawAlong` →
+    `alongDist = rawAlong`（符号反転を削除）
+  - `_runApproachPhase`: `shipAlong = vecDot(toShip, approachAxisWorld)` →
+    `shipAlong = -vecDot(toShip, approachAxisWorld)`（`toShip`は
+    `toTargetWorld`と逆ベクトルのため、`alongDist`と同じ規約に揃える
+    には反転が必要）
+  - `_runBrakePhase`: 未使用の`alongDist`変数だが規約統一のため同様に
+    修正
+- **調査用に追加した機能**: `03-thruster-solver.js`に
+  `ThrusterSolver._dockingLog`（直近フレームのフェーズ・distance・
+  alongDist等を貯めるリングバッファ）と`06-hud.js`に「ログDL」
+  ボタン（画面右上、CSVダウンロード）を追加。今後同種の不具合が
+  出た場合の調査に使えるよう恒久的に残す。
+
+---
+
 ## v50より前
 
 このファイルが存在する前の変更履歴は、各JSファイルの冒頭・該当箇所の

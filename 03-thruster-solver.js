@@ -1375,14 +1375,20 @@ const ThrusterSolver = {
     };
     const distance = vecLength(toTargetWorld);
     const approachAxisWorld = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion));
-    // v50-fix: vecDot(toTargetWorld, approachAxisWorld)をそのままalongDistに
-    // すると、手前側（正常な進入側）にいる艦でマイナスになり、設計書の
-    // 「プラス＝手前側」と符号が逆転してしまう（_resolveDockingPhaseが
-    // 正常な巡航中の艦をreturn_to_axisへ誤って送ってしまう不具合の原因）。
-    // rawAlong（lateralVec分解に使う生の投影値）とalongDist（ゾーン判定に
-    // 使う、設計書の符号規約に合わせた値）を分離する。
+    // v50-fix2: 上のv50-fixコメントの前提（rawAlongが手前側でマイナスに
+    // なる）は誤りだった。実際に検証すると、艦が手前側（approachAxisWorld
+    // の逆方向）にいるとき toTargetWorld は +approachAxisWorld 方向を
+    // 向くため、rawAlong = dot(toTargetWorld, approachAxisWorld) は
+    // 手前側でプラスになる。v50-fixで追加した `-rawAlong` はこれを
+    // 再び反転させてしまい、結果として「手前側にいるほどalongDistが
+    // マイナスに振れる」形になっていた。これがreturn_to_axisの離脱
+    // 条件(alongDist >= 750)を艦がどれだけ目標点に近づいても満たせず、
+    // 「進入軸へ回り込み中のまま点700(実際は-750)に張り付き続ける」
+    // 不具合の原因だった（ログ実測で確認済み: 艦は目標点に物理的には
+    // 到達していたが、alongDistは-749のまま推移していた）。
+    // rawAlongをそのままalongDistとして使うのが正しい。
     const rawAlong = vecDot(toTargetWorld, approachAxisWorld);
-    const alongDist = -rawAlong; // 正=手前側, 負=奥側
+    const alongDist = rawAlong; // 正=手前側, 負=奥側
     const lateralVec = {
       x: toTargetWorld.x - approachAxisWorld.x * rawAlong,
       y: toTargetWorld.y - approachAxisWorld.y * rawAlong,
@@ -1612,10 +1618,18 @@ const ThrusterSolver = {
       y: ship.position.y - target.position.y,
       z: ship.position.z - target.position.z,
     };
-    // v50-fix: 従来は先頭に"-"が付いていたため、実際には奥側で正・
-    // 手前側で負になってしまっていた（上のalongDistと同じ符号バグ）。
-    // 単純にvecDot(toShip, approachAxisWorld)が正しく「正なら手前側」になる。
-    const shipAlong = vecDot(toShip, approachAxisWorld); // 艦の「手前距離」(正なら手前側)
+    // v50-fix2: v50-fixのshipAlong修正は方向としては正しかったが、
+    // 上のalongDist側の修正(-rawAlongへの反転)と符号規約がズレて
+    // いた。shipAlongはこのままで正しい（艦が手前側にいるとtoShipは
+    // -approachAxisWorld方向を向くため、内積は負になる想定だったが、
+    // 実際にはtoShip = ship.position - target.positionで、艦が手前
+    // 側にいれば ship.position は target.position + approachAxisWorld*
+    // 手前距離 の逆側、すなわちtoShipはapproachAxisWorldの逆方向。
+    // よってvecDot(toShip, approachAxisWorld)は手前側で負になるため、
+    // 「正なら手前側」というコメントは誤りで、実際は符号を反転する
+    // 必要がある）。alongDist側と統一し、-1を掛けて「正=手前側」に
+    // 揃える。
+    const shipAlong = -vecDot(toShip, approachAxisWorld); // 艦の「手前距離」(正なら手前側)
     const avoidanceAlong = params.VIRTUAL_WAYPOINT_OFFSET + params.AVOIDANCE_RADIUS; // 中間地点の「手前距離」(固定)
     const shipStillBehindAvoidance = shipAlong > avoidanceAlong + 1e-3;
 
@@ -1756,11 +1770,11 @@ const ThrusterSolver = {
       y: target.position.y - ship.position.y,
       z: target.position.z - ship.position.z,
     };
-    // v50-fix: 上のバグ修正と同じ理由でrawAlongとalongDistを分離
+    // v50-fix2: 上のalongDist修正と同じ理由でrawAlongをそのまま使う
     // （このalongDistは本関数内では未使用だが、他箇所との規約統一のため
     // 同じ形にしておく）。
     const rawAlong = vecDot(toTargetWorld, approachAxisWorld);
-    const alongDist = -rawAlong;
+    const alongDist = rawAlong;
     const lateralVec = {
       x: toTargetWorld.x - approachAxisWorld.x * rawAlong,
       y: toTargetWorld.y - approachAxisWorld.y * rawAlong,
