@@ -1789,9 +1789,20 @@ const ThrusterSolver = {
   // target.positionから手前側にVIRTUAL_WAYPOINT_OFFSET+
   // AVOIDANCE_RADIUS離れた、横方向オフセットを持たない点）。
   // これを目指すことで、艦はNO_ENTRY_RADIUS圏内を横切らずに軸の
-  // 手前側へ戻る。速度上限はcruiseと同様に設けない（最短時間で
-  // 回り込みたいため）。
+  // 手前側へ戻る。
+  //
+  // v48: 従来は速度上限なし(null)で中間地点(target.positionから
+  // 750も離れた点)へ全力加速していた。これはapproach中に軸を
+  // 横切るように進入軸をオーバーシュートしてreturn_to_axisへ
+  // 切り替わった際、艦がまだ高速でtarget.position付近にいるのに
+  // 「750先の点へ向けフル加速」してしまい、軸から大きく離れながら
+  // 目的地の奥側の点を目指して突っ走る不具合の原因になっていた。
+  // このフェーズに入った時点の艦の速度自体をまず制動距離ベースで
+  // 抑える（RETURN_TO_AXIS_MAX_BRAKING_DISTANCE）ことで、
+  // 「まず今の勢いを殺してから回り込む」挙動にする。
   // -----------------------------------------------------------
+  RETURN_TO_AXIS_MAX_BRAKING_DISTANCE: 150,
+
   _runReturnToAxisPhase(ship, target, approachAxisWorld, distance, lateral, params, desiredForce, desiredTorque, dt) {
     const returnTarget = this._computeAvoidanceWaypoint(ship, target, approachAxisWorld, params);
 
@@ -1807,8 +1818,11 @@ const ThrusterSolver = {
     this._applyRollTorque(ship, target, desiredTorque);
     this._applyAngularDamping(ship, desiredTorque, dt, params.ARRIVAL_ANGULAR_SPEED);
 
-    // 速度上限なし(null)。cruiseと同じく最短時間で回り込みを完了
-    // させたいため、制動距離ベースの上限のみで加減速する。
-    this._applyApproachForce(ship, returnTarget, null, desiredForce);
+    // 制動距離ベースの速度上限を設け、「まず勢いを殺してから
+    // 回り込む」挙動にする。速度上限なしだと、target.position付近を
+    // 高速で横切った直後にこのフェーズへ入った場合、そのままの
+    // 速度で750先の中間地点へ全力加速してしまい大きく軸から
+    // 離れてしまう。
+    this._applyApproachForce(ship, returnTarget, this.RETURN_TO_AXIS_MAX_BRAKING_DISTANCE, desiredForce);
   },
 };
