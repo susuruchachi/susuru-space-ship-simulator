@@ -22,17 +22,18 @@ const FlightPhysics = {
   //   dt: デルタタイム(秒)
   // -----------------------------------------------------------
   step(ship, input, dt) {
-    // v46: 自動操船の入港判定・固定はThrusterSolver側のステート
-    // マシン（ship._dockingPhase、_meetsArrivalCriteria/
-    // _lockShipAtTarget）に一本化した。'docked'フェーズになった
-    // 時点で位置・姿勢・速度は既に目的地へ固定済みのため、ここでは
-    // 通常のソルバー/積分処理そのものを丸ごとスキップするだけで
-    // よい（以後の手動入力・自動制御力は無視される。自動操船を
-    // OFFにすれば通常の物理へ復帰する）。
-    if (ship.autoDockingEnabled && State.dockingTarget && ship._dockingPhase === 'docked') {
-      return;
-    }
-
+    // v47: 以前は'docked'フェーズの間、ここでstep()全体を丸ごと
+    // スキップしていた。しかしそれだと、離脱を検知して_dockingPhase
+    // を再評価する唯一の経路（buildDesiredFromInput ->
+    // _buildDesiredForAutoDocking -> _resolveDockingPhase）自体が
+    // 呼ばれなくなり、一度dockedになると手動操縦で船が動いても
+    // _dockingPhaseが永久に'docked'のまま固まってしまう不具合
+    // （自動操縦が二度と再開しない）があった。
+    // 'docked'中の位置・速度維持は_resolveDockingPhase側
+    // （distance < DOCKED_STATE_DISTANCE_EPSILONの間はdockedを
+    // 維持する）とdockedケースのswitch分岐（フォース・トルク0）で
+    // 既に賄われているため、ここでのショートカットは不要かつ有害。
+    // 常に通常のソルバー/積分処理を通す。
     const { desiredForce, desiredTorque } = ThrusterSolver.buildDesiredFromInput(input, ship, dt);
 
     // 最高速到達中は「最高速方向への加速」だけを遮断する。
