@@ -46,6 +46,24 @@ v50以降、変更のたびにここへ追記していく想定です（それ�
     不具合が再発するため。v47〜v49の経緯としてコード内コメントに
     詳細あり）。
 
+### 修正: `alongDist`の符号バグ（手前側/奥側が反転していた）
+- 症状: 正常に手前側から接近しているだけの艦が、巡航中いきなり
+  `return_to_axis`（奥側からの回り込み専用フェーズ）に送られ、
+  target.positionを挟んで反対（奥）側の地点へ誘導されてしまう
+  ＝実質的に逆走に見える挙動になっていた。
+- 原因: `_buildDesiredForAutoDocking`・`_runBrakePhase`内の
+  `alongDist = vecDot(toTargetWorld, approachAxisWorld)`
+  （`toTargetWorld = target.position - ship.position`）が、
+  設計書の「プラス＝手前側、マイナス＝奥側」と符号が逆になって
+  いた（手前側の艦でマイナスになる）。`_runApproachPhase`内の
+  `shipAlong`も同じ式の変形で同じ向きに符号が反転していた
+  （不要な先頭の`-`が原因）。
+- 対応: `toTargetWorld`への生の投影値（lateralVec分解に必要）と、
+  ゾーン判定に使う符号付き`alongDist`（設計書の符号規約に合わせて
+  反転）を分離。`shipAlong`は先頭の`-`を削除して修正。
+  `_resolveDockingPhase`側のロジック・比較（`alongDist<0`＝奥側等）
+  はコード内コメントの意図通りだったため変更なし。
+
 ### バージョン表記
 - `GAME_VERSION`（`01-state-and-config.js`）および `index.html` の
   `<title>` を v49 → v50 に更新。

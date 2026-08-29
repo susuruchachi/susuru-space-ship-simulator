@@ -1348,11 +1348,18 @@ const ThrusterSolver = {
     };
     const distance = vecLength(toTargetWorld);
     const approachAxisWorld = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion));
-    const alongDist = vecDot(toTargetWorld, approachAxisWorld);
+    // v50-fix: vecDot(toTargetWorld, approachAxisWorld)をそのままalongDistに
+    // すると、手前側（正常な進入側）にいる艦でマイナスになり、設計書の
+    // 「プラス＝手前側」と符号が逆転してしまう（_resolveDockingPhaseが
+    // 正常な巡航中の艦をreturn_to_axisへ誤って送ってしまう不具合の原因）。
+    // rawAlong（lateralVec分解に使う生の投影値）とalongDist（ゾーン判定に
+    // 使う、設計書の符号規約に合わせた値）を分離する。
+    const rawAlong = vecDot(toTargetWorld, approachAxisWorld);
+    const alongDist = -rawAlong; // 正=手前側, 負=奥側
     const lateralVec = {
-      x: toTargetWorld.x - approachAxisWorld.x * alongDist,
-      y: toTargetWorld.y - approachAxisWorld.y * alongDist,
-      z: toTargetWorld.z - approachAxisWorld.z * alongDist,
+      x: toTargetWorld.x - approachAxisWorld.x * rawAlong,
+      y: toTargetWorld.y - approachAxisWorld.y * rawAlong,
+      z: toTargetWorld.z - approachAxisWorld.z * rawAlong,
     };
     const lateral = vecLength(lateralVec);
 
@@ -1534,7 +1541,10 @@ const ThrusterSolver = {
       y: ship.position.y - target.position.y,
       z: ship.position.z - target.position.z,
     };
-    const shipAlong = -vecDot(toShip, approachAxisWorld); // 艦の「手前距離」(正なら手前側)
+    // v50-fix: 従来は先頭に"-"が付いていたため、実際には奥側で正・
+    // 手前側で負になってしまっていた（上のalongDistと同じ符号バグ）。
+    // 単純にvecDot(toShip, approachAxisWorld)が正しく「正なら手前側」になる。
+    const shipAlong = vecDot(toShip, approachAxisWorld); // 艦の「手前距離」(正なら手前側)
     const avoidanceAlong = params.VIRTUAL_WAYPOINT_OFFSET + params.AVOIDANCE_RADIUS; // 中間地点の「手前距離」(固定)
     const shipStillBehindAvoidance = shipAlong > avoidanceAlong + 1e-3;
 
@@ -1675,11 +1685,15 @@ const ThrusterSolver = {
       y: target.position.y - ship.position.y,
       z: target.position.z - ship.position.z,
     };
-    const alongDist = vecDot(toTargetWorld, approachAxisWorld);
+    // v50-fix: 上のバグ修正と同じ理由でrawAlongとalongDistを分離
+    // （このalongDistは本関数内では未使用だが、他箇所との規約統一のため
+    // 同じ形にしておく）。
+    const rawAlong = vecDot(toTargetWorld, approachAxisWorld);
+    const alongDist = -rawAlong;
     const lateralVec = {
-      x: toTargetWorld.x - approachAxisWorld.x * alongDist,
-      y: toTargetWorld.y - approachAxisWorld.y * alongDist,
-      z: toTargetWorld.z - approachAxisWorld.z * alongDist,
+      x: toTargetWorld.x - approachAxisWorld.x * rawAlong,
+      y: toTargetWorld.y - approachAxisWorld.y * rawAlong,
+      z: toTargetWorld.z - approachAxisWorld.z * rawAlong,
     };
     const lateralDist = vecLength(lateralVec);
 
