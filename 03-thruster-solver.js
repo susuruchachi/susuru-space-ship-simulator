@@ -1100,24 +1100,22 @@ const ThrusterSolver = {
   },
 
   // -----------------------------------------------------------
-  // 入港判定基準（distance/lateral/姿勢誤差/角速度）を満たすか判定。
-  // trueなら艦をtarget.position/quaternionへ完全固定してよい。
+  // 入港判定基準（速度/姿勢誤差/角速度）を満たすか判定。
+  // 設計書「入港判定基準（共通）」：位置が軸上・姿勢誤差各軸0.1°
+  // 以内・角速度0.01未満。位置(軸上)は呼び出し側でlateralを別途
+  // チェックする（brake250→tunnel遷移、tunnel内固定判定の両方で
+  // 「_meetsArrivalCriteria && lateral <= 許容値」の形で使う）。
   //
-  // v47: 従来は距離を一切見ておらず、トンネル入口（距離200）付近で
-  // 速度・姿勢・角速度がたまたま条件を満たしただけで固定されてしまい
-  // 「距離200から目的地へワープする」不具合の一因になっていた。
-  // トンネル内をちゃんと進んでから固定されるよう、distanceが
-  // FINAL_APPROACH_BRAKING_DISTANCE以下であることも必須にする。
+  // v47でここにdistance条件（FINAL_APPROACH_BRAKING_DISTANCE以下）
+  // を追加していたが、この関数はbrake250→tunnel遷移判定でも共用
+  // されており、brake250にいる艦のdistanceは常に200〜250なので
+  // 条件が常にfalseになり「姿勢・位置が整っているのにtunnelへ
+  // 進まない」不具合を生んでいた。設計書の入港判定基準はdistanceを
+  // 含まないため撤去する。tunnel入口でのワープ対策（v47の本来の
+  // 目的）はFINAL_APPROACH_ENTRY_SPEEDをARRIVAL_SPEEDより十分
+  // 高くする対応のみで十分であり、そちらは維持する。
   // -----------------------------------------------------------
   _meetsArrivalCriteria(ship, target, params) {
-    const toTargetWorld = {
-      x: target.position.x - ship.position.x,
-      y: target.position.y - ship.position.y,
-      z: target.position.z - ship.position.z,
-    };
-    const distance = vecLength(toTargetWorld);
-    if (distance > params.FINAL_APPROACH_BRAKING_DISTANCE) return false;
-
     const speed = vecLength(ship.velocity);
     if (speed >= params.ARRIVAL_SPEED) return false;
 
@@ -1539,10 +1537,10 @@ const ThrusterSolver = {
   },
 
   // -----------------------------------------------------------
-  // 位置合わせ専用の並進制御。目標位置(targetPosWorld)への距離に
-  // 比例した目標速度（近いほど遅く、DOCKING_POSITION_MIN_DISTANCE
-  // 以下では0）を立て、実際の速度をその目標速度に一致させる
-  // 速度フィードバック制御。
+  // 位置合わせ専用の並進力を desiredForce に加算する。目標位置
+  // (targetPosWorld)への距離に比例した目標速度（近いほど遅く、
+  // DOCKING_POSITION_MIN_DISTANCE以下では0）を立て、実際の速度を
+  // その目標速度に一致させる速度フィードバック制御。
   //
   // _applyApproachForceとの違い: _applyApproachForceは「制動距離
   // ベースの速度上限」を守りつつ自由に加速することを許す（cruise/
@@ -1552,9 +1550,20 @@ const ThrusterSolver = {
   // 速度を必ず下回らせるため、位置誤差が小さければ速度も必ず
   // 小さくなることが保証される（brake300/brake250のような、
   // その場でピタリと止めたいフェーズ向け）。
+  //
+  // v49: strengthの計算にFORWARD_VELOCITY_FULL_THROTTLE_ERROR(40.0)
+  // を流用していたが、これはcruise/approachのような数十単位の
+  // 速度域向けの分母であり、brake300/brake250のような「距離0.数～
+  // 数十、目標速度も0.数～数」という微速域の収束制御でこれを使うと
+  // 常にstrengthが極端に低く（例: 誤差0.5でもstrength=0.0125）
+  // なり、横方向のRCS推力がただでさえ主機より弱いこととも相まって
+  // 「いつまで経っても軸に乗り切らない」不具合の原因になっていた。
+  // 専用の小さい分母(DOCKING_SETTLE_FULL_THRUST_ERROR)を使い、
+  // 微速域でも十分な推力が出るようにする。
   // -----------------------------------------------------------
   DOCKING_SETTLE_APPROACH_GAIN: 0.5, // 距離に対する目標速度の比例ゲイン(1/s)
   DOCKING_SETTLE_MAX_SPEED: 15.0,    // 目標速度の上限（遠距離でも暴走しないため）
+  DOCKING_SETTLE_FULL_THRUST_ERROR: 1.0, // 速度誤差がこれ以上でフル推力（微速域用の分母）
 
   _applySettlingForce(ship, targetPosWorld, desiredForce) {
     const toTargetWorld = {
@@ -1579,7 +1588,7 @@ const ThrusterSolver = {
     const errMag = vecLength(errLocal);
     if (errMag < 1e-4) return;
     const dir = vecScale(errLocal, 1 / errMag);
-    const strength = Math.min(1, errMag / this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR);
+    const strength = Math.min(1, errMag / this.DOCKING_SETTLE_FULL_THRUST_ERROR);
     desiredForce.x += dir.x * strength;
     desiredForce.y += dir.y * strength;
     desiredForce.z += dir.z * strength;
