@@ -332,6 +332,44 @@ v50以降、変更のたびにここへ追記していく想定です（それ�
 
 ---
 
+## v52 - 2026-08-30
+
+### 修正: tunnel（最終進入）フェーズが目的地と逆方向へ加速し続ける符号バグ
+
+- **症状**: `brake250→tunnel`への遷移後、艦が目的地へ向かわず逆方向
+  （進入軸の手前側）へ徐々に加速していき、最終的にdistance/alongDist
+  が250を大きく超えて（実測ログで255.5まで）final_approachへ押し
+  戻される。傍目には「最終進入で逆向きに進もうとしている」ように
+  見える。v51で追加したTUNNEL_REENTRY_TOLERANCE（許容マージン1.0）
+  では吸収しきれないほど大きく・持続的に逆走するため、v51時点でも
+  症状が再現していた。
+- **原因**: `_runTunnelPhase`内の目標速度ベクトル計算
+  `targetVelWorld = vecScale(approachAxisWorld, -targetSpeed)`の符号が
+  逆だった。`approachAxisWorld`は`_buildDesiredForAutoDocking`の
+  `alongDist`計算（艦が手前側にいるとき`dot(toTargetWorld,
+  approachAxisWorld)`が正になる）、および`_runOvershootPhase`の
+  「奥方向は`-approachAxisWorld`方向」というコメントの両方から、
+  「艦（手前側）から目的地へ向かう方向」を指すことが確認できる。
+  したがって目的地へ向かう目標速度は
+  `approachAxisWorld * (+targetSpeed)`であるべきところ、`-targetSpeed`
+  を掛けていたため、tunnelフェーズは常に目的地とは逆方向（進入軸の
+  手前側）へ艦を加速させ続けていた。
+  アップロードされた操縦ログ（docking-log-2026-08-30T06-26-24-181Z.csv）
+  で、tunnel突入直後からvelZ・alongDistが単調に増加し続け、艦の実際の
+  変位ベクトルが目的地方向（toTargetWorld）とちょうど正反対になって
+  いることを直接確認して特定した。
+- **対応**: `03-thruster-solver.js`の`_runTunnelPhase`で
+  `targetVelWorld`の符号を`-targetSpeed`から`+targetSpeed`に修正。
+- 教訓: 進入軸方向のベクトル（`approachAxisWorld`）を新しい箇所で
+  使うときは、その符号規約（どちらが「目的地へ向かう方向」か）を
+  必ず既存コード（`_buildDesiredForAutoDocking`や
+  `_runOvershootPhase`など、規約が確立している箇所）と突き合わせて
+  確認すること。コード内コメントの言葉（「マイナス方向＝目的地へ
+  向かう方向」）を鵜呑みにせず、実測ログの位置・速度データで実際の
+  移動方向を検証したことで発見できた。
+
+---
+
 ## v50より前
 
 このファイルが存在する前の変更履歴は、各JSファイルの冒頭・該当箇所の

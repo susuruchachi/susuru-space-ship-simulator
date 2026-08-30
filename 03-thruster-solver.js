@@ -1992,7 +1992,20 @@ const ThrusterSolver = {
     const physicalSafeSpeed = this._speedForBrakingDistance(maxDecel, distance);
     const targetSpeed = Math.max(0, Math.min(profileSpeed, physicalSafeSpeed));
 
-    const targetVelWorld = vecScale(approachAxisWorld, -targetSpeed); // 進入軸のマイナス方向＝目的地へ向かう方向
+    // v51-fix1: 符号バグを修正。approachAxisWorldは
+    // 「艦(手前側)からtarget.positionへ向かう方向」（
+    // _buildDesiredForAutoDockingのalongDist計算、および
+    // _runOvershootPhaseの「奥方向(-approachAxisWorld方向)」という
+    // コメントの双方から裏付けられる符号規約）。よって目的地へ
+    // 向かう速度は approachAxisWorld * (+targetSpeed) であるべきところ、
+    // 従来はここに -targetSpeed を掛けており、tunnel突入直後から
+    // 一貫して目的地とは逆方向（進入軸の手前側）へ加速し続ける
+    // バグになっていた。アップロードされた操縦ログ
+    // (docking-log-2026-08-30T06-26-24-181Z.csv) で、tunnel突入後
+    // velZ/alongDistが単調に増加し続け（艦の実際の変位ベクトルが
+    // toTargetWorldと正反対）、最終的にdistanceが250→251超まで
+    // 押し戻されてfinal_approachへ逆戻りする様子を確認して特定した。
+    const targetVelWorld = vecScale(approachAxisWorld, targetSpeed); // 進入軸のプラス方向＝目的地へ向かう方向
     // 実際に使うのは目標「速度」ではなく目標「速度との差」を前後
     // 方向だけに使う（横方向はそもそも力を出さない）ので、専用に
     // Z成分だけ処理する。
