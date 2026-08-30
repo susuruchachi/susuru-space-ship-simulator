@@ -15,6 +15,13 @@
 //      から2000先まで1本の線として描画する（点は打たない）。
 //      艦が動くたびに毎フレーム再構築する（ベジエは艦の現在位置・
 //      向きに依存するため、静的にキャッシュできない）。
+//      v61: 艦に接舷面(dockingFace)が設定されている場合、実際の
+//      自動操船（03-thruster-solver.js _buildDesiredForAutoDocking）
+//      は「艦の重心用の実効目標」を目指すため、この経路線も
+//      State.dockingTargetをそのまま使うのではなく
+//      computeEffectiveShipDockingTarget()を通した実効目標を使う
+//      （進入軸・目的地ゲート＝1)は港の座標そのものを示す表示のため
+//      対象外、State.dockingTargetのままでよい）。
 //   3) v42: 自動航行の航跡: ship.autoDockingEnabledがtrueの間、
 //      実際に艦が通った位置を一定間隔で記録し、暗いオレンジの線
 //      として描画する（予定航路の明るいオレンジと見分けやすい
@@ -73,7 +80,7 @@ const ApproachVisualizer = {
       this._clearRoute();
       this._clearTrailLine();
     } else {
-      this._updateRoute(target);
+      this._updateRoute(computeEffectiveShipDockingTarget(target, State.ship));
       this._updateTrailLine();
     }
   },

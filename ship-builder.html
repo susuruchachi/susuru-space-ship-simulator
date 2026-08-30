@@ -295,6 +295,35 @@
     text-decoration: underline;
   }
 
+  .docking-face-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .docking-face-btn {
+    padding: 9px 4px;
+    font-size: 11px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.16);
+    background: rgba(255,255,255,0.05);
+    color: #dfefff;
+  }
+  .docking-face-btn.selected {
+    background: rgba(108,195,255,0.18);
+    border-color: #6cc3ff;
+    color: #6cc3ff;
+  }
+  .docking-face-detail {
+    margin-bottom: 10px;
+  }
+  .docking-face-hint {
+    margin: 0;
+    font-size: 11px;
+    color: rgba(159,179,200,0.75);
+    line-height: 1.5;
+  }
+
   .footer-bar {
     flex: 0 0 auto;
     padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
@@ -447,6 +476,43 @@
 
     <div class="adjust-section">
       <button class="reset-link" id="resetAdjustBtn" type="button">回転・スケール・位置をリセット</button>
+    </div>
+
+    <div class="adjust-section" id="dockingFaceSection">
+      <h2>接舷面（ドッキングポートに合わせる面）</h2>
+      <div class="docking-face-grid">
+        <button type="button" class="docking-face-btn" data-face-axis="px">+X</button>
+        <button type="button" class="docking-face-btn" data-face-axis="nx">-X</button>
+        <button type="button" class="docking-face-btn" data-face-axis="py">+Y</button>
+        <button type="button" class="docking-face-btn" data-face-axis="ny">-Y</button>
+        <button type="button" class="docking-face-btn" data-face-axis="pz">+Z（艦尾側）</button>
+        <button type="button" class="docking-face-btn" data-face-axis="nz">-Z（艦首側）</button>
+      </div>
+
+      <div id="dockingFaceDetail" class="docking-face-detail" style="display:none;">
+        <div class="axis-row">
+          <div class="axis-label">U</div>
+          <input type="range" id="faceOffU" min="-20" max="20" step="0.1" value="0">
+          <div class="axis-value" id="faceOffUVal">0.0</div>
+        </div>
+        <div class="axis-row">
+          <div class="axis-label">V</div>
+          <input type="range" id="faceOffV" min="-20" max="20" step="0.1" value="0">
+          <div class="axis-value" id="faceOffVVal">0.0</div>
+        </div>
+        <div class="axis-row">
+          <div class="axis-label">傾U</div>
+          <input type="range" id="faceTiltU" min="-60" max="60" step="1" value="0">
+          <div class="axis-value" id="faceTiltUVal">0°</div>
+        </div>
+        <div class="axis-row">
+          <div class="axis-label">傾V</div>
+          <input type="range" id="faceTiltV" min="-60" max="60" step="1" value="0">
+          <div class="axis-value" id="faceTiltVVal">0°</div>
+        </div>
+        <button class="reset-link" id="clearDockingFaceBtn" type="button">接舷面の設定を解除</button>
+      </div>
+      <p class="docking-face-hint">面を選ぶと、ビューポートに水色の板と法線の矢印が表示されます。「U」「V」はその面の平面上でのズレ、「傾U」「傾V」は面の傾きです。</p>
     </div>
 
     <div class="adjust-section">

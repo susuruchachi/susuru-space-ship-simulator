@@ -67,6 +67,9 @@ const ShipController = {
 // クォータニオンユーティリティ（01-state-and-config.jsのvecユーティリティに続き、
 // Three.js非依存で実装。THREE.Quaternionを直接使わない理由は
 // 04-flight-physics.jsが完全に独立した物理コアであるため）
+//
+// v61: axisAngleQuat/multiplyQuat/normalizeQuatは01-state-and-config.js
+// （両画面共通の基盤ファイル）へ移設したため、ここでの重複定義は削除。
 // -----------------------------------------------------------
 
 // 微小角速度(rad, 各軸)から近似クォータニオンを生成
@@ -81,32 +84,6 @@ function eulerToQuatSmall(wx, wy, wz) {
   const qz = axisAngleQuat({ x: 0, y: 0, z: 1 }, wz);
 
   return multiplyQuat(multiplyQuat(qx, qy), qz);
-}
-
-function axisAngleQuat(axis, angle) {
-  const half = angle * 0.5;
-  const s = Math.sin(half);
-  return {
-    x: axis.x * s,
-    y: axis.y * s,
-    z: axis.z * s,
-    w: Math.cos(half),
-  };
-}
-
-function multiplyQuat(a, b) {
-  return {
-    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
-    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
-    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
-    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
-  };
-}
-
-function normalizeQuat(q) {
-  const len = Math.sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
-  if (len === 0) return { x: 0, y: 0, z: 0, w: 1 };
-  return { x: q.x / len, y: q.y / len, z: q.z / len, w: q.w / len };
 }
 
 // クォータニオン -> オイラー角（デバッグ表示用、06-hud.jsから使用）。

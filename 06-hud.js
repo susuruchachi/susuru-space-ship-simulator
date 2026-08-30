@@ -443,15 +443,42 @@ const HUD = {
       const ship = State.ship;
       if (!ship) return;
 
-      const target = {
-        position: { x: ship.position.x, y: ship.position.y, z: ship.position.z },
-        quaternion: {
-          x: ship.quaternion.x,
-          y: ship.quaternion.y,
-          z: ship.quaternion.z,
-          w: ship.quaternion.w,
-        },
-      };
+      // v61: 「現在地を目的地として保存」は、素朴には艦の現在の重心
+      // 位置・姿勢をそのまま保存すればよいが、艦に接舷面(dockingFace)が
+      // 設定されている場合はそれだと意味がズレる。State.dockingTargetは
+      // 「艦の接舷面が最終的に一致すべき港側の座標」として扱われる
+      // （computeEffectiveShipDockingTarget参照）ため、素の艦位置を
+      // そのまま保存すると、次にオートドッキングした際は「艦の重心」で
+      // はなく「接舷面」がこの座標に来るよう調整されてしまい、艦が今の
+      // 位置からズレた場所へ着地することになる。
+      // ここでは逆に「艦が今の位置・姿勢のままだったら、接舷面は
+      // ワールド座標のどこにあるか」を計算し、それを目的地として保存
+      // することで、「今いる場所に戻ってこられる」という直感的な
+      // 挙動を保つ（接舷面未設定の艦は従来通り艦位置そのまま）。
+      let target;
+      if (ship.dockingFace) {
+        const halfExtents = ship.dockingFaceBoxHalfExtents || { x: 0, y: 0, z: 0 };
+        const faceLocal = computeDockingFaceLocalTransform(ship.dockingFace, halfExtents);
+        const faceWorldOffset = rotateVecByQuat(faceLocal.position, ship.quaternion);
+        target = {
+          position: {
+            x: ship.position.x + faceWorldOffset.x,
+            y: ship.position.y + faceWorldOffset.y,
+            z: ship.position.z + faceWorldOffset.z,
+          },
+          quaternion: normalizeQuat(multiplyQuat(ship.quaternion, faceLocal.quaternion)),
+        };
+      } else {
+        target = {
+          position: { x: ship.position.x, y: ship.position.y, z: ship.position.z },
+          quaternion: {
+            x: ship.quaternion.x,
+            y: ship.quaternion.y,
+            z: ship.quaternion.z,
+            w: ship.quaternion.w,
+          },
+        };
+      }
       State.dockingTarget = target;
       saveDockingTarget(target);
       refresh();
@@ -510,7 +537,12 @@ const HUD = {
     // 日本語ラベルに変換するだけでよい。
     let dockingLine = '';
     if (ship.autoDockingEnabled && State.dockingTarget) {
-      const target = State.dockingTarget;
+      // v61: 接舷面(dockingFace)が設定されている艦では、実際の到着判定は
+      // 「艦の重心が実効目標(接舷面オフセット後)に到達したか」で行われる
+      // （03-thruster-solver.js _buildDesiredForAutoDocking参照）。表示上の
+      // 残り距離もState.dockingTarget（港座標）ではなくこちらを基準にし、
+      // dockedになったのに距離が0にならない、という見え方のズレを防ぐ。
+      const target = computeEffectiveShipDockingTarget(State.dockingTarget, ship);
       const dx = target.position.x - ship.position.x;
       const dy = target.position.y - ship.position.y;
       const dz = target.position.z - ship.position.z;

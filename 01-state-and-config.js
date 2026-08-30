@@ -5,7 +5,7 @@
 
 // v27: 画面右下のバージョン表示・<title>で共通して使うバージョン名。
 // リリースのたびにここだけ書き換えれば全画面に反映される。
-const GAME_VERSION = 'v57';
+const GAME_VERSION = 'v61';
 
 // -------------------------------------------------------------
 // 速度制限モード
@@ -289,6 +289,16 @@ function createShipState(classKey, overrides = {}) {
     // 無視し、State.dockingTargetへ向かう自動制御トルク・並進力を
     // 生成する（rotateRollと、自動制御力への手動加算のみ受け付ける）。
     autoDockingEnabled: false,
+
+    // v61: 接舷面（ドッキングフェイス）。ship-builder.htmlで保存された
+    // カスタムモデルデータに含まれる場合、index.htmlの
+    // loadSavedShipModelInto()完了時にここへ反映される
+    // （読み込み前や保存モデルが無い/接舷面未設定の艦はnullのまま＝
+    // 従来通り艦の重心がそのままdockingTarget扱い）。
+    // dockingFaceBoxHalfExtentsは接舷面のオフセット計算の基準となる、
+    // 補正後モデルのバウンディングボックス半寸法(ローカル座標系)。
+    dockingFace: null,
+    dockingFaceBoxHalfExtents: { x: 0, y: 0, z: 0 },
   };
 }
 
@@ -644,5 +654,164 @@ function rotateVecByQuat(v, q) {
     x: ix * qw + iw * -qx + iy * -qz - iz * -qy,
     y: iy * qw + iw * -qy + iz * -qx - ix * -qz,
     z: iz * qw + iw * -qz + ix * -qy - iy * -qx,
+  };
+}
+
+// v61: 軸角からのクォータニオン生成・クォータニオン合成（ハミルトン積）。
+// 従来は05-ship-controller.js（index.html/settings.html系のみ読み込み）
+// にのみ存在したが、接舷面(dockingFace)の姿勢計算をship-builder.html側
+// （05-ship-controller.jsを読み込んでいない）でも行う必要が生じたため、
+// 両画面共通のこのファイルへ移設した。05-ship-controller.js側の同名定義は
+// 削除済み（重複定義によるエラーを避けるため、定義箇所はここ一箇所のみ）。
+function axisAngleQuat(axis, angle) {
+  const half = angle * 0.5;
+  const s = Math.sin(half);
+  return {
+    x: axis.x * s,
+    y: axis.y * s,
+    z: axis.z * s,
+    w: Math.cos(half),
+  };
+}
+
+function multiplyQuat(a, b) {
+  return {
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+  };
+}
+
+function normalizeQuat(q) {
+  const len = Math.sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+  if (len === 0) return { x: 0, y: 0, z: 0, w: 1 };
+  return { x: q.x / len, y: q.y / len, z: q.z / len, w: q.w / len };
+}
+
+// -------------------------------------------------------------
+// v61: 接舷面（ドッキングフェイス）
+//
+// 艦種ごとの保存モデルデータ（09-ship-builder.js、adjustと同じ場所）に
+// 追加するオプション項目。ユーザーが「艦のこの面を港の面に一致させたい」
+// と指定した、艦ローカル座標系での面の位置・向きを表す。
+//
+//   dockingFace: {
+//     axis: 'px'|'nx'|'py'|'ny'|'pz'|'nz', // 補正後バウンディングボックスの6面から選択
+//     offsetU: number, offsetV: number,     // 面内オフセット（下記u/v軸方向、メートル相当）
+//     tiltDeg: { u: 0, v: 0 },              // 法線をu軸・v軸まわりに傾ける角度（度）
+//   } | null
+//
+// axisごとの基準法線とu/v軸（面内2軸）の定義。法線は常に艦ローカル
+// +Z/-Z/+X/-X/+Y/-Yのいずれか、u/vはその面上でoffsetU/offsetVが
+// 素直に「右方向/上方向」に対応するよう選んだ組。
+// -------------------------------------------------------------
+const DOCKING_FACE_AXES = {
+  px: { normal: { x: 1, y: 0, z: 0 }, u: { x: 0, y: 0, z: -1 }, v: { x: 0, y: 1, z: 0 }, label: '+X' },
+  nx: { normal: { x: -1, y: 0, z: 0 }, u: { x: 0, y: 0, z: 1 }, v: { x: 0, y: 1, z: 0 }, label: '-X' },
+  py: { normal: { x: 0, y: 1, z: 0 }, u: { x: 1, y: 0, z: 0 }, v: { x: 0, y: 0, z: -1 }, label: '+Y' },
+  ny: { normal: { x: 0, y: -1, z: 0 }, u: { x: 1, y: 0, z: 0 }, v: { x: 0, y: 0, z: 1 }, label: '-Y' },
+  pz: { normal: { x: 0, y: 0, z: 1 }, u: { x: 1, y: 0, z: 0 }, v: { x: 0, y: 1, z: 0 }, label: '+Z（艦尾側）' },
+  nz: { normal: { x: 0, y: 0, z: -1 }, u: { x: -1, y: 0, z: 0 }, v: { x: 0, y: 1, z: 0 }, label: '-Z（艦首側）' },
+};
+
+// dockingFace設定 + バウンディングボックス半寸法(halfExtents, ローカル
+// 座標系)から、「艦ローカル座標系での接舷面の位置オフセットと、
+// 艦の前方(-Z)基準に対する接舷面の姿勢(クォータニオン)」を計算する。
+//   - 位置オフセットは、ボックスのその面の中心 + 面内オフセット(u/v)。
+//   - 姿勢は、艦の-Z軸をこの面の外向き法線に一致させる回転
+//     （面選択による90度単位の回転）に、u/v軸まわりのtilt角を
+//     追加合成したもの。
+// 戻り値: { position: {x,y,z}, quaternion: {x,y,z,w} }（いずれも艦ローカル）
+function computeDockingFaceLocalTransform(dockingFace, halfExtents) {
+  const axisDef = DOCKING_FACE_AXES[dockingFace.axis] || DOCKING_FACE_AXES.nz;
+  const n = axisDef.normal;
+  const u = axisDef.u;
+  const v = axisDef.v;
+
+  const faceCenter = {
+    x: n.x * halfExtents.x,
+    y: n.y * halfExtents.y,
+    z: n.z * halfExtents.z,
+  };
+  const offsetU = dockingFace.offsetU || 0;
+  const offsetV = dockingFace.offsetV || 0;
+  const position = {
+    x: faceCenter.x + u.x * offsetU + v.x * offsetV,
+    y: faceCenter.y + u.y * offsetU + v.y * offsetV,
+    z: faceCenter.z + u.z * offsetU + v.z * offsetV,
+  };
+
+  // 姿勢: 艦のローカル-Z軸(艦の前方基準)を面の外向き法線nへ向ける回転。
+  // n自体が既に軸整列(±X/±Y/±Z)なので、まずその90度単位の回転を求め、
+  // 続けてu軸まわり・v軸まわりのtilt角を面のローカル軸基準で合成する。
+  const baseQuat = _quatFromToAxisAligned({ x: 0, y: 0, z: -1 }, n);
+  const tiltU = ((dockingFace.tiltDeg && dockingFace.tiltDeg.u) || 0) * (Math.PI / 180);
+  const tiltV = ((dockingFace.tiltDeg && dockingFace.tiltDeg.v) || 0) * (Math.PI / 180);
+  const tiltUQuat = axisAngleQuat(u, tiltU);
+  const tiltVQuat = axisAngleQuat(v, tiltV);
+  const quaternion = normalizeQuat(multiplyQuat(multiplyQuat(baseQuat, tiltUQuat), tiltVQuat));
+
+  return { position, quaternion };
+}
+
+// fromベクトルをtoベクトルへ一致させる最短回転のクォータニオンを返す。
+// 本用途では両方とも軸整列ベクトル(±X/±Y/±Z)のみを渡す前提の簡易実装。
+function _quatFromToAxisAligned(from, to) {
+  const dot = vecDot(from, to);
+  if (dot > 0.9999) return { x: 0, y: 0, z: 0, w: 1 }; // 同じ向き
+  if (dot < -0.9999) {
+    // 正反対: fromに垂直な任意軸で180度回転させる
+    let axis = vecCross({ x: 1, y: 0, z: 0 }, from);
+    if (vecLength(axis) < 0.001) axis = vecCross({ x: 0, y: 1, z: 0 }, from);
+    return axisAngleQuat(vecNormalize(axis), Math.PI);
+  }
+  const axis = vecNormalize(vecCross(from, to));
+  const angle = Math.acos(clamp(dot, -1, 1));
+  return axisAngleQuat(axis, angle);
+}
+
+// State.dockingTarget（港側の位置・姿勢＝艦の接舷面が最終的に一致すべき
+// 値）と、艦のdockingFace・バウンディングボックス半寸法から、
+// 「艦の重心が実際に目指すべき実効目標(position/quaternion)」を計算する。
+// dockingFaceが未設定(null)の場合はdockingTargetをそのまま返す
+// （従来通り、艦の重心＝目的地という扱い）。
+//
+// 03-thruster-solver.js の _buildDesiredForAutoDocking() 冒頭で
+// State.dockingTargetの代わりにこの関数の戻り値を使うことで、内部の
+// 自動操船ロジック本体（フェーズ判定・接近制御等）は一切変更せずに
+// 接舷面オフセットへ対応させる。
+function computeEffectiveShipDockingTarget(dockingTarget, ship) {
+  const dockingFace = ship && ship.dockingFace;
+  if (!dockingFace || !dockingTarget) return dockingTarget;
+
+  const halfExtents = ship.dockingFaceBoxHalfExtents || { x: 0, y: 0, z: 0 };
+  const faceLocal = computeDockingFaceLocalTransform(dockingFace, halfExtents);
+
+  // 港での艦の最終姿勢: 「艦ローカル姿勢 * faceLocal.quaternion」が
+  // dockingTarget.quaternionに一致するような艦ローカル姿勢を求める。
+  // すなわち shipQuat = dockingTarget.quaternion * faceLocal.quaternion^-1
+  const shipQuat = normalizeQuat(
+    multiplyQuat(dockingTarget.quaternion, conjugateQuat(faceLocal.quaternion))
+  );
+
+  // 港での艦の最終位置: 接舷面のローカル位置オフセットを、上で求めた
+  // 艦の最終姿勢でワールド回転し、dockingTarget.positionから引く
+  // （面の位置 = 艦位置 + R(shipQuat) * faceLocal.position、を
+  //   艦位置について解いた形）。
+  const faceOffsetWorld = rotateVecByQuat(faceLocal.position, shipQuat);
+  const shipPosition = {
+    x: dockingTarget.position.x - faceOffsetWorld.x,
+    y: dockingTarget.position.y - faceOffsetWorld.y,
+    z: dockingTarget.position.z - faceOffsetWorld.z,
+  };
+
+  // dockingParams（宇宙港ごとの接近パラメータ上書き、
+  // 03-thruster-solver.js _getDockingParams参照）は艦の重心用オブジェクト
+  // には無関係の付随データなので、そのまま引き継ぐ。
+  return {
+    position: shipPosition,
+    quaternion: shipQuat,
+    dockingParams: dockingTarget.dockingParams,
   };
 }

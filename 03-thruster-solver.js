@@ -1612,7 +1612,15 @@ const ThrusterSolver = {
   // 組み立てる。
   // =============================================================
   _buildDesiredForAutoDocking(input, ship, dt) {
-    const target = State.dockingTarget;
+    // v61: State.dockingTargetは「艦の接舷面(dockingFace)が最終的に
+    // 一致すべき港側の位置・姿勢」を表す。艦に接舷面が設定されている
+    // 場合、以降のフェーズ判定・接近制御は全て「艦の重心が実際に
+    // 目指すべき実効目標」（接舷面オフセット分だけ引いた位置・姿勢）
+    // を使う。この置き換え一箇所だけで、以下の巨大な自動操船ロジック
+    // 本体は変更なしに接舷面へ対応する（01-state-and-config.js
+    // computeEffectiveShipDockingTarget()参照）。dockingFace未設定なら
+    // 従来通りState.dockingTargetがそのまま使われる。
+    const target = computeEffectiveShipDockingTarget(State.dockingTarget, ship);
     const params = this._getDockingParams(target);
 
     const toTargetWorld = {
@@ -1692,10 +1700,13 @@ const ThrusterSolver = {
         // v58: 要望「ログに、自動航行開始の目的地と、手動操船の
         // ステータスを追加して」対応。manualControl:falseで自動操船
         // 中の行であることを示し、targetPos*で「この行の時点で
-        // 自動航行が目指している目的地」（=State.dockingTarget.position）
-        // を毎フレーム記録する。目的地を飛行中に変更した場合も
-        // その変化がログから追えるよう、開始時の一回きりではなく
-        // 毎フレームの値を記録する方式にした。
+        // 自動航行が目指している目的地」を毎フレーム記録する。
+        // 目的地を飛行中に変更した場合もその変化がログから追える
+        // よう、開始時の一回きりではなく毎フレームの値を記録する
+        // 方式にした。
+        // v61: targetは接舷面オフセット適用後の実効目標（艦の重心が
+        // 実際に目指す位置）。接舷面未設定ならState.dockingTargetと
+        // 一致する。
         manualControl: false,
         targetPosX: target.position.x,
         targetPosY: target.position.y,

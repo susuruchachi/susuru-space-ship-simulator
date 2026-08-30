@@ -359,6 +359,12 @@
     );
     correctionGroup.scale.setScalar(adjust.scale);
     correctionGroup.position.set(adjust.offset.x, adjust.offset.y, adjust.offset.z);
+    // v61: 回転・スケール・位置オフセットを変えるとモデルの
+    // バウンディングボックス（＝接舷面の位置計算の基準）も変わるため、
+    // 接舷面ギズモを毎回再計算する。dockingFace未設定時は内部で
+    // 早期returnするだけなので無駄コストは小さい。
+    // 関数宣言のためホイスティングにより、定義順に関わらず参照可能。
+    if (typeof rebuildDockingFaceGizmo === 'function') rebuildDockingFaceGizmo();
   }
 
   // ---- スライダーDOM ----
@@ -471,7 +477,182 @@
     syncScaleUiFromState();
     syncOffsetUiFromState();
     applyAdjustToGroup();
+    // 回転・スケール・位置を変えるとバウンディングボックスが変わり、
+    // 接舷面のズレ量(offsetU/V)の基準もズレるため、接舷面もあわせて
+    // リセットする（そのまま残すと面の位置が意図せずズレて見える）。
+    setDockingFace(null);
   });
+
+  // -----------------------------------------------------------
+  // 接舷面（ドッキングフェイス）
+  //
+  // ship.dockingFace（01-state-and-config.js参照）と同じ形の状態を
+  // このビルダー内でも保持し、保存ボタン押下時にモデルデータへ含める。
+  // ギズモは「選択した面に半透明の板＋外向き矢印を表示する」形の
+  // 簡易実装（面自体をドラッグする方式ではなく、パラメータ入力と
+  // 連動して見た目を更新するプレビュー用）。
+  // -----------------------------------------------------------
+  let dockingFace = null; // { axis, offsetU, offsetV, tiltDeg:{u,v} } | null
+  let dockingFaceGizmo = null; // THREE.Group
+
+  const faceOffU = document.getElementById('faceOffU');
+  const faceOffV = document.getElementById('faceOffV');
+  const faceTiltU = document.getElementById('faceTiltU');
+  const faceTiltV = document.getElementById('faceTiltV');
+  const faceOffUVal = document.getElementById('faceOffUVal');
+  const faceOffVVal = document.getElementById('faceOffVVal');
+  const faceTiltUVal = document.getElementById('faceTiltUVal');
+  const faceTiltVVal = document.getElementById('faceTiltVVal');
+  const dockingFaceDetail = document.getElementById('dockingFaceDetail');
+
+  // 現在のcorrectionGroup（補正後モデル）のバウンディングボックス
+  // 半寸法をローカル座標系で返す。index.html側のバウンディングボックス
+  // 計算（loadSavedShipModelInto内、補正後correctionGroupから算出）と
+  // 基準を一致させるため、ここでも同じくcorrectionGroup全体から取る。
+  function computeCurrentHalfExtents() {
+    if (!modelRoot) return { x: 0, y: 0, z: 0 };
+    const box = new THREE.Box3().setFromObject(correctionGroup);
+    if (box.isEmpty()) return { x: 0, y: 0, z: 0 };
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    return { x: size.x / 2, y: size.y / 2, z: size.z / 2 };
+  }
+
+  function setDockingFace(next) {
+    dockingFace = next;
+    syncDockingFaceUiFromState();
+    rebuildDockingFaceGizmo();
+  }
+
+  function syncDockingFaceUiFromState() {
+    document.querySelectorAll('.docking-face-btn').forEach((btn) => {
+      btn.classList.toggle('selected', !!dockingFace && btn.dataset.faceAxis === dockingFace.axis);
+    });
+    dockingFaceDetail.style.display = dockingFace ? '' : 'none';
+    if (!dockingFace) return;
+    faceOffU.value = dockingFace.offsetU;
+    faceOffV.value = dockingFace.offsetV;
+    faceTiltU.value = dockingFace.tiltDeg.u;
+    faceTiltV.value = dockingFace.tiltDeg.v;
+    faceOffUVal.textContent = dockingFace.offsetU.toFixed(1);
+    faceOffVVal.textContent = dockingFace.offsetV.toFixed(1);
+    faceTiltUVal.textContent = `${Math.round(dockingFace.tiltDeg.u)}°`;
+    faceTiltVVal.textContent = `${Math.round(dockingFace.tiltDeg.v)}°`;
+  }
+
+  document.querySelectorAll('.docking-face-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (!modelRoot) return;
+      const axis = btn.dataset.faceAxis;
+      // 既に同じ面が選択されている場合はオフセット/傾きを維持したまま
+      // 面だけ選び直せるようにする（誤タップでの値消失を避ける）。
+      if (dockingFace && dockingFace.axis === axis) return;
+      setDockingFace({
+        axis,
+        offsetU: 0,
+        offsetV: 0,
+        tiltDeg: { u: 0, v: 0 },
+      });
+    });
+  });
+
+  faceOffU.addEventListener('input', () => {
+    if (!dockingFace) return;
+    dockingFace.offsetU = Number(faceOffU.value);
+    faceOffUVal.textContent = dockingFace.offsetU.toFixed(1);
+    rebuildDockingFaceGizmo();
+  });
+  faceOffV.addEventListener('input', () => {
+    if (!dockingFace) return;
+    dockingFace.offsetV = Number(faceOffV.value);
+    faceOffVVal.textContent = dockingFace.offsetV.toFixed(1);
+    rebuildDockingFaceGizmo();
+  });
+  faceTiltU.addEventListener('input', () => {
+    if (!dockingFace) return;
+    dockingFace.tiltDeg.u = Number(faceTiltU.value);
+    faceTiltUVal.textContent = `${faceTiltU.value}°`;
+    rebuildDockingFaceGizmo();
+  });
+  faceTiltV.addEventListener('input', () => {
+    if (!dockingFace) return;
+    dockingFace.tiltDeg.v = Number(faceTiltV.value);
+    faceTiltVVal.textContent = `${faceTiltV.value}°`;
+    rebuildDockingFaceGizmo();
+  });
+
+  document.getElementById('clearDockingFaceBtn').addEventListener('click', () => {
+    setDockingFace(null);
+  });
+
+  // ギズモ（選択面の半透明パネル＋外向き矢印）をcorrectionGroupの
+  // 子として再構築する。correctionGroupの子にすることで、回転・
+  // スケール・位置オフセットのスライダー操作にも自動追従する。
+  function rebuildDockingFaceGizmo() {
+    if (dockingFaceGizmo) {
+      correctionGroup.remove(dockingFaceGizmo);
+      dockingFaceGizmo.traverse((obj) => {
+        if (obj.geometry) obj.geometry.dispose();
+        if (obj.material) obj.material.dispose();
+      });
+      dockingFaceGizmo = null;
+    }
+    if (!dockingFace || !modelRoot) return;
+
+    const halfExtents = computeCurrentHalfExtents();
+    const local = computeDockingFaceLocalTransform(dockingFace, halfExtents);
+
+    const group = new THREE.Group();
+    group.position.set(local.position.x, local.position.y, local.position.z);
+    group.quaternion.set(local.quaternion.x, local.quaternion.y, local.quaternion.z, local.quaternion.w);
+
+    // パネルの大きさは、選ばれた面に応じたボックスの残り2辺のサイズを
+    // 目安にする（面が小さすぎて見えない/大きすぎて隣の面にかぶる、
+    // という事態を避けるための簡易ヒューリスティック）。
+    let panelW = 4, panelH = 4;
+    if (dockingFace.axis === 'px' || dockingFace.axis === 'nx') {
+      panelW = 2 * halfExtents.z || 4; panelH = 2 * halfExtents.y || 4;
+    } else if (dockingFace.axis === 'py' || dockingFace.axis === 'ny') {
+      panelW = 2 * halfExtents.x || 4; panelH = 2 * halfExtents.z || 4;
+    } else {
+      panelW = 2 * halfExtents.x || 4; panelH = 2 * halfExtents.y || 4;
+    }
+
+    const panel = new THREE.Mesh(
+      new THREE.PlaneGeometry(panelW, panelH),
+      new THREE.MeshBasicMaterial({
+        color: 0x6cc3ff, transparent: true, opacity: 0.28,
+        side: THREE.DoubleSide, depthWrite: false,
+      })
+    );
+    // 重要: computeDockingFaceLocalTransform()のquaternionは「艦ローカル
+    // -Z軸(艦の前方基準)を面の外向き法線に向ける回転」として定義されて
+    // いる（01-state-and-config.js参照、オートドッキングの目標姿勢計算
+    // と共通の定義）。つまりgroup自体のローカル-Z方向が実際の面の外向き
+    // 法線に一致する。一方PlaneGeometry/ArrowHelperはThree.jsの流儀で
+    // デフォルトが+Z基準のため、そのままではパネル・矢印が面の内側
+    // （艦の中心側）を向いてしまう。ここでgroup配下のローカル空間だけ
+    // Y軸180度回転して帳尻を合わせ、外向き法線と一致させる。
+    panel.rotation.y = Math.PI;
+    group.add(panel);
+
+    const edges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(panel.geometry),
+      new THREE.LineBasicMaterial({ color: 0x6cc3ff, transparent: true, opacity: 0.8 })
+    );
+    edges.rotation.y = Math.PI;
+    group.add(edges);
+
+    const arrowLen = Math.max(panelW, panelH) * 0.4;
+    const arrow = new THREE.ArrowHelper(
+      new THREE.Vector3(0, 0, -1), new THREE.Vector3(0, 0, 0),
+      arrowLen, 0xffcc55, arrowLen * 0.3, arrowLen * 0.18
+    );
+    group.add(arrow);
+
+    correctionGroup.add(group);
+    dockingFaceGizmo = group;
+  }
 
   // -----------------------------------------------------------
   // モデル読み込み
@@ -517,6 +698,11 @@
     correctionGroup.add(modelRoot);
     applyAdjustToGroup();
     frameCameraOnModel();
+    // 新しいモデル（差し替え含む）を読み込んだ直後は、以前のモデルの
+    // 形状に基づいた接舷面はそのまま流用できないため一旦解除する。
+    // 保存済みモデルの復元時(restoreExistingModel)は、この直後に
+    // 呼び出し側が保存されていたdockingFaceを明示的に復元する。
+    setDockingFace(null);
 
     emptyState.classList.add('hidden');
     adjustPanel.classList.add('visible');
@@ -712,6 +898,15 @@
           scale: adjust.scale,
           offset: { ...adjust.offset },
         },
+        // v61: 接舷面（ドッキングフェイス）。未設定ならnull。
+        dockingFace: dockingFace
+          ? {
+              axis: dockingFace.axis,
+              offsetU: dockingFace.offsetU,
+              offsetV: dockingFace.offsetV,
+              tiltDeg: { ...dockingFace.tiltDeg },
+            }
+          : null,
       };
       await saveShipModelData(classKey, data);
       setStatus(`${ShipClassPresets[classKey].label}にモデルを保存しました。`, false);
@@ -742,6 +937,7 @@
     pendingSaveObjText = null;
     pendingSaveMtlText = null;
     pendingSaveTextures = null;
+    setDockingFace(null);
 
     emptyState.classList.remove('hidden');
     adjustPanel.classList.remove('visible');
@@ -809,6 +1005,9 @@
             pendingSaveFormat = 'glb';
             pendingSaveFileName = existing.fileName;
             pendingSaveGlbArrayBuffer = buf;
+            // onModelLoadedIntoScene内で一旦nullに戻されるため、
+            // 保存されていた接舷面をここで明示的に復元する。
+            if (existing.dockingFace) setDockingFace({ ...existing.dockingFace, tiltDeg: { ...existing.dockingFace.tiltDeg } });
             setStatus('保存済みモデルを読み込みました。', false);
           }, (err) => setStatus('保存済みモデルの読み込みに失敗しました。', true));
         })
@@ -827,6 +1026,9 @@
         pendingSaveObjText = existing.objText;
         pendingSaveMtlText = existing.mtlText;
         pendingSaveTextures = existing.textures;
+        // onModelLoadedIntoScene内で一旦nullに戻されるため、
+        // 保存されていた接舷面をここで明示的に復元する。
+        if (existing.dockingFace) setDockingFace({ ...existing.dockingFace, tiltDeg: { ...existing.dockingFace.tiltDeg } });
         setStatus('保存済みモデルを読み込みました。', false);
       };
 
