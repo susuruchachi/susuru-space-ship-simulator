@@ -247,6 +247,49 @@ v50以降、変更のたびにここへ追記していく想定です（それ�
 
 ---
 
+## v50-fix5 - 2026-08-29
+
+### 修正: 「final_approachからtunnelへ切り替わらない」不具合（v50-fix4のtunnel継続修正が過剰だった）
+
+- **症状**: distance=250付近まで来ても`final_approach`から`tunnel`
+  （最終進入）へ進めず、その場に留まり続ける。
+- **原因**: v50-fix4で追加したtunnel/overshoot継続判定
+  （「`alongDist>=0`に戻った場合は通常通りtunnelとして扱う」を実際に
+  実装した箇所）の継続条件を誤って
+  `distance<=ZONE_FINAL_APPROACH(200)`としてしまっていた。設計上
+  `tunnel`は`brake250→tunnel`遷移によって`distance>200`かつ`<=250`
+  の範囲で開始するフェーズであり、200という値は「トンネル内を
+  さらに200まで進んだら入港」という入港達成の目安に過ぎない。
+  この誤った200という条件のせいで、tunnel突入直後
+  （distance 250〜200の間）は継続条件を満たせず、下の通常ゾーン
+  判定（`distance>250`なら`final_approach`）に落ちてしまい、
+  「`tunnel`→`final_approach`」への逆戻りが発生していた。
+  `final_approach`側の事前減速（v50-fix3で追加）はdistance=250
+  ちょうどで速度をほぼ使い切る設計になっているため、一度
+  `final_approach`へ押し戻されると再びtunnelへ進むだけの速度が
+  出せなくなり、distance=250付近に張り付いたまま動けなくなって
+  いた。実測ログでは、`brake250→tunnel`への正規の遷移自体は成功して
+  いたが、その直後に`tunnel↔brake250`を細かく往復しながらdistanceが
+  250をわずかに超え、最終的に`final_approach`へ戻ってそこで停止する
+  様子を確認した。
+- **対応**: `03-thruster-solver.js`の`_resolveDockingPhase`を修正。
+  tunnel継続の条件を`distance<=ZONE_FINAL_APPROACH(200)`から
+  `distance<=ZONE_BRAKE250(250) かつ distance>ZONE_FINAL_APPROACH
+  (200)`に変更。これにより、tunnel突入直後（distance 250〜200）は
+  無条件でtunnelを継続し、distance<=200になったら本来の詳細な
+  tunnel判定ブロック（`lateral`が大きい場合にbrake250へ差し戻す
+  安全策を含む）にそのままフォールスルーする。単純に
+  `distance<=250`全体を無条件tunnel継続にしなかったのは、それだと
+  200以下の範囲でも`lateral`チェックを迂回してしまい、横ズレが
+  残ったままトンネル内に留まり続けてしまう別の不具合を生むため。
+- 実測ログで、`tunnel→brake250`遷移が起きていた全箇所
+  （14件）を確認したところ、いずれも`distance`は249.99台
+  （200超）、`lateral`は0.0087〜0.0099（許容値0.15を大きく下回る）
+  であり、`lateral`超過が原因ではなく、上記のtunnel継続条件の
+  範囲設定ミスが直接の原因だったことを裏付けた。
+
+---
+
 ## v50より前
 
 このファイルが存在する前の変更履歴は、各JSファイルの冒頭・該当箇所の

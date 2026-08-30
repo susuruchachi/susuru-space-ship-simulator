@@ -1285,20 +1285,36 @@ const ThrusterSolver = {
       // v50-fix4: alongDist>=0に戻った（トンネル内に留まったまま
       // 通過しなかった）場合は通常通りtunnelとして扱う——という
       // このコメントの意図が実装されておらず、ここで何もreturnせずに
-      // 下の通常ゾーン判定へ素通りしていた。distance<=ZONE_BRAKE300
-      // (300)の範囲は「_dockingBrake300Doneがfalseなら無条件で
-      // brake300」という判定になっているため、tunnel内（distance
-      // 200前後）にいる艦がここを素通りするたびにbrake300へ
-      // 引き戻され、「tunnel→brake300→brake250→tunnel→…」を
-      // 永久に繰り返す不具合の原因になっていた（実測ログで
-      // distance≈208に張り付いたまま同じ3フェーズを往復し続けて
-      // いたことを確認済み）。distance<=ZONE_FINAL_APPROACH(200)の
-      // 範囲内である限りは明示的にtunnelを維持する。
-      if (distance <= params.ZONE_FINAL_APPROACH) {
+      // 下の通常ゾーン判定へ素通りしていた。
+      //
+      // v50-fix5: 直前の修正でtunnel継続の条件を
+      // 「distance<=ZONE_FINAL_APPROACH(200)」としていたが、設計上
+      // tunnelはdistance<=ZONE_BRAKE250(250)から始まるフェーズであり
+      // （brake250→tunnel遷移はdistance>200かつ<=250の範囲で起こる）、
+      // 200という閾値は「トンネル内をさらに200まで進んだら入港」と
+      // いう入港達成の目安に過ぎない。200を継続条件に使うと、tunnel
+      // 突入直後（distance 250〜200の間）に本条件を満たせず下の通常
+      // ゾーン判定（distance>250ならfinal_approach）に落ちてしまい、
+      // 「tunnel→final_approach」への逆戻りが発生していた（実測ログで
+      // 確認済み。final_approach側の事前減速がdistance=250ちょうどで
+      // 速度をほぼ使い切る設計のため、一度押し戻されると再びtunnelへ
+      // 進む速度が出せなくなっていた）。
+      //
+      // ただし単純にdistance<=250全体で無条件にtunnelを継続すると、
+      // 今度は下のdistance<=ZONE_FINAL_APPROACH(200)ブロックにある
+      // 「lateralが大きければbrake250へ差し戻す」チェック（トンネル内は
+      // 横方向の力を出さないため、横ズレが残ったまま入ると永久に
+      // 直らない、という安全策）を迂回してしまう。そこでdistance>200
+      // （tunnel突入直後、まだ本来のtunnel判定ブロックの対象外の区間）
+      // に限って無条件でtunnelを継続し、distance<=200になったら
+      // 下のブロックの詳細判定（lateralチェック込み）にそのまま委ねる。
+      if (distance <= params.ZONE_BRAKE250 && distance > params.ZONE_FINAL_APPROACH) {
         return 'tunnel';
       }
-      // 200を超えて戻ってしまった場合（想定外の外力等）は、下の
-      // 通常ゾーン判定に委ねる。
+      // distance<=ZONE_FINAL_APPROACH(200)の場合は下の詳細判定
+      // （lateralチェック含む）にフォールスルーする。250を超えて
+      // 戻ってしまった場合（想定外の外力等）も同様に下の通常ゾーン
+      // 判定に委ねる。
     }
 
     // --- brake300のワンショット継続判定（NO_ENTRY_RADIUSチェックより
