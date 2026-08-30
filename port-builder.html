@@ -283,6 +283,7 @@
     display: block;
   }
   .btn-primary { background: #3a8fd6; color: #fff; }
+  .btn-primary:disabled { background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.35); }
   .btn-secondary {
     background: rgba(255,255,255,0.08);
     color: #dfefff;
@@ -293,6 +294,149 @@
     color: #ff9d9d;
     border: 1px solid rgba(255,80,80,0.3);
   }
+
+  /* -----------------------------------------------------------
+     ポート3Dモデル読み込みUI（ship-builder.htmlの空状態/ドロップゾーンと
+     同じ見た目・挙動）。ビューポート上に重ねて表示する。
+  ----------------------------------------------------------- */
+  .model-empty-state {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 12px;
+    padding: 20px;
+    text-align: center;
+    background: rgba(5,7,12,0.55);
+  }
+  .model-empty-state.hidden { display: none; }
+  .model-empty-state .icon { font-size: 32px; opacity: 0.6; }
+  .model-empty-state p {
+    margin: 0;
+    font-size: 12px;
+    color: #9fb3c8;
+    max-width: 300px;
+    line-height: 1.6;
+  }
+  .dropzone {
+    border: 2px dashed rgba(108,195,255,0.4);
+    border-radius: 14px;
+    padding: 18px 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    background: rgba(108,195,255,0.05);
+  }
+  .dropzone.dragover {
+    border-color: #6cc3ff;
+    background: rgba(108,195,255,0.14);
+  }
+  .format-tabs { display: flex; gap: 8px; }
+  .format-tab {
+    padding: 7px 14px;
+    border-radius: 999px;
+    font-size: 12px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.14);
+    cursor: pointer;
+  }
+  .format-tab.selected {
+    background: rgba(108,195,255,0.16);
+    border-color: #6cc3ff;
+    color: #6cc3ff;
+  }
+  .file-slots {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+    max-width: 280px;
+  }
+  .file-slot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 9px 12px;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.12);
+    font-size: 12px;
+  }
+  .file-slot .slot-label { color: #9fb3c8; flex: 0 0 auto; }
+  .file-slot .slot-value {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+    color: #dfefff;
+  }
+  .file-slot.optional .slot-label::after {
+    content: '（任意）';
+    color: rgba(159,179,200,0.6);
+    font-size: 10px;
+  }
+  .file-slot button {
+    flex: 0 0 auto;
+    font-size: 11px;
+    padding: 5px 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.2);
+    background: rgba(255,255,255,0.06);
+    color: #dfefff;
+  }
+  .btn-load {
+    margin-top: 2px;
+    padding: 10px 20px;
+    border-radius: 10px;
+    border: none;
+    font-size: 13px;
+    font-weight: 600;
+    background: #3a8fd6;
+    color: #fff;
+  }
+  .btn-load:disabled {
+    background: rgba(255,255,255,0.1);
+    color: rgba(255,255,255,0.35);
+  }
+  .model-status-line {
+    font-size: 11px;
+    color: #9fd8ff;
+    min-height: 14px;
+  }
+  .model-status-line.error { color: #ff8a8a; }
+
+  .scale-row { display: flex; align-items: center; gap: 10px; }
+  .scale-row input[type="range"] { flex: 1; }
+  .scale-row .scale-value {
+    width: 56px;
+    text-align: right;
+    font-size: 12px;
+    color: #9fb3c8;
+    font-variant-numeric: tabular-nums;
+  }
+  .scale-presets { display: flex; gap: 8px; margin-top: 8px; }
+  .scale-presets button {
+    flex: 1;
+    padding: 6px;
+    font-size: 11px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.16);
+    background: rgba(255,255,255,0.05);
+    color: #dfefff;
+  }
+  .axis-value {
+    font-size: 12px;
+    text-align: right;
+    color: #9fb3c8;
+    font-variant-numeric: tabular-nums;
+  }
+
+  input[type="file"] { display: none; }
 </style>
 </head>
 <body>
@@ -321,12 +465,111 @@
     <div class="viewport-wrap">
       <canvas id="viewportCanvas"></canvas>
       <div class="viewport-hint">ドラッグ: 視点回転 / ピンチ・ホイール: ズーム</div>
+
+      <div class="model-empty-state" id="modelEmptyState">
+        <div class="icon">🛰️</div>
+        <div class="format-tabs">
+          <div class="format-tab selected" data-format="glb" id="tabGlb">GLB</div>
+          <div class="format-tab" data-format="obj" id="tabObj">OBJ + MTL</div>
+        </div>
+
+        <div id="glbSlots" class="file-slots">
+          <div class="file-slot">
+            <div class="slot-label">GLBファイル</div>
+            <div class="slot-value" id="glbFileName">未選択</div>
+            <button id="pickGlbBtn" type="button">選択</button>
+          </div>
+        </div>
+
+        <div id="objSlots" class="file-slots" style="display:none;">
+          <div class="file-slot">
+            <div class="slot-label">OBJファイル</div>
+            <div class="slot-value" id="objFileName">未選択</div>
+            <button id="pickObjBtn" type="button">選択</button>
+          </div>
+          <div class="file-slot optional">
+            <div class="slot-label">MTLファイル</div>
+            <div class="slot-value" id="mtlFileName">未選択</div>
+            <button id="pickMtlBtn" type="button">選択</button>
+          </div>
+          <div class="file-slot optional">
+            <div class="slot-label">テクスチャ画像</div>
+            <div class="slot-value" id="texFileName">0個選択</div>
+            <button id="pickTexBtn" type="button">選択</button>
+          </div>
+        </div>
+
+        <p>ポートの3Dモデル（GLB、またはOBJ+MTL）をドラッグ&ドロップするか、上のボタンで選択してください。未読み込みの場合は簡易ゲート表示のみになります。</p>
+
+        <button class="btn-load" id="loadModelBtn" disabled>モデルを読み込む</button>
+        <div class="model-status-line" id="modelStatusLine"></div>
+      </div>
     </div>
 
     <div class="adjust-panel">
       <div class="adjust-section">
         <h2>ポート名</h2>
         <input type="text" class="name-input" id="portNameInput" placeholder="例: 母港ステーション、補給ポイントA">
+      </div>
+
+      <div class="adjust-section" id="modelAdjustSection" style="display:none;">
+        <h2>ポートモデルの調整</h2>
+        <div class="axis-row">
+          <div class="axis-label">X</div>
+          <input type="range" id="modelRotX" min="-180" max="180" step="1" value="0">
+          <div class="axis-value" id="modelRotXVal">0°</div>
+        </div>
+        <div class="axis-row">
+          <div class="axis-label">Y</div>
+          <input type="range" id="modelRotY" min="-180" max="180" step="1" value="0">
+          <div class="axis-value" id="modelRotYVal">0°</div>
+        </div>
+        <div class="axis-row">
+          <div class="axis-label">Z</div>
+          <input type="range" id="modelRotZ" min="-180" max="180" step="1" value="0">
+          <div class="axis-value" id="modelRotZVal">0°</div>
+        </div>
+        <div class="quick-rot-row">
+          <button type="button" data-model-quick="yaw180">Y+180°（前後反転）</button>
+          <button type="button" data-model-quick="pitch90">X+90°</button>
+          <button type="button" data-model-quick="pitchm90">X-90°</button>
+          <button type="button" data-model-quick="roll90">Z+90°</button>
+        </div>
+
+        <h2 style="margin-top:14px;">スケール</h2>
+        <div class="scale-row">
+          <input type="range" id="modelScaleSlider" min="-3" max="3" step="0.01" value="0">
+          <div class="scale-value" id="modelScaleVal">×1.00</div>
+        </div>
+        <div class="scale-presets">
+          <button type="button" data-model-preset-scale="autofit">自動フィット</button>
+          <button type="button" data-model-preset-scale="1">×1</button>
+          <button type="button" data-model-preset-scale="0.1">×0.1</button>
+          <button type="button" data-model-preset-scale="10">×10</button>
+        </div>
+
+        <h2 style="margin-top:14px;">位置オフセット（ポート原点からのズレ補正）</h2>
+        <div class="axis-row">
+          <div class="axis-label">X</div>
+          <input type="range" id="modelOffX" min="-40" max="40" step="0.1" value="0">
+          <div class="axis-value" id="modelOffXVal">0.0</div>
+        </div>
+        <div class="axis-row">
+          <div class="axis-label">Y</div>
+          <input type="range" id="modelOffY" min="-40" max="40" step="0.1" value="0">
+          <div class="axis-value" id="modelOffYVal">0.0</div>
+        </div>
+        <div class="axis-row">
+          <div class="axis-label">Z</div>
+          <input type="range" id="modelOffZ" min="-40" max="40" step="0.1" value="0">
+          <div class="axis-value" id="modelOffZVal">0.0</div>
+        </div>
+
+        <button class="reset-link" id="modelResetAdjustBtn" type="button">モデルの回転・スケール・位置をリセット</button>
+        <div style="height:10px;"></div>
+        <button class="reset-link" id="modelReplaceBtn" type="button">別のモデルに差し替える</button>
+        <div style="height:10px;"></div>
+        <button class="reset-link" id="modelRemoveBtn" type="button" style="color:#ff9d9d;">このポートのモデルを削除（簡易ゲート表示に戻す）</button>
       </div>
 
       <div class="adjust-section">
@@ -383,7 +626,15 @@
 
 </div>
 
+<input type="file" id="glbFileInput" accept=".glb,.gltf">
+<input type="file" id="objFileInput" accept=".obj">
+<input type="file" id="mtlFileInput" accept=".mtl">
+<input type="file" id="texFileInput" accept="image/*" multiple>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/MTLLoader.js"></script>
 <script src="01-state-and-config.js"></script>
 <script src="10-docking-platform.js"></script>
 <script src="12-port-builder.js"></script>

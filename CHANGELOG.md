@@ -6,6 +6,33 @@ v50以降、変更のたびにここへ追記していく想定です（それ�
 
 ---
 
+## v63 - 2026-08-30
+
+### 追加: ドッキングポートごとの3Dモデル読み込み・保存
+
+- **症状**: port-builder.htmlにはそもそもポートの3Dモデルを読み込む
+  UIが存在しておらず（GLTFLoader/OBJLoader/MTLLoaderのスクリプト
+  タグ自体が抜けていた）、「読み込みができない」状態だった。
+- **対応**: 艦船建造画面（ship-builder.html/09-ship-builder.js）と
+  同じ方式で、ポートごとにGLB、またはOBJ+MTL(+テクスチャ)の3Dモデルを
+  読み込み・保存・削除・差し替えできるようにした。
+  - port-builder.htmlに、ビューポート上に重ねる形でモデル読込UI
+    （フォーマットタブ、ファイル選択、ドラッグ&ドロップ、読込ボタン）
+    と、調整パネル（回転X/Y/Z、スケール[自動フィット付き]、位置
+    オフセット、リセット/差し替え/削除ボタン）を追加。
+  - 保存はIndexedDB（`spaceSimPortModels`、艦モデルと同じ仕組み）を
+    portId単位で使用（01-state-and-config.jsに
+    `loadPortModelData`/`savePortModelData`/`removePortModelData`を
+    追加）。ポート自体（名前・位置・姿勢、`spaceSimDockingPorts`）とは
+    別データとして保持し、ポート削除時にあわせて削除する。
+  - ゲームプレイ中（index.html）は、10-docking-platform.jsが現在の
+    入港目的地(State.dockingTarget)を保存済みポート一覧と位置・姿勢
+    で照合し、一致するポートにモデルが保存されていれば読み込んで
+    ゲート内に表示する。一致しない場合やモデル未設定の場合は従来通り
+    簡易ゲート表示のみ。
+
+---
+
 ## v50 - 2026-08-29
 
 ### 修正: 自動ドッキング操縦

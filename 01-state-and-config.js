@@ -5,7 +5,7 @@
 
 // v27: 画面右下のバージョン表示・<title>で共通して使うバージョン名。
 // リリースのたびにここだけ書き換えれば全画面に反映される。
-const GAME_VERSION = 'v62';
+const GAME_VERSION = 'v63';
 
 // -------------------------------------------------------------
 // 速度制限モード
@@ -456,6 +456,11 @@ function saveDockingTarget(target) {
 //     },
 //     ...
 //   ]
+//
+// v63: 各ポートの「見た目のモデル」(GLB/OBJ)は、この配列には含めず
+// PORT_MODEL_*（下方に定義、IndexedDB）にportId単位で別保存する
+// （艦モデルと同じ理由: Base64込みのデータをlocalStorageの配列全体に
+// 混ぜるとサイズ上限にすぐ当たるため）。
 // -------------------------------------------------------------
 const DOCKING_PORTS_STORAGE_KEY = 'spaceSimDockingPorts';
 
@@ -647,6 +652,81 @@ async function removeShipModelData(classKey) {
   });
   // 旧localStorage側にも残っていれば併せて掃除する
   try { localStorage.removeItem(SHIP_MODEL_STORAGE_PREFIX + classKey); } catch (e) {}
+}
+
+// -------------------------------------------------------------
+// v63: ドッキングポートごとのカスタム3Dモデル（port-builder.html）の永続化
+//
+// 艦モデル（上のSHIP_MODEL_*）と全く同じ仕組み（IndexedDB、GLB/OBJ両対応、
+// 回転・スケール・位置オフセットの調整値も一緒に保存）を、キーを
+// classKey（艦種）ではなくportId（ドッキングポートのID、
+// generateDockingPortIdで発行）にして流用する。
+// データ構造は09-ship-builder.js冒頭コメントのadjust部分と同一。
+// ポート自体（名前・位置・姿勢）はDOCKING_PORTS_STORAGE_KEY側で別管理
+// されており、こちらはその「見た目のモデル」だけを保持する。
+// ポート削除時（12-port-builder.js）は、あわせてこちらのモデルデータも
+// 削除しないと孤立データが残り続けるため、呼び出し側で必ずペアで
+// 扱うこと。
+// -------------------------------------------------------------
+const PORT_MODEL_DB_NAME = 'spaceSimPortModels';
+const PORT_MODEL_DB_VERSION = 1;
+const PORT_MODEL_STORE_NAME = 'models';
+
+let portModelDbPromise = null;
+
+function openPortModelDb() {
+  if (portModelDbPromise) return portModelDbPromise;
+  portModelDbPromise = new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('このブラウザ環境ではIndexedDBが利用できません。'));
+      return;
+    }
+    const req = indexedDB.open(PORT_MODEL_DB_NAME, PORT_MODEL_DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(PORT_MODEL_STORE_NAME)) {
+        db.createObjectStore(PORT_MODEL_STORE_NAME);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('IndexedDBを開けませんでした。'));
+  });
+  return portModelDbPromise;
+}
+
+async function loadPortModelData(portId) {
+  try {
+    const db = await openPortModelDb();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(PORT_MODEL_STORE_NAME, 'readonly');
+      const req = tx.objectStore(PORT_MODEL_STORE_NAME).get(portId);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+  } catch (e) {
+    console.warn(`ポートモデル(${portId})の読み込みに失敗しました。`, e);
+    return null;
+  }
+}
+
+async function savePortModelData(portId, data) {
+  const db = await openPortModelDb();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(PORT_MODEL_STORE_NAME, 'readwrite');
+    tx.objectStore(PORT_MODEL_STORE_NAME).put(data, portId);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function removePortModelData(portId) {
+  const db = await openPortModelDb();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(PORT_MODEL_STORE_NAME, 'readwrite');
+    tx.objectStore(PORT_MODEL_STORE_NAME).delete(portId);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
 }
 
 // -------------------------------------------------------------
