@@ -920,13 +920,24 @@ const ThrusterSolver = {
   // 収まるよう、target.positionまでの実距離でクランプする
   // （距離がオフセット未満なら仕想WPはtarget.positionそのものに
   //近づき、艦の後方へ回り込むことはない）。
+  //
+  // v54: approachAxisWorldは「艦(手前側)から目的地へ向かう方向」
+  // （v52で確定した符号規約）なので、「手前」の点を得るには
+  // target.positionからapproachAxisWorldの逆方向（-approachAxisWorld）
+  // へオフセットする必要がある。以前は+approachAxisWorldのまま
+  // 加算しており、進入軸を目的地からさらに奥へ延長した点（艦から見て
+  // 目的地の向こう側）を仕想WPにしてしまっていた。実ログでyaw=80°の
+  // targetに対し、艦が一度target.positionのz座標(-4000)を超えて
+  // z=-4534付近まで飛んでから戻ってくる異常な軌道を確認して特定した。
+  // 同じ考え方の_computeAvoidanceWaypoint（直後の関数）は元々
+  // 正しく減算していたため、そちらを基準に符号を合わせた。
   // -----------------------------------------------------------
   _computeVirtualWaypoint(target, approachAxisWorld, distance, params) {
     const offset = Math.min(params.VIRTUAL_WAYPOINT_OFFSET, distance);
     return {
-      x: target.position.x + approachAxisWorld.x * offset,
-      y: target.position.y + approachAxisWorld.y * offset,
-      z: target.position.z + approachAxisWorld.z * offset,
+      x: target.position.x - approachAxisWorld.x * offset,
+      y: target.position.y - approachAxisWorld.y * offset,
+      z: target.position.z - approachAxisWorld.z * offset,
     };
   },
 
