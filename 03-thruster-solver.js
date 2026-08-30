@@ -666,6 +666,15 @@ const ThrusterSolver = {
   DOCKING_ROLL_FULL_TORQUE_ANGLE: 1.05, // roll誤差(rad)がこれ以上でフルトルク（pitch/yawの遠方用と同じ緩さ、約60°）
   DOCKING_ROLL_MIN_ANGLE: 0.0001, // これ未満のroll誤差は補正不要（DOCKING_HEADING_MIN_ANGLEと同じ理由）
 
+  // v58: _runApproachPhaseの船首目標(steerTarget)が艦の現在位置に
+  // 極端に近づいた（distanceがVIRTUAL_WAYPOINT_OFFSETに近く、
+  // virtualWPの進入軸方向の位置が艦とほぼ一致する）場合に、
+  // toSteerの向きをlateral由来のノイズに支配されるままにせず、
+  // approachAxisWorld方向へブレンドして安定させるための閾値半径。
+  // AVOIDANCE_RADIUS(250)より十分小さく、実測ログで暴れていた
+  // lateralの振動幅(0.02〜0.24)より大きい値にしてある。
+  HEADING_STEER_STABILIZE_RADIUS: 5.0,
+
   // brake300/brake250/final_approach専用のフルトルク角度閾値。
   // 通常フェーズ用（約60°、遠方でも主機が働くよう緩めた値）より
   // 厳しくし、「近距離ではまず姿勢をきっちり合わせる」動きを
@@ -712,6 +721,45 @@ const ThrusterSolver = {
 
     if (autoDockingOn) {
       return this._buildDesiredForAutoDocking(input, ship, dt);
+    }
+
+    // v58: 手動操船中もログに1行残す（要望「ログに…手動操船のステータスを
+    // 追加して」対応）。従来はこのデバッグログが_buildDesiredForAutoDocking
+    // 内でしか書かれておらず、自動操船が実際に動いている間の行しか
+    // 存在しなかったため、「艦がグルグルしたのは自動操船中だったのか
+    // 手動操船中だったのか」がログだけからは判別できなかった。ここでは
+    // phase/distance/alongDist/lateralなど自動操船固有の物理量を
+    // 意味もなく埋めることはせず、manualControl:trueと目的地の有無・
+    // 現在の艦の位置・速度・角速度だけを記録する（自動操船中の行との
+    // 判別はmanualControl列で行う）。
+    if (ship) {
+      this._logDockingFrame({
+        t: (typeof performance !== 'undefined' ? performance.now() : Date.now()),
+        phase: null,
+        prevPhase: ship._dockingPhasePrevForLog || null,
+        distance: null,
+        alongDist: null,
+        lateral: null,
+        speed: vecLength(ship.velocity),
+        maxLinearDecel: this._estimateMaxLinearDecel(ship),
+        posX: ship.position.x,
+        posY: ship.position.y,
+        posZ: ship.position.z,
+        velX: ship.velocity.x,
+        velY: ship.velocity.y,
+        velZ: ship.velocity.z,
+        returnTargetAlong: null,
+        returnTargetDist: null,
+        closingSpeedToReturnTarget: null,
+        dockingBrake300Done: !!ship._dockingBrake300Done,
+        meetsArrivalCriteria: false,
+        angSpeed: vecLength(ship.angularVelocity),
+        manualControl: true,
+        targetPosX: State.dockingTarget ? State.dockingTarget.position.x : null,
+        targetPosY: State.dockingTarget ? State.dockingTarget.position.y : null,
+        targetPosZ: State.dockingTarget ? State.dockingTarget.position.z : null,
+      });
+      ship._dockingPhasePrevForLog = null;
     }
 
     // 並進: ローカル座標系（前方=-Z、右=+X、上=+Y）
@@ -1621,6 +1669,17 @@ const ThrusterSolver = {
         dockingBrake300Done: !!ship._dockingBrake300Done,
         meetsArrivalCriteria: this._meetsArrivalCriteria(ship, target, params),
         angSpeed: vecLength(ship.angularVelocity),
+        // v58: 要望「ログに、自動航行開始の目的地と、手動操船の
+        // ステータスを追加して」対応。manualControl:falseで自動操船
+        // 中の行であることを示し、targetPos*で「この行の時点で
+        // 自動航行が目指している目的地」（=State.dockingTarget.position）
+        // を毎フレーム記録する。目的地を飛行中に変更した場合も
+        // その変化がログから追えるよう、開始時の一回きりではなく
+        // 毎フレームの値を記録する方式にした。
+        manualControl: false,
+        targetPosX: target.position.x,
+        targetPosY: target.position.y,
+        targetPosZ: target.position.z,
       });
       ship._dockingPhasePrevForLog = phase;
     }
@@ -1831,7 +1890,46 @@ const ThrusterSolver = {
       z: steerTarget.z - ship.position.z,
     };
     const steerDist = vecLength(toSteer);
-    const headingTargetWorld = steerDist > 1e-4 ? vecScale(toSteer, 1 / steerDist) : approachAxisWorld;
+    // v58: steerDistがHEADING_STEER_STABILIZE_RADIUS未満のときは、
+    // toSteerの向きをそのまま船首目標にしない。virtualWPは
+    // 「target.positionからapproachAxisWorld方向にoffset=min(
+    // VIRTUAL_WAYPOINT_OFFSET, distance)だけ引いた点」であり、
+    // distanceがVIRTUAL_WAYPOINT_OFFSET(500)に近いadjust突入直後は
+    // offset≈distanceとなって、virtualWPの進入軸方向の位置が艦の
+    // 現在位置とほぼ一致してしまう。この状態でtoSteerを取ると、
+    // 進入軸方向の成分がほぼ相殺され、残るのはlateral（横ズレ）に
+    // 由来するサブメートル単位の微小成分だけになる。lateralはこの
+    // 距離帯で0.02〜0.24程度の範囲を絶えず揺らいでおり、その向きは
+    // ほぼノイズなので、toSteerの向き（＝船首目標）がフレームごとに
+    // 大きく暴れ、姿勢制御が実際には存在しない「方向の変化」を
+    // 追いかけて艦がグルグル回り続ける不具合になっていた（実測ログで
+    // distance/alongDistが473.3〜473.8にほぼ張り付いたまま、lateralは
+    // 0.02〜0.24の間で振動し続け、angSpeedが1〜3.5rad/sの高い値で
+    // 張り付いていたことを確認した）。
+    // 対応: steerDistがHEADING_STEER_STABILIZE_RADIUS未満の間は、
+    // 船首目標をapproachAxisWorld（進入軸方向）とtoSteerの向きとで
+    // steerDistに応じて線形ブレンドする。steerDist=0でapproachAxisWorld
+    // 100%、steerDist=HEADING_STEER_STABILIZE_RADIUSでtoSteerの向き
+    // 100%になり、境界での不連続なジャンプを避けつつ、目標点に
+    // 極端に近い（＝方向がノイズ支配になる）場面でだけ安定した
+    // 進入軸方向を優先させる。並進側（_applyApproachForce/
+    // _applySettlingForce）の挙動には影響しない。
+    let headingTargetWorld;
+    if (steerDist > this.HEADING_STEER_STABILIZE_RADIUS) {
+      headingTargetWorld = vecScale(toSteer, 1 / steerDist);
+    } else if (steerDist > 1e-4) {
+      const steerDirRaw = vecScale(toSteer, 1 / steerDist);
+      const blend = steerDist / this.HEADING_STEER_STABILIZE_RADIUS; // 0..1, toSteerの向きの寄与
+      const blended = {
+        x: approachAxisWorld.x * (1 - blend) + steerDirRaw.x * blend,
+        y: approachAxisWorld.y * (1 - blend) + steerDirRaw.y * blend,
+        z: approachAxisWorld.z * (1 - blend) + steerDirRaw.z * blend,
+      };
+      const blendedLen = vecLength(blended);
+      headingTargetWorld = blendedLen > 1e-6 ? vecScale(blended, 1 / blendedLen) : approachAxisWorld;
+    } else {
+      headingTargetWorld = approachAxisWorld;
+    }
 
     const fullTorqueAngle = this._computeHeadingFullTorqueAngle(distance, params);
     this._applyHeadingTorque(ship, headingTargetWorld, fullTorqueAngle, desiredTorque);

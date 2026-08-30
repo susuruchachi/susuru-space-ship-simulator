@@ -83,7 +83,7 @@ const HUD = {
   _downloadDockingLog() {
     const log = ThrusterSolver.getDockingLog();
     if (!log || log.length === 0) {
-      alert('ドッキングログが空です（自動ドッキングを有効にして少し飛んでから押してください）');
+      alert('ドッキングログが空です（自動ドッキングを有効にする、または手動操船で少し飛んでから押してください）');
       return;
     }
 

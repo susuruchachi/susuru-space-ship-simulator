@@ -572,6 +572,76 @@ v50以降、変更のたびにここへ追記していく想定です（それ�
 
 ---
 
+## v58 - 2026-08-30
+
+### 修正: adjust突入直後、艦が仮想ウェイポイント付近で姿勢をグルグルさせて制御を失う
+
+- **症状**: v57の対応後も、distance≈500弱（adjust突入直後）付近で艦が
+  ほぼ前進しなくなり、姿勢だけが激しく回転し続けて制御不能に見える。
+  始点・目的地はv55/v57修正時と同じ。
+- **原因**: `_runApproachPhase`の船首目標は`steerTarget`（通常時は
+  `virtualWP`）への方向ベクトル`toSteer`をそのまま使っていた。
+  `_computeVirtualWaypoint`は`target.position`から進入軸方向に
+  `offset=min(VIRTUAL_WAYPOINT_OFFSET(500), distance)`だけ引いた点を
+  返すため、distanceがVIRTUAL_WAYPOINT_OFFSETに近いadjust突入直後は
+  `offset≈distance`となり、virtualWPの進入軸方向の位置が艦の現在
+  位置とほぼ一致してしまう。この状態で`toSteer`を取ると進入軸方向の
+  成分がほぼ相殺され、残るのはlateral（横ズレ）由来のサブメートル
+  単位の微小成分だけになる。アップロードされたログでは、この距離帯で
+  distance/alongDistが473.3〜473.8にほぼ張り付いたまま、lateralが
+  0.02〜0.24の範囲で絶えず振動しており、その振動の向き（艦から見た
+  横ズレの方向）自体は物理的な意味を持つが、大きさが小さすぎて
+  フレームごとの向きの変化に対して`_applyHeadingTorque`が過敏に
+  反応し、angSpeedが1〜3.5rad/sの高い値で張り付き続けていたことを
+  確認した。姿勢制御が実際には存在しない「方向の変化」を追いかけて
+  グルグル回り続け、その間まともに前進できないため、結果として
+  v57で解消したはずのdistance≈500付近の停滞が別の形で再発していた。
+- **対応**: `03-thruster-solver.js`に新しい定数
+  `HEADING_STEER_STABILIZE_RADIUS`(5.0)を追加。`_runApproachPhase`で
+  `steerDist`（steerTargetまでの距離）がこの半径未満のときは、
+  船首目標を`toSteer`の向きそのままにせず、`approachAxisWorld`
+  （進入軸方向、steerDist=0で100%）と`toSteer`の向き（steerDist=
+  HEADING_STEER_STABILIZE_RADIUSで100%）を線形ブレンドした方向に
+  差し替えた。境界での不連続なジャンプを避けつつ、目標点に極端に
+  近い（＝方向がノイズ支配になる）場面でだけ安定した進入軸方向を
+  優先させる。並進側（`_applyApproachForce`/`_applySettlingForce`）
+  の挙動には影響しない。
+
+### 追加: ドッキングログに目的地と手動操船ステータスを追加
+
+- **要望**: ログに、自動航行開始の目的地と、手動操船のステータスを
+  追加してほしい。
+- **経緯**: 従来のドッキングログ（`ThrusterSolver._dockingLog`）は
+  `_buildDesiredForAutoDocking`内でしか書き込まれておらず、自動操船
+  （`ship.autoDockingEnabled`）が実際に動いている間の行しか存在
+  しなかった。そのため「艦がグルグルしたのは自動操船中だったのか
+  手動操船中だったのか」がログだけからは判別できなかった。
+- **対応**:
+  - `buildDesiredFromInput`の手動操船側（自動操船が無効、または
+    目的地未設定のときのフォールバック分岐）にもログ出力を追加。
+    phase/distance/alongDist/lateralなど自動操船固有の物理量は
+    意味を持たないため`null`のまま記録し、`manualControl: true`と
+    艦の位置・速度・角速度、（目的地が設定済みであれば）その座標
+    だけを記録する。
+  - 自動操船側の既存ログ呼び出しに`manualControl: false`と、
+    `targetPosX/Y/Z`（`State.dockingTarget.position`、＝この行の
+    時点で自動航行が目指している目的地の座標）を追加。目的地を
+    飛行中に変更した場合の変化も追えるよう、開始時の一回きりでは
+    なく毎フレームの値を記録する方式にした。
+  - 両方の呼び出しで記録するキーの集合を完全に一致させ（`t`,
+    `phase`, `prevPhase`, `distance`, `alongDist`, `lateral`,
+    `speed`, `maxLinearDecel`, `posX/Y/Z`, `velX/Y/Z`,
+    `returnTargetAlong`, `returnTargetDist`,
+    `closingSpeedToReturnTarget`, `dockingBrake300Done`,
+    `meetsArrivalCriteria`, `angSpeed`, `manualControl`,
+    `targetPosX/Y/Z`の24項目）、CSVダウンロード側
+    （`06-hud.js`の`_downloadDockingLog`、`Object.keys(log[0])`で
+    ヘッダーを決める方式）で列がずれないようにした。
+  - ログが空のときのアラート文言も、手動操船だけでもログが残る
+    ようになったことに合わせて更新。
+
+---
+
 ## v50より前
 
 このファイルが存在する前の変更履歴は、各JSファイルの冒頭・該当箇所の
