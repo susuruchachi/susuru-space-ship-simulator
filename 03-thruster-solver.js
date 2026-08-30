@@ -1806,6 +1806,43 @@ const ThrusterSolver = {
     const stoppingBasisDistance =
       stopAtDistance !== undefined ? Math.max(0, distance - stopAtDistance) : distance;
     this._applyApproachForce(ship, steerTarget, maxBrakingDistance, desiredForce, stoppingBasisDistance);
+
+    // v56: _applyApproachForceの横滑りブレーキ(lateralVel成分の除去)
+    // だけでは、進入軸に対する横方向の「位置ズレ」自体を縮める力には
+    // ならない（艦が既にsteerTarget方向へまっすぐ飛んでいれば
+    // lateralSpeedはほぼ0になり、ブレーキは何もしないため）。この
+    // ため従来はapproach/adjust中、横方向の位置ズレ(lateral)がほぼ
+    // 縮まらず、brake300へ到達してdistanceが止まった後になって
+    // ようやく_applySettlingForce（brake300/250専用の横方向収束制御）
+    // が効き出す、という「distance=ZONE_BRAKE300の停止位置にいないと
+    // 軸合わせがほとんど進まない」不具合になっていた（実測ログで、
+    // adjust中はdistanceが500→300まで進む間にlateralが10.7→8.4程度
+    // までしか縮まらず、brake300に入った直後の短時間でほぼ0まで
+    // 収束していたことを確認した）。
+    // 対応: 進入軸上、艦の現在alongDist位置に対応する点を横方向のみの
+    // 目標点とし、_applySettlingForceと同じ収束制御を弱めのゲインで
+    // 常時かける。前後方向はstoppingBasisDistance側の速度制御が
+    // 別途握っているため、ここでは横方向成分のみを目的とする
+    // （_applySettlingForce自体はローカル速度の全軸を対象にするが、
+    // 目標点を「艦の現在along位置・横方向だけtargetに寄せた点」に
+    // することで、前後方向の目標速度は艦の現在位置=0付近になり、
+    // 前後方向制御への干渉は小さい）。
+    const toShipForLateral = {
+      x: ship.position.x - target.position.x,
+      y: ship.position.y - target.position.y,
+      z: ship.position.z - target.position.z,
+    };
+    const shipAlongForLateral = vecDot(toShipForLateral, approachAxisWorld);
+    const lateralOnlyTargetWorld = {
+      x: ship.position.x - (toShipForLateral.x - approachAxisWorld.x * shipAlongForLateral),
+      y: ship.position.y - (toShipForLateral.y - approachAxisWorld.y * shipAlongForLateral),
+      z: ship.position.z - (toShipForLateral.z - approachAxisWorld.z * shipAlongForLateral),
+    };
+    this._applySettlingForce(ship, lateralOnlyTargetWorld, desiredForce, this.ADJUST_LATERAL_SETTLE_GAIN);
+
+    desiredForce.x = clamp(desiredForce.x, -1, 1);
+    desiredForce.y = clamp(desiredForce.y, -1, 1);
+    desiredForce.z = clamp(desiredForce.z, -1, 1);
   },
 
   // フルトルクになる角度閾値を、ZONE_APPROACH_START→ZONE_BRAKE300の
@@ -1850,8 +1887,13 @@ const ThrusterSolver = {
   DOCKING_SETTLE_APPROACH_GAIN: 0.5, // 距離に対する目標速度の比例ゲイン(1/s)
   DOCKING_SETTLE_MAX_SPEED: 15.0,    // 目標速度の上限（遠距離でも暴走しないため）
   DOCKING_SETTLE_FULL_THRUST_ERROR: 1.0, // 速度誤差がこれ以上でフル推力（微速域用の分母）
+  // v56: approach/adjustフェーズで横方向の位置ズレを常時弱く補正する
+  // 際に使うゲイン。DOCKING_SETTLE_APPROACH_GAIN(brake300/250の
+  // 「完全静止」用、強め)より弱くし、cruise/approach/adjustの主目的
+  // である前後方向の巡航・減速制御を横方向の補正で乱さないようにする。
+  ADJUST_LATERAL_SETTLE_GAIN: 0.15,
 
-  _applySettlingForce(ship, targetPosWorld, desiredForce) {
+  _applySettlingForce(ship, targetPosWorld, desiredForce, gainOverride) {
     const toTargetWorld = {
       x: targetPosWorld.x - ship.position.x,
       y: targetPosWorld.y - ship.position.y,
@@ -1861,7 +1903,8 @@ const ThrusterSolver = {
     if (distance <= this.DOCKING_POSITION_MIN_DISTANCE) return;
 
     const dirWorld = vecScale(toTargetWorld, 1 / distance);
-    const targetSpeed = Math.min(this.DOCKING_SETTLE_MAX_SPEED, distance * this.DOCKING_SETTLE_APPROACH_GAIN);
+    const gain = gainOverride !== undefined ? gainOverride : this.DOCKING_SETTLE_APPROACH_GAIN;
+    const targetSpeed = Math.min(this.DOCKING_SETTLE_MAX_SPEED, distance * gain);
     const targetVelWorld = vecScale(dirWorld, targetSpeed);
 
     const targetVelLocal = rotateVecByQuat(targetVelWorld, conjugateQuat(ship.quaternion));
