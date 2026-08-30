@@ -5,7 +5,7 @@
 
 // v27: 画面右下のバージョン表示・<title>で共通して使うバージョン名。
 // リリースのたびにここだけ書き換えれば全画面に反映される。
-const GAME_VERSION = 'v61';
+const GAME_VERSION = 'v62';
 
 // -------------------------------------------------------------
 // 速度制限モード
@@ -402,9 +402,10 @@ function savePersistedSettings(partial) {
 // -------------------------------------------------------------
 // 入港（オートドッキング）目的地の永続化
 //
-// HUDの「ここを目的地として保存」ボタンで、現在の艦位置・姿勢を
-// 目的地として保存する。艦種は問わない単一の目的地のみ保持する
-// （v08時点では複数目的地の管理は行わない）。
+// HUDの「ここを目的地として保存」ボタンや、ドッキングポート設定画面
+// （port-builder.html）の「使用するポートに設定」で、現在アクティブな
+// 目的地（艦種は問わない単一の値）を保存する。複数ポートの一覧管理は
+// 下のDOCKING_PORTS_STORAGE_KEY側（v62で追加）で行う。
 // -------------------------------------------------------------
 const DOCKING_TARGET_STORAGE_KEY = 'spaceSimDockingTarget';
 
@@ -429,6 +430,64 @@ function saveDockingTarget(target) {
     console.warn('入港目的地の保存に失敗しました。', e);
     return false;
   }
+}
+
+// -------------------------------------------------------------
+// v62: 複数ドッキングポートの管理（port-builder.html用）
+//
+// 上のDOCKING_TARGET_STORAGE_KEYは「今まさに自動操船が目指す先」
+// という単一のアクティブ値（HUDのその場保存・座標直接入力、ゲーム内
+// オートドッキングロジックが直接参照する値）で、これは変更していない。
+// こちらはその手前の段階、「事前にいくつも作っておいて、使うときに
+// 選ぶ」ための名前付きポート一覧を扱う。ポート一覧から1つ選んで
+// 「使用するポートに設定」すると、上のsaveDockingTarget/
+// State.dockingTargetへ反映される（＝一覧側は保存庫、アクティブ値は
+// 従来通りの仕組みをそのまま利用する橋渡し）。
+//
+// 保存形式（localStorage、キー: spaceSimDockingPorts）:
+//   [
+//     {
+//       id: string,               // crypto.randomUUID()相当の一意ID
+//       name: string,             // 表示名（ユーザー入力）
+//       position: { x, y, z },
+//       quaternion: { x, y, z, w },
+//       createdAt: number,        // Date.now()
+//       updatedAt: number,
+//     },
+//     ...
+//   ]
+// -------------------------------------------------------------
+const DOCKING_PORTS_STORAGE_KEY = 'spaceSimDockingPorts';
+
+function loadDockingPorts() {
+  try {
+    const raw = localStorage.getItem(DOCKING_PORTS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((p) => p && p.id && p.position && p.quaternion);
+  } catch (e) {
+    console.warn('ドッキングポート一覧の読み込みに失敗しました。', e);
+    return [];
+  }
+}
+
+function saveDockingPorts(ports) {
+  try {
+    localStorage.setItem(DOCKING_PORTS_STORAGE_KEY, JSON.stringify(ports));
+    return true;
+  } catch (e) {
+    console.warn('ドッキングポート一覧の保存に失敗しました。', e);
+    return false;
+  }
+}
+
+function generateDockingPortId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  // crypto.randomUUID非対応環境向けの簡易フォールバック
+  return `port-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 // -------------------------------------------------------------
@@ -687,6 +746,49 @@ function normalizeQuat(q) {
   const len = Math.sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
   if (len === 0) return { x: 0, y: 0, z: 0, w: 1 };
   return { x: q.x / len, y: q.y / len, z: q.z / len, w: q.w / len };
+}
+
+// v62: 微小角速度(rad, 各軸)から近似クォータニオンを生成。
+// 従来は05-ship-controller.js（index.html/settings.html系のみ読み込み）
+// にのみ存在したが、ドッキングポート設定画面（port-builder.html、
+// 05-ship-controller.jsを読み込んでいない）でも姿勢の度数⇔クォータニオン
+// 変換が必要になったため、axisAngleQuat等と同じくこちらへ移設した
+// （05-ship-controller.js側の同名定義は削除済み、定義箇所はここ一箇所のみ）。
+function eulerToQuatSmall(wx, wy, wz) {
+  // 小角近似ではなく正確に軸ごとの回転を合成（順序: pitch -> yaw -> roll）
+  const qx = axisAngleQuat({ x: 1, y: 0, z: 0 }, wx);
+  const qy = axisAngleQuat({ x: 0, y: 1, z: 0 }, wy);
+  const qz = axisAngleQuat({ x: 0, y: 0, z: 1 }, wz);
+
+  return multiplyQuat(multiplyQuat(qx, qy), qz);
+}
+
+// クォータニオン -> オイラー角（デバッグ表示・座標編集UI用）。
+// 回転順序はeulerToQuatSmallと対になる pitch(X) -> yaw(Y) -> roll(Z)
+// のTait-Bryan角として抽出する。ジンバルロック（pitchが±90度付近）
+// 時はroll/yawが不定になるため、その場合はrollを0に固定してyaw側に
+// 寄せる一般的な回避策を採る（表示用途のため厳密な連続性は求めない）。
+function quatToEulerDegrees(q) {
+  const { x, y, z, w } = q;
+
+  // pitch (X軸回転)
+  const sinPitch = 2 * (w * x - y * z);
+  const pitch = Math.abs(sinPitch) >= 1
+    ? Math.sign(sinPitch) * (Math.PI / 2)
+    : Math.asin(sinPitch);
+
+  let yaw, roll;
+  if (Math.abs(sinPitch) >= 0.999999) {
+    // ジンバルロック付近: rollを0に固定してyawへ寄せる
+    yaw = Math.atan2(-2 * (x * z - w * y), 1 - 2 * (y * y + z * z));
+    roll = 0;
+  } else {
+    yaw = Math.atan2(2 * (w * y + x * z), 1 - 2 * (x * x + y * y));
+    roll = Math.atan2(2 * (w * z + x * y), 1 - 2 * (x * x + z * z));
+  }
+
+  const toDeg = (rad) => rad * (180 / Math.PI);
+  return { pitch: toDeg(pitch), yaw: toDeg(yaw), roll: toDeg(roll) };
 }
 
 // -------------------------------------------------------------

@@ -2352,7 +2352,19 @@ const ThrusterSolver = {
     const localVel = rotateVecByQuat(ship.velocity, conjugateQuat(ship.quaternion));
     const targetVelLocal = rotateVecByQuat(targetVelWorld, conjugateQuat(ship.quaternion));
     const zError = targetVelLocal.z - localVel.z;
-    const thrustStrength = Math.min(1, Math.abs(zError) / this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR);
+    // v61-fix1: 「逆噴射が速度プロファイルに全く追いつかない」不具合を修正。
+    // targetSpeed自体はmaxDecelから正しく逆算されているが、それを実現する
+    // 推力側がFORWARD_VELOCITY_FULL_THROTTLE_ERROR(40.0)という汎用の
+    // マニュアル操作向け分母を流用しており、tunnel区間で生じる速度誤差
+    // (実測ログでは最大でも18前後)はこの40に対して常に小さく、
+    // thrustStrengthが0.5以下に頭打ちになって艦の実際の制動能力
+    // (maxDecel)を全く使い切れていなかった（v49で同種の問題が
+    // brake300/brake250側で見つかり専用分母に切り替えた経緯があるのと
+    // 同じ原因）。ここも艦の実際の制動能力(maxDecel)を基準にした専用の
+    // 分母に切り替える：1フレーム(dt)でmaxDecel分の速度差を埋めきる
+    // 量の誤差でフルスロットルになるようにし、それ未満は比例して弱める。
+    const tunnelFullThrottleError = Math.max(1e-6, maxDecel * dt);
+    const thrustStrength = Math.min(1, Math.abs(zError) / tunnelFullThrottleError);
     desiredForce.z = Math.sign(zError) * thrustStrength;
     // desiredForce.x/yは0のまま（並進禁止）。
   },
@@ -2370,7 +2382,7 @@ const ThrusterSolver = {
   // 主機（奥方向への推力）を使ってOVERSHOOT_REAPPROACH_DISTANCEまで
   // 確実に進めるようにする。
   // -----------------------------------------------------------
-  DOCKING_OVERSHOOT_MIN_SPEED: 5.0, // 奥方向速度がこれ未満なら主機で下限速度まで押し出す
+  DOCKING_OVERSHOOT_MIN_SPEED: 20.0, // 奥方向速度がこれ未満なら主機で下限速度まで押し出す
 
   _runOvershootPhase(ship, target, approachAxisWorld, params, desiredForce, desiredTorque, dt) {
     ship.quaternion.x = target.quaternion.x;

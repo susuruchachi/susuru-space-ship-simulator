@@ -70,46 +70,6 @@ const ShipController = {
 //
 // v61: axisAngleQuat/multiplyQuat/normalizeQuatは01-state-and-config.js
 // （両画面共通の基盤ファイル）へ移設したため、ここでの重複定義は削除。
+// v62: eulerToQuatSmall/quatToEulerDegreesも同様の理由（port-builder.html
+// でも必要になったため）で01-state-and-config.jsへ移設し、ここでの定義は削除。
 // -----------------------------------------------------------
-
-// 微小角速度(rad, 各軸)から近似クォータニオンを生成
-function eulerToQuatSmall(wx, wy, wz) {
-  const halfX = wx * 0.5;
-  const halfY = wy * 0.5;
-  const halfZ = wz * 0.5;
-
-  // 小角近似ではなく正確に軸ごとの回転を合成（順序: pitch -> yaw -> roll）
-  const qx = axisAngleQuat({ x: 1, y: 0, z: 0 }, wx);
-  const qy = axisAngleQuat({ x: 0, y: 1, z: 0 }, wy);
-  const qz = axisAngleQuat({ x: 0, y: 0, z: 1 }, wz);
-
-  return multiplyQuat(multiplyQuat(qx, qy), qz);
-}
-
-// クォータニオン -> オイラー角（デバッグ表示用、06-hud.jsから使用）。
-// 回転順序はeulerToQuatSmallと対になる pitch(X) -> yaw(Y) -> roll(Z)
-// のTait-Bryan角として抽出する。ジンバルロック（pitchが±90度付近）
-// 時はroll/yawが不定になるため、その場合はrollを0に固定してyaw側に
-// 寄せる一般的な回避策を採る（表示用途のため厳密な連続性は求めない）。
-function quatToEulerDegrees(q) {
-  const { x, y, z, w } = q;
-
-  // pitch (X軸回転)
-  const sinPitch = 2 * (w * x - y * z);
-  const pitch = Math.abs(sinPitch) >= 1
-    ? Math.sign(sinPitch) * (Math.PI / 2)
-    : Math.asin(sinPitch);
-
-  let yaw, roll;
-  if (Math.abs(sinPitch) >= 0.999999) {
-    // ジンバルロック付近: rollを0に固定してyawへ寄せる
-    yaw = Math.atan2(-2 * (x * z - w * y), 1 - 2 * (y * y + z * z));
-    roll = 0;
-  } else {
-    yaw = Math.atan2(2 * (w * y + x * z), 1 - 2 * (x * x + y * y));
-    roll = Math.atan2(2 * (w * z + x * y), 1 - 2 * (x * x + z * z));
-  }
-
-  const toDeg = (rad) => rad * (180 / Math.PI);
-  return { pitch: toDeg(pitch), yaw: toDeg(yaw), roll: toDeg(roll) };
-}
