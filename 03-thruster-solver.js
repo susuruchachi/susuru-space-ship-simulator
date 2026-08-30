@@ -868,6 +868,11 @@ const ThrusterSolver = {
     ARRIVAL_SPEED: 0.5,
     ARRIVAL_HEADING_ERROR_DEG: 0.1,   // 各軸（pitch/yaw由来のheading, roll）誤差の許容(度)
     ARRIVAL_ANGULAR_SPEED: 0.01,      // これ未満で角速度を強制的に0へスナップ
+    // v53: 速度条件(ARRIVAL_SPEED)だけで入港固定すると、戦艦級のような
+    // 重い艦は制動距離が長いため、目的地までまだ距離が残っている状態で
+    // 速度だけ0.5を切って停止（固定）してしまう不具合があった。速度に
+    // 加えて、目的地までの直線距離が十分小さいことも必須にする。
+    ARRIVAL_DISTANCE: 0.1,
 
     // --- オーバーシュート・再アプローチ ---
     OVERSHOOT_REAPPROACH_DISTANCE: 300, // 奥側でこの距離離れたら再アプローチ（=通常アプローチへ合流）発動
@@ -1588,9 +1593,17 @@ const ThrusterSolver = {
     // 自体にdistanceを含めない理由は同関数のコメント参照（brake250→
     // tunnel遷移判定とも共用しており、あちらにdistance条件を混ぜると
     // 別の不具合が再発する）。
+    // v53: ARRIVAL_SPEED（速度条件）だけでなく、目的地までの実距離が
+    // ARRIVAL_DISTANCE未満であることも必須にする。戦艦級などの重い艦は
+    // 制動距離が長く、distance<=ZONE_FINAL_APPROACH（トンネル内）の
+    // どこかで速度だけ先に0.5を切ってしまい、まだ距離が残っている
+    // 位置で固定されてしまう不具合があったため。_meetsArrivalCriteria
+    // 自体にはdistanceを混ぜない（brake250→tunnel遷移判定と共用のため、
+    // 同関数のコメント参照）。
     if (
       phase === 'tunnel' &&
       distance <= params.ZONE_FINAL_APPROACH &&
+      distance <= params.ARRIVAL_DISTANCE &&
       this._meetsArrivalCriteria(ship, target, params)
     ) {
       this._lockShipAtTarget(ship, target);
