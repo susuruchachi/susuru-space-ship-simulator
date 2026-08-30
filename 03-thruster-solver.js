@@ -928,7 +928,17 @@ const ThrusterSolver = {
     // 参照）。旧定数は「トンネル突入直後の190分は速度上限なしで
     // 巡航し、残り10でのみ急減速する」という意図しない駆け込み
     // ブレーキを生んでいたため。
-    FINAL_APPROACH_ENTRY_SPEED: 3.0,     // 距離200地点での目標前進速度
+    // v60: 「最終進入が設計通りだが遅い」という要望を受け、固定値の
+    // FINAL_APPROACH_ENTRY_SPEEDは廃止。代わりに、艦の実際の制動
+    // 能力から「残り距離FINAL_APPROACH_STOPPING_DISTANCEで止まりきれる
+    // 速度」を毎フレーム逆算する方式にした（_runTunnelPhase参照）。
+    // 艦種（重さ）によって自動的に速度が変わり、軽い艦ほど速く、
+    // 重い艦ほど（安全に停船できる範囲で）遅くなる。
+    FINAL_APPROACH_STOPPING_DISTANCE: 50, // 距離200地点でのエントリー速度の基準: 「残りこの距離で止まりきれる速度」を上限にする
+    // v60-fix1: 上記の逆算値だけだと、制動能力の高い艦種では
+    // エントリー速度が理論上かなり大きくなりうる（例: maxLinearDecel
+    // ≈16.25の艦で約37）ため、絶対上限として追加。
+    FINAL_APPROACH_ENTRY_SPEED_CAP: 20,
 
     // --- 入港（固定）判定基準 ---
     ARRIVAL_SPEED: 0.5,
@@ -2274,12 +2284,40 @@ const ThrusterSolver = {
     // 減速基準距離として使うことで、トンネル突入直後から停止点まで
     // 一貫して減速し続けるプロファイルにする。
     // v(d) = ENTRY_SPEED * sqrt(d / ZONE_FINAL_APPROACH) （d: 残り距離）
+    //
+    // v60: 「最終進入が設計通りだが遅い、距離50の範囲で停船しきれる
+    // 速度にしたい（船の重さで変わってよい）」という要望を受け、
+    // ENTRY_SPEEDを固定値(3.0)ではなく、艦の実際の制動能力
+    // (maxDecel)から「残り距離FINAL_APPROACH_STOPPING_DISTANCE(50)
+    // で止まりきれる速度」として毎フレーム動的に算出する方式に変更。
+    // _speedForBrakingDistanceは既存のBRAKE_SAFETY_MARGIN(0.85)を
+    // 内部で適用しているため、艦種によらず「距離50で確実に止まれる
+    // 範囲でできるだけ速く」という要件をそのまま満たす。艦が重く
+    // maxDecelが小さいほどentrySpeedも自動的に低くなり、軽い艦は
+    // 自動的に速くなる。
     const brakingBasisDistance = Math.max(1e-6, params.ZONE_FINAL_APPROACH);
-    const profileSpeed =
-      params.FINAL_APPROACH_ENTRY_SPEED * Math.sqrt(Math.min(1, distance / brakingBasisDistance));
+    // v60-fix1: 「decel=16.25の艦だとentrySpeedが約37まで出るのは
+    // 速すぎる、20を絶対上限にしたい」との要望を受け、理論上の
+    // entrySpeed（制動能力からの逆算値）にFINAL_APPROACH_ENTRY_SPEED_CAP
+    // (20)による上限を追加。重い艦（maxDecelが小さい艦）はこれまで
+    // 通りFINAL_APPROACH_STOPPING_DISTANCEベースの逆算値がそのまま
+    // 効く一方、軽い艦・高出力な艦種で逆算値が20を超える場合は
+    // 20で頭打ちにする。
+    const entrySpeed = Math.min(
+      this._speedForBrakingDistance(maxDecel, params.FINAL_APPROACH_STOPPING_DISTANCE),
+      params.FINAL_APPROACH_ENTRY_SPEED_CAP
+    );
+    const profileSpeed = entrySpeed * Math.sqrt(Math.min(1, distance / brakingBasisDistance));
     // 単純な線形減速でもよいが、艦の実際の制動能力を無視して間に
     // 合わない可能性を避けるため、艦の制動距離から出せる速度と、
     // 要求プロファイルの小さい方を採用する。
+    // v60: entrySpeed自体が既にmaxDecelから逆算した「距離50で止まれる
+    // 速度」なので、この安全側キャップ(physicalSafeSpeed、残り距離
+    // distanceそのものを基準に同じ式で計算)と理論上は近い値になるが、
+    // distance>50の区間（トンネル入口付近）ではphysicalSafeSpeedの
+    // 方が大きくなるため、実際にprofileSpeed側が効くようになる。
+    // 両者を残しておくことで、万一maxDecelがフレームごとに変動する
+    // 場合でも安全側が優先される構造は維持する。
     const physicalSafeSpeed = this._speedForBrakingDistance(maxDecel, distance);
     const targetSpeed = Math.max(0, Math.min(profileSpeed, physicalSafeSpeed));
 
