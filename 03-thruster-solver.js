@@ -678,6 +678,11 @@ const ThrusterSolver = {
   DOCKING_LATERAL_CORRECTION_FULL_THRUST_OFFSET: 15.0, // 横ずれがこれ以上でフル横方向推力
   DOCKING_POSITION_MIN_DISTANCE: 0.15, // これ未満の距離は接近推力を止める（振動防止、あとは速度制動のみで静止させる）
 
+  // v50-fix6: 一度tunnelに入った後、brake250側の位置収束の余韻による
+  // わずかな揺り戻しでdistanceが250をわずかに超えて押し戻されても
+  // tunnelを維持するための許容マージン。実測ログで確認された揺り戻し
+  // 幅（±0.01オーダー）に十分な余裕を持たせた値。
+  TUNNEL_REENTRY_TOLERANCE: 1.0,
 
   buildDesiredFromInput(input, ship, dt) {
     const boostMult = input.boost ? 1.6 : 1.0;
@@ -1300,6 +1305,21 @@ const ThrusterSolver = {
       // 速度をほぼ使い切る設計のため、一度押し戻されると再びtunnelへ
       // 進む速度が出せなくなっていた）。
       //
+      // v50-fix6: fix5の「distance>200」ガードにも同種の欠陥が
+      // 残っていた。tunnel突入直後、brake250側の位置収束の余韻
+      // （わずかな慣性の揺り戻し）でdistanceがtunnel侵入の瞬間の
+      // 250.0000から一瞬だけ250をわずかに超えて押し戻されることが
+      // 実測ログで確認された（例: 249.995→250.002のような±0.01
+      // オーダーの揺り戻し）。このとき「distance<=ZONE_BRAKE250」の
+      // 条件が真になれず下の通常ゾーン判定（distance>250なら
+      // final_approach）に落ち、tunnelでの前進プロファイルがリセット
+      // される→final_approachの事前減速でまた速度を失う→再度brake250
+      // →tunnelへ、を繰り返す振動が発生していた（実測ログで6サイクル
+      // 以上、速度がわずかずつ増加しながら往復し続けるのを確認済み）。
+      // 一度tunnelに入った後の「250を超えたかどうか」の判定に、実際の
+      // 揺り戻し幅を上回る許容マージンTUNNEL_REENTRY_TOLERANCEを設け、
+      // 250+マージンまではtunnel継続とみなすことで往復振動を防止する。
+      //
       // ただし単純にdistance<=250全体で無条件にtunnelを継続すると、
       // 今度は下のdistance<=ZONE_FINAL_APPROACH(200)ブロックにある
       // 「lateralが大きければbrake250へ差し戻す」チェック（トンネル内は
@@ -1308,13 +1328,13 @@ const ThrusterSolver = {
       // （tunnel突入直後、まだ本来のtunnel判定ブロックの対象外の区間）
       // に限って無条件でtunnelを継続し、distance<=200になったら
       // 下のブロックの詳細判定（lateralチェック込み）にそのまま委ねる。
-      if (distance <= params.ZONE_BRAKE250 && distance > params.ZONE_FINAL_APPROACH) {
+      if (distance <= params.ZONE_BRAKE250 + this.TUNNEL_REENTRY_TOLERANCE && distance > params.ZONE_FINAL_APPROACH) {
         return 'tunnel';
       }
       // distance<=ZONE_FINAL_APPROACH(200)の場合は下の詳細判定
-      // （lateralチェック含む）にフォールスルーする。250を超えて
-      // 戻ってしまった場合（想定外の外力等）も同様に下の通常ゾーン
-      // 判定に委ねる。
+      // （lateralチェック含む）にフォールスルーする。マージンを含めても
+      // なお250を超えて戻ってしまった場合（想定外の外力等）も同様に
+      // 下の通常ゾーン判定に委ねる。
     }
 
     // --- brake300のワンショット継続判定（NO_ENTRY_RADIUSチェックより
