@@ -684,6 +684,12 @@ const ThrusterSolver = {
   // 幅（±0.01オーダー）に十分な余裕を持たせた値。
   TUNNEL_REENTRY_TOLERANCE: 1.0,
 
+  // v52-fix2: brake250側で既に入港基準(_meetsArrivalCriteria)を
+  // 満たした後、前後方向の緩やかな減衰振動でdistanceが250をわずかに
+  // 超えて揺り戻しても、final_approachへ差し戻さずbrake250を維持
+  // するための許容マージン。TUNNEL_REENTRY_TOLERANCEと同じ考え方。
+  BRAKE250_REENTRY_TOLERANCE: 1.0,
+
   buildDesiredFromInput(input, ship, dt) {
     const boostMult = input.boost ? 1.6 : 1.0;
     const autoDampingOn = ship && (State.settings.autoDampingEnabled ?? true);
@@ -850,8 +856,13 @@ const ThrusterSolver = {
     // だけで入港基準を満たしてしまい、距離200からdistance=0へ
     // 一瞬でワープする不具合があった。エントリー速度をARRIVAL_SPEED
     // より十分高くし、トンネル内できちんと前進・減速する区間を確保する。
+    // v52-fix3: 旧FINAL_APPROACH_BRAKING_DISTANCE(10)は削除。
+    // 減速プロファイルの基準距離にはZONE_FINAL_APPROACH
+    // （トンネル全長=200）をそのまま使うようにした（_runTunnelPhase
+    // 参照）。旧定数は「トンネル突入直後の190分は速度上限なしで
+    // 巡航し、残り10でのみ急減速する」という意図しない駆け込み
+    // ブレーキを生んでいたため。
     FINAL_APPROACH_ENTRY_SPEED: 3.0,     // 距離200地点での目標前進速度
-    FINAL_APPROACH_BRAKING_DISTANCE: 10, // トンネル内での制動距離（この距離で速度が0へ収束するよう逆算）
 
     // --- 入港（固定）判定基準 ---
     ARRIVAL_SPEED: 0.5,
@@ -1394,6 +1405,33 @@ const ThrusterSolver = {
     }
 
     if (distance > params.ZONE_BRAKE250) {
+      // v52-fix2: prevPhaseがbrake250で、既に入港基準
+      // (_meetsArrivalCriteria)を満たしている場合は、多少
+      // distanceが250を超えて揺り戻しても無条件にfinal_approachへ
+      // 差し戻さない。
+      //
+      // 症状: distance=250付近で艦の前後方向がわずかに振動
+      // （_applySettlingForceによる減衰振動）している間、姿勢・
+      // 速度・角速度は既に入港基準を満たしているのに、distanceが
+      // 250をわずかに超えるたびにfinal_approachへ差し戻され、
+      // brake250側の「基準を満たすまで留まる」ロジック
+      // （下のブロック、prevPhase==='brake250'時のtunnel遷移判定）
+      // に一度も辿り着けないまま、実質的にfinal_approach⇄brake250
+      // を永久に往復し続けていた。アップロードされた操縦ログ
+      // (docking-log-2026-08-30T07-21-13-972Z.csv)で、
+      // meetsArrivalCriteriaがtrueになった後もdistanceが250付近を
+      // 緩やかに往復し続け、250を割り込むまで長時間（実測で
+      // 100万msのオーダー）brake250へ進めなかった様子を確認して
+      // 特定した。tunnel継続判定(TUNNEL_REENTRY_TOLERANCE)と同種の
+      // 対策として、brake250からの基準充足時のみ許容マージンを
+      // 設ける。
+      if (
+        prevPhase === 'brake250' &&
+        distance <= params.ZONE_BRAKE250 + this.BRAKE250_REENTRY_TOLERANCE &&
+        this._meetsArrivalCriteria(ship, target, params)
+      ) {
+        return 'brake250';
+      }
       return 'final_approach';
     }
 
@@ -1959,8 +1997,8 @@ const ThrusterSolver = {
   // 強制的にゼロへ吸収する — トンネル内は物理的に旋回不可という
   // 前提のため、通常の比例トルクではなく直接ロックする）。
   // 前後方向のみ、distance=ZONE_FINAL_APPROACH地点でFINAL_APPROACH_
-  // ENTRY_SPEED、そこからFINAL_APPROACH_BRAKING_DISTANCEで速度0へ
-  // 収束するプロファイルで前進する。
+  // ENTRY_SPEED、そこからトンネル全長を使って徐々に速度0へ収束する
+  // プロファイルで前進する（v52-fix3、詳細は関数内コメント参照）。
   // -----------------------------------------------------------
   _runTunnelPhase(ship, target, approachAxisWorld, distance, params, desiredForce, desiredTorque, dt) {
     // 姿勢: 常に目的地姿勢へ強制固定（旋回禁止のため、通常の比例
@@ -1978,17 +2016,23 @@ const ThrusterSolver = {
     // ため何もしない＝横方向の力は一切出さない）。前後方向(Z、
     // 進入軸方向)のみ、目標速度プロファイルへ追従する。
     const maxDecel = this._estimateMaxLinearDecel(ship);
-    // distance=ZONE_FINAL_APPROACHで速度ENTRY_SPEED、そこから
-    // FINAL_APPROACH_BRAKING_DISTANCEで0になる速度プロファイル:
-    // v(d) = ENTRY_SPEED * sqrt(d / BRAKING_DISTANCE) （d: 残り距離）
-    // 単純な線形減速（v(d) = ENTRY_SPEED * d/BRAKING_DISTANCE）でも
-    // 良いが、艦の実際の制動能力を無視して間に合わない可能性を
-    // 避けるため、艦の制動距離から出せる速度と、要求プロファイルの
-    // 小さい方を採用する。
+    // v52-fix3: 減速プロファイルの基準距離を修正。
+    // 従来はFINAL_APPROACH_BRAKING_DISTANCE(10)を使っており、
+    // distance=ZONE_FINAL_APPROACH(200)からdistance=10までの190分は
+    // 目標速度が常にFINAL_APPROACH_ENTRY_SPEED(3.0)のまま（速度上限
+    // なしで巡航）、残り10の区間でのみ0まで急減速する「駆け込み
+    // ブレーキ」になっていた。「距離200から徐々に減速していく」という
+    // コメントの本来の意図（トンネル全体を使った滑らかな減速曲線）と
+    // 実装が食い違っていた。トンネル全長(ZONE_FINAL_APPROACH)を
+    // 減速基準距離として使うことで、トンネル突入直後から停止点まで
+    // 一貫して減速し続けるプロファイルにする。
+    // v(d) = ENTRY_SPEED * sqrt(d / ZONE_FINAL_APPROACH) （d: 残り距離）
+    const brakingBasisDistance = Math.max(1e-6, params.ZONE_FINAL_APPROACH);
     const profileSpeed =
-      distance >= params.FINAL_APPROACH_BRAKING_DISTANCE
-        ? params.FINAL_APPROACH_ENTRY_SPEED
-        : params.FINAL_APPROACH_ENTRY_SPEED * (distance / Math.max(1e-6, params.FINAL_APPROACH_BRAKING_DISTANCE));
+      params.FINAL_APPROACH_ENTRY_SPEED * Math.sqrt(Math.min(1, distance / brakingBasisDistance));
+    // 単純な線形減速でもよいが、艦の実際の制動能力を無視して間に
+    // 合わない可能性を避けるため、艦の制動距離から出せる速度と、
+    // 要求プロファイルの小さい方を採用する。
     const physicalSafeSpeed = this._speedForBrakingDistance(maxDecel, distance);
     const targetSpeed = Math.max(0, Math.min(profileSpeed, physicalSafeSpeed));
 
@@ -2041,14 +2085,24 @@ const ThrusterSolver = {
     ship.angularVelocity.y = 0;
     ship.angularVelocity.z = 0;
 
-    // 奥方向(-approachAxisWorld方向)の現在速度を求める。
-    const outwardSpeed = -vecDot(ship.velocity, approachAxisWorld);
+    // v52-fix1: 「奥方向」の符号を修正。approachAxisWorldは艦(手前側)
+    // から目的地へ向かう方向を指す（tunnelフェーズの符号バグ修正
+    // (v52)で確定した規約と同じ）。オーバーシュートは目的地を通過
+    // して「さらに奥（進行方向の延長線上）」へ進むことなので、奥方向
+    // は approachAxisWorld と同じ向き（+方向）であり、このコメントに
+    // あった「-approachAxisWorld方向」は誤りだった。
+    // アップロードされた操縦ログ(docking-log-2026-08-30T07-21-13-972Z.csv)
+    // で、オーバーシュート突入直後から速度が単調に減少し続け（本来は
+    // 主機で下限速度まで押し出すはずが、実際には逆方向へブレーキが
+    // かかっていた）、艦の実際の変位方向がapproachAxisWorldと同じ
+    // 向きになっていることを直接確認して特定した。
+    const outwardSpeed = vecDot(ship.velocity, approachAxisWorld);
     if (outwardSpeed < this.DOCKING_OVERSHOOT_MIN_SPEED) {
       // 奥方向速度が下限を割っている＝慣性だけでは通過完了まで
       // 進みきれない可能性があるため、主機で奥方向へ押し出す。
-      // （手前方向=approachAxisWorld方向への推力は一切出さない
+      // （手前方向=-approachAxisWorld方向への推力は一切出さない
       // ＝逆走禁止を維持する。）
-      const outwardDirWorld = vecScale(approachAxisWorld, -1);
+      const outwardDirWorld = approachAxisWorld;
       const outwardDirLocal = rotateVecByQuat(outwardDirWorld, conjugateQuat(ship.quaternion));
       const speedErr = this.DOCKING_OVERSHOOT_MIN_SPEED - outwardSpeed;
       const thrustStrength = Math.min(1, speedErr / this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR);
