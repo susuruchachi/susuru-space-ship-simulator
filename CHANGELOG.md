@@ -539,6 +539,39 @@ v50以降、変更のたびにここへ追記していく想定です（それ�
 
 ---
 
+## v57 - 2026-08-30
+
+### 修正: approach→adjust境界(distance=500)付近で艦が迷走し、なかなかadjustへ進めない
+
+- **症状**: v55で仮想ウェイポイントの符号を修正した後、艦が仮想
+  ウェイポイント付近（distance≈500の少し外側）にいつまでも留まり、
+  先へ進まず迷走するようになった。始点・目的地はv55修正前と同じ。
+- **原因**: `approach`フェーズは元々「distance=ZONE_ADJUST_START(500)
+  でほぼ停止する」設計（`_runApproachPhase`のstopAtDistance引数）
+  だったが、`approach→adjust`のフェーズ遷移条件も同じ境界値
+  （`distance>500`ならapproach継続、`distance<=500`でadjustへ）を
+  使っていた。艦がdistance=500へ収束しようとする制御自体が、収束の
+  過程でその値をわずかに上下する（実測ログで500.0〜501.8程度の幅）
+  のは通常の挙動だが、境界をわずかに超えるたびに`approach`へ
+  押し戻されるため、adjustへ安定して進めないデッドロックになって
+  いた。v55で仮想WPの位置自体が正しくなったことで艦がこの境界へ
+  正確に収束するようになり、結果としてこのデッドロックが初めて
+  顕在化した（v55修正前は仮想WPの位置がずれていたため、艦がこの
+  境界付近に長く留まること自体が起きにくく、問題が隠れていた）。
+- **対応**: `approach→adjust`境界に新しい定数
+  `APPROACH_ADJUST_HYSTERESIS`(8.0)による片側ヒステリシスを追加。
+  `prevPhase`が`approach`または`adjust`のいずれかで、distanceが
+  `ZONE_ADJUST_START`〜`ZONE_ADJUST_START+APPROACH_ADJUST_HYSTERESIS`
+  の範囲にある間は、一度adjustへ入ればadjustのまま、まだapproachの
+  ままなら（境界の内側に入った時点で）adjustへ進む形にし、この
+  範囲内での往復を止めた。`TUNNEL_REENTRY_TOLERANCE`/
+  `BRAKE250_REENTRY_TOLERANCE`と同種の考え方だが、静止ではなく
+  「速度上限区間の終端」への収束が対象のため揺り戻し幅がやや大きく、
+  マージンもその2つ(1.0)より大きめの値にした。cruiseから直接この
+  範囲に入ってきた場合の判定（`prevPhase==='cruise'`）には影響しない。
+
+---
+
 ## v50より前
 
 このファイルが存在する前の変更履歴は、各JSファイルの冒頭・該当箇所の

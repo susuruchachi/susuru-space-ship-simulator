@@ -690,6 +690,14 @@ const ThrusterSolver = {
   // するための許容マージン。TUNNEL_REENTRY_TOLERANCEと同じ考え方。
   BRAKE250_REENTRY_TOLERANCE: 1.0,
 
+  // v57: approachフェーズがdistance=ZONE_ADJUST_STARTへ収束しようと
+  // する過程で境界をわずかに上下し、adjustへなかなか進めない
+  // デッドロックを避けるための許容マージン。TUNNEL_REENTRY_TOLERANCE/
+  // BRAKE250_REENTRY_TOLERANCEと同種だが、こちらは「静止」ではなく
+  // 「速度上限区間の終端」での収束のため揺り戻し幅がやや大きく
+  // （実測ログで最大7程度）出ていたため、その2つより大きめの値にする。
+  APPROACH_ADJUST_HYSTERESIS: 8.0,
+
   buildDesiredFromInput(input, ship, dt) {
     const boostMult = input.boost ? 1.6 : 1.0;
     const autoDampingOn = ship && (State.settings.autoDampingEnabled ?? true);
@@ -1401,6 +1409,41 @@ const ThrusterSolver = {
     // --- 通常のゾーン順序による遷移 ---
     if (distance > params.ZONE_APPROACH_START) {
       return 'cruise';
+    }
+    // v57: approach→adjust境界(ZONE_ADJUST_START)にヒステリシスを
+    // 設ける。approachフェーズは「distance=ZONE_ADJUST_STARTでほぼ
+    // 停止する」設計（_runApproachPhaseのstopAtDistance引数）だが、
+    // 遷移条件がちょうど同じ距離(distance>500ならapproach継続)だと、
+    // 艦がdistance=500へ収束しようとする過程で境界をわずかに
+    // 上下するたびにapproachへ押し戻され、なかなかadjustへ進めない
+    // デッドロックになっていた。実測ログでは、艦がdistance≈500〜503
+    // の狭い範囲に長時間（十万msオーダー）留まり続け、v55で仮想WPの
+    // 位置自体は正しくなった一方、そこにちょうど収束してしまうが
+    // 故にこの境界デッドロックが顕在化していた（symbol修正前は仮想WP
+    // の位置がずれていたため、境界を素通りしていて問題が隠れていた）。
+    // 対応: 既にapproachまたはadjustにいる場合、ZONE_ADJUST_START+
+    // APPROACH_ADJUST_HYSTERESIS（境界より少し内側=cruise寄り）までの
+    // 範囲では現在のフェーズを維持する（TUNNEL_REENTRY_TOLERANCE等と
+    // 同種のヒステリシス、両方向対称）。cruiseから直接この範囲に
+    // 入ってきた場合の判定には影響しない。
+    if (
+      prevPhase === 'approach' &&
+      distance > params.ZONE_ADJUST_START &&
+      distance <= params.ZONE_ADJUST_START + this.APPROACH_ADJUST_HYSTERESIS
+    ) {
+      return 'adjust';
+    }
+    // v57: 逆方向（一度adjustに入った後、横方向補正等の余韻で
+    // distanceがわずかにZONE_ADJUST_STARTを超えて戻るケース）も、
+    // 同じマージン内ならadjustを維持する。対称にしておかないと
+    // 「adjust→approach→(ヒステリシスで)adjust→…」という別の往復を
+    // 生みかねないため。
+    if (
+      prevPhase === 'adjust' &&
+      distance > params.ZONE_ADJUST_START &&
+      distance <= params.ZONE_ADJUST_START + this.APPROACH_ADJUST_HYSTERESIS
+    ) {
+      return 'adjust';
     }
     if (distance > params.ZONE_ADJUST_START) {
       return 'approach';
