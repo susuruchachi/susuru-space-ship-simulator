@@ -1101,8 +1101,28 @@ const ThrusterSolver = {
 
     if (closingSpeed > effectiveCap) {
       // 上限超過: ブレーキを主として解く。
+      //
+      // v50-fix4: stoppingSpeedCap（目的地・境界までの物理的な制動
+      // 限界）を超過している場合は、超過量に関わらず問答無用で
+      // フルブレーキにする。従来はspeedCap由来かstoppingSpeedCap由来
+      // かを区別せず一律「over/FORWARD_VELOCITY_FULL_THROTTLE_ERROR」
+      // という緩やかな比例ブレーキにしていたため、cruise終盤のように
+      // 大きな超過（over>>40）でもbrakeStrengthはmin(1,...)で頭打ち
+      // される一方、超過が40未満の間はブレーキが弱く、結果として
+      // 「本当は今すぐ全力で止まらないと次のゾーン境界に間に合わない」
+      // 状況でも十分な減速が得られなかった（実測ログで、艦の最高速度
+      // 267.8がcruise→approach境界(distance=800)到達時点でも216.1
+      // までしか落ちておらず、その後approach/adjustでも大幅な速度
+      // 超過を引きずったままオーバーシュートしていたことを確認済み）。
+      // stoppingSpeedCap超過は「間に合わなくなる」物理的な制約なので、
+      // 超過量に関わらず即フルブレーキにする。speedCap
+      // （maxBrakingDistanceOverride由来、cruiseの先読みやapproach/
+      // adjustの巡航速度目安）側の超過は、引き続き緩やかな比例
+      // ブレーキのままでよい（巡航速度の目安に過ぎず、間に合わなく
+      // なる性質のものではないため）。
+      const overStoppingCap = closingSpeed > stoppingSpeedCap;
       const over = closingSpeed - effectiveCap;
-      const brakeStrength = Math.min(1, over / this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR);
+      const brakeStrength = overStoppingCap ? 1 : Math.min(1, over / this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR);
       desiredForce.x += -dirLocal.x * brakeStrength;
       desiredForce.y += -dirLocal.y * brakeStrength;
       desiredForce.z += -dirLocal.z * brakeStrength;
@@ -1262,8 +1282,23 @@ const ThrusterSolver = {
         }
         return 'overshoot';
       }
-      // alongDist>=0に戻った（トンネル内に留まったまま通過しなかった）
-      // 場合は通常通りtunnelとして扱う。
+      // v50-fix4: alongDist>=0に戻った（トンネル内に留まったまま
+      // 通過しなかった）場合は通常通りtunnelとして扱う——という
+      // このコメントの意図が実装されておらず、ここで何もreturnせずに
+      // 下の通常ゾーン判定へ素通りしていた。distance<=ZONE_BRAKE300
+      // (300)の範囲は「_dockingBrake300Doneがfalseなら無条件で
+      // brake300」という判定になっているため、tunnel内（distance
+      // 200前後）にいる艦がここを素通りするたびにbrake300へ
+      // 引き戻され、「tunnel→brake300→brake250→tunnel→…」を
+      // 永久に繰り返す不具合の原因になっていた（実測ログで
+      // distance≈208に張り付いたまま同じ3フェーズを往復し続けて
+      // いたことを確認済み）。distance<=ZONE_FINAL_APPROACH(200)の
+      // 範囲内である限りは明示的にtunnelを維持する。
+      if (distance <= params.ZONE_FINAL_APPROACH) {
+        return 'tunnel';
+      }
+      // 200を超えて戻ってしまった場合（想定外の外力等）は、下の
+      // 通常ゾーン判定に委ねる。
     }
 
     // --- brake300のワンショット継続判定（NO_ENTRY_RADIUSチェックより
@@ -1337,8 +1372,19 @@ const ThrusterSolver = {
         // 「速度・姿勢だけ収まったが軸上には乗っていない」状態のまま
         // トンネルに突入してしまう（トンネル内は横方向の力を一切
         // 出さないため、一度入るとそのズレは永久に残ってしまう）。
+        //
+        // v50-fix4: 従来はここで_dockingBrake300Doneをfalseに
+        // リセットしていたが、これはまだ実際の入港(docked)が
+        // 完了していない、tunnel突入の瞬間に行われる時期尚早な
+        // リセットだった。tunnel内で一時的にbrake250へ差し戻される
+        // （lateralの微小な再発等）ことがあり、その状態で万一
+        // distance<=ZONE_BRAKE300の判定に落ちると、リセット済みの
+        // _dockingBrake300Doneのせいで無条件にbrake300へ引き戻され、
+        // 「tunnel→brake300→brake250→tunnel→…」を永久に繰り返して
+        // しまっていた。リセットは実際にdockedへ到達した時点
+        // （このファイル内、docked状態から離脱する箇所）でのみ
+        // 行うようにし、ここでは行わない。
         if (this._meetsArrivalCriteria(ship, target, params) && lateral <= this.DOCKING_POSITION_MIN_DISTANCE) {
-          ship._dockingBrake300Done = false; // 次回入港に備えリセット
           return 'tunnel';
         }
         return 'brake250';
@@ -1429,6 +1475,7 @@ const ThrusterSolver = {
         alongDist,
         lateral,
         speed,
+        maxLinearDecel: this._estimateMaxLinearDecel(ship),
         posX: ship.position.x,
         posY: ship.position.y,
         posZ: ship.position.z,
@@ -1439,6 +1486,8 @@ const ThrusterSolver = {
         returnTargetDist,
         closingSpeedToReturnTarget,
         dockingBrake300Done: !!ship._dockingBrake300Done,
+        meetsArrivalCriteria: this._meetsArrivalCriteria(ship, target, params),
+        angSpeed: vecLength(ship.angularVelocity),
       });
       ship._dockingPhasePrevForLog = phase;
     }
@@ -1482,7 +1531,13 @@ const ThrusterSolver = {
         this._runCruisePhase(ship, target, approachAxisWorld, distance, params, desiredForce, desiredTorque, dt);
         break;
       case 'approach':
-        this._runApproachPhase(ship, target, approachAxisWorld, distance, lateral, params, desiredForce, desiredTorque, dt, params.APPROACH_MAX_BRAKING_DISTANCE);
+        // v50-fix4: distance=ZONE_ADJUST_START(500)でほぼ速度上限
+        // (APPROACH_MAX_BRAKING_DISTANCE相当)まで減速し切っておく。
+        // 従来はstopAtDistance未指定（target.position基準の緩い
+        // 減速）だったため、cruiseから大きな速度を持ち込んだ場合に
+        // approach区間(800→500)だけでは減速しきれず、adjust以降へ
+        // 速度超過を引きずってオーバーシュートの一因になっていた。
+        this._runApproachPhase(ship, target, approachAxisWorld, distance, lateral, params, desiredForce, desiredTorque, dt, params.APPROACH_MAX_BRAKING_DISTANCE, params.ZONE_ADJUST_START);
         break;
       case 'adjust':
         // v50: distance=ZONE_BRAKE300でほぼ停止させておく
@@ -1522,21 +1577,31 @@ const ThrusterSolver = {
     return { desiredForce, desiredTorque };
   },
 
-  // v47: cruise→approach境界での急減速間に合わず問題への対策。
-  // cruiseはZONE_APPROACH_START(800)より手前ではCRUISE_BRAKE_LEAD_
-  // DISTANCE分だけ余裕を持って「次のapproachフェーズの速度上限
-  // (APPROACH_MAX_BRAKING_DISTANCE相当)」を先読みし始める。
-  // 800を切った瞬間に速度上限が無制限→50相当へ急変すると、艦の
-  // 制動能力次第では800～500(adjust開始)の間に間に合わず減速しきれない
-  // まま次のフェーズへなだれ込んでしまうため、手前から緩やかに絞る。
-  CRUISE_BRAKE_LEAD_DISTANCE: 1200, // この距離からapproach上限への先読み減速を開始
-
+  // v50-fix4: 従来はCRUISE_BRAKE_LEAD_DISTANCE(1200)という固定距離を
+  // 使い、「ZONE_APPROACH_START+1200」から「approachフェーズの速度
+  // 上限(APPROACH_MAX_BRAKING_DISTANCE相当)」へ向けてmaxBrakingDistance
+  // Overrideを線形に絞っていた。この設計は艦の実際の制動能力
+  // （_estimateMaxLinearDecel）と無関係な固定距離だったため、
+  // 最高速度が高い・減速力が低い艦種では1200の距離では全く
+  // 間に合わず、cruise→approach境界(distance=800)通過時点でまだ
+  // 大幅な速度超過を抱えたまま次のフェーズへなだれ込み、300/250の
+  // ブレーキポイントで止まりきれずオーバーシュートする不具合が
+  // あった（実測ログで、最高速度267.8の艦がdistance=800到達時点で
+  // まだ216.1もの速度を残していたことを確認済み）。
+  //
+  // 代わりに、_applyApproachForceのstoppingDistanceForCapOverride
+  // （目的地への物理的な制動距離を計算する基準距離）に「ZONE_
+  // APPROACH_STARTまでの残り距離」を渡す方式に変更した。これは
+  // 艦の実際の制動能力から逆算されるため、艦種に関わらず
+  // 「境界到達時にちょうど速度0になる」よう自然に減速プロファイルが
+  // 決まる（adjust/final_approachフェーズが既にstopAtDistanceで
+  // 採用している考え方と同じ）。固定距離の先読みロジックは不要に
+  // なったため削除。
+  //
   // -----------------------------------------------------------
   // cruise: 自由巡航。仕想WPへの最短ベクトルへ向け、加速・最高速
-  // 巡航・制動距離で減速する単純なボング＝ボング制御。
-  // ZONE_APPROACH_STARTに近づくとapproachフェーズの速度上限へ向けて
-  // 先読み減速する（速度上限自体は「無制限」から「approach開始距離
-  // 到達時にAPPROACH_MAX_BRAKING_DISTANCE相当」へ線形に絞る）。
+  // 巡航・「distance=ZONE_APPROACH_STARTでちょうど速度0」になる
+  // 制動距離ベースの減速を行う単純なボング＝ボング制御。
   // 姿勢もできれば早めに整えたいが強制はしない
   // （DOCKING_HEADING_FULL_TORQUE_ANGLEの緩い閾値のまま）。
   // -----------------------------------------------------------
@@ -1554,30 +1619,13 @@ const ThrusterSolver = {
     this._applyRollTorque(ship, target, desiredTorque);
     this._applyAngularDamping(ship, desiredTorque, dt, params.ARRIVAL_ANGULAR_SPEED);
 
-    // ZONE_APPROACH_START + CRUISE_BRAKE_LEAD_DISTANCEより遠ければ
-    // 無制限(null)。それより近ければ、approach開始距離に到達する頃に
-    // ちょうどAPPROACH_MAX_BRAKING_DISTANCE相当まで絞られるよう線形補間。
-    const leadStart = params.ZONE_APPROACH_START + this.CRUISE_BRAKE_LEAD_DISTANCE;
-    let maxBrakingDistanceOverride = null;
-    if (distance < leadStart) {
-      const t = clamp(
-        (leadStart - distance) / this.CRUISE_BRAKE_LEAD_DISTANCE,
-        0,
-        1
-      );
-      // tが0(leadStart到達時)ではまだ無制限に近く、tが1
-      // (ZONE_APPROACH_START到達時)でAPPROACH_MAX_BRAKING_DISTANCEに
-      // なるよう補間。無制限側は「非常に大きい制動距離」として扱う。
-      const unrestricted = this.CRUISE_UNRESTRICTED_BRAKING_DISTANCE;
-      maxBrakingDistanceOverride =
-        unrestricted + (params.APPROACH_MAX_BRAKING_DISTANCE - unrestricted) * t;
-    }
-
-    this._applyApproachForce(ship, virtualWP, maxBrakingDistanceOverride, desiredForce);
+    // 速度上限自体(speedCap)は無制限のまま。「distance=ZONE_APPROACH_
+    // STARTまでの残り距離」を制動距離の基準にすることで、境界到達時に
+    // ちょうどAPPROACH_MAX_BRAKING_DISTANCE相当（実質速度0近く）まで
+    // 減速するようにする。
+    const stoppingBasisDistance = Math.max(0, distance - params.ZONE_APPROACH_START);
+    this._applyApproachForce(ship, virtualWP, null, desiredForce, stoppingBasisDistance);
   },
-
-  // 先読み減速の「無制限」側を表す仮想の制動距離（十分大きい値）。
-  CRUISE_UNRESTRICTED_BRAKING_DISTANCE: 100000,
 
   // -----------------------------------------------------------
   // approach / adjust: 共通ロジック。maxBrakingDistanceで指定された
