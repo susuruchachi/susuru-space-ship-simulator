@@ -675,6 +675,16 @@ const ThrusterSolver = {
   // lateralの振動幅(0.02〜0.24)より大きい値にしてある。
   HEADING_STEER_STABILIZE_RADIUS: 5.0,
 
+  // v58-fix2: _runApproachPhaseで、安定化済みのheadingTargetWorld
+  // 方向へ艦の位置から仮の目標点を置く際に使う距離。_applyApproachForce
+  // 側の速度上限・制動距離判定はstoppingBasisDistance（実距離ベース）
+  // で別途行われるため、この値自体は減速プロファイルに影響しない
+  // （方向を安定させるためだけの仮想的な距離）。HEADING_STEER_
+  // STABILIZE_RADIUSより大きければ値自体に強い意味はないが、
+  // 極端に小さいと浮動小数点誤差の影響を受けやすくなるため、
+  // 十分な大きさ（AVOIDANCE_RADIUS程度）にしてある。
+  FORCE_AIM_POINT_DISTANCE: 250,
+
   // brake300/brake250/final_approach専用のフルトルク角度閾値。
   // 通常フェーズ用（約60°、遠方でも主機が働くよう緩めた値）より
   // 厳しくし、「近距離ではまず姿勢をきっちり合わせる」動きを
@@ -1912,8 +1922,11 @@ const ThrusterSolver = {
     // 100%、steerDist=HEADING_STEER_STABILIZE_RADIUSでtoSteerの向き
     // 100%になり、境界での不連続なジャンプを避けつつ、目標点に
     // 極端に近い（＝方向がノイズ支配になる）場面でだけ安定した
-    // 進入軸方向を優先させる。並進側（_applyApproachForce/
-    // _applySettlingForce）の挙動には影響しない。
+    // 進入軸方向を優先させる。
+    // ※ここで安定化するのは船首方向(headingTargetWorld)のみ。
+    // 並進側（_applyApproachForceに渡す目標点）は同じ問題を抱えた
+    // ままだったため、後日v58-fix2で別途対応した
+    // （headingTargetWorld算出直後のコメント参照）。
     let headingTargetWorld;
     if (steerDist > this.HEADING_STEER_STABILIZE_RADIUS) {
       headingTargetWorld = vecScale(toSteer, 1 / steerDist);
@@ -1936,6 +1949,32 @@ const ThrusterSolver = {
     this._applyRollTorque(ship, target, desiredTorque);
     this._applyAngularDamping(ship, desiredTorque, dt, params.ARRIVAL_ANGULAR_SPEED);
 
+    // v58-fix2: 上のheadingTargetWorldと同じ理由で、_applyApproachForce
+    // に渡す並進の目標点もsteerTargetをそのまま渡してはいけなかった。
+    // _applyApproachForceは内部で`targetPosWorld - ship.position`から
+    // 方向を再計算するため、steerTargetが艦の現在位置とほぼ一致する
+    // 場面（distance≈VIRTUAL_WAYPOINT_OFFSET直後）では、その方向も
+    // lateral由来のノイズに支配される。姿勢だけを安定させても、
+    // 並進の推力方向がノイズのままではスラストが実質ランダムな
+    // 向きに出続け、閉じるはずの距離が閉じず、かえって奥へ流れて
+    // しまう（実測ログで、adjust突入直後は正常にdistanceが508→
+    // 493.79まで縮んだのに、その後velZの符号が数十msごとに反転する
+    // 微小振動に転じ、さらに長時間（数十万ms）かけてdistanceが
+    // 493.79→497.5超までじわじわ後退し続けていたことを確認した）。
+    // 対応: _applyApproachForceに渡す目標点は、steerTargetそのもの
+    // ではなく、既に安定化済みのheadingTargetWorld方向へ艦の位置から
+    // 十分離れた点（FORCE_AIM_POINT_DISTANCE）を新たに置いたものに
+    // する。_applyApproachForceの速度上限・制動距離判定は
+    // steerTarget自体への距離ではなくstoppingBasisDistance（引数で
+    // 別途渡す実距離ベースの値）を基準にしているため、この置き換えは
+    // 減速プロファイルには影響せず、推力の「向き」だけを
+    // headingTargetWorldに揃える効果に限定される。
+    const forceAimPoint = {
+      x: ship.position.x + headingTargetWorld.x * this.FORCE_AIM_POINT_DISTANCE,
+      y: ship.position.y + headingTargetWorld.y * this.FORCE_AIM_POINT_DISTANCE,
+      z: ship.position.z + headingTargetWorld.z * this.FORCE_AIM_POINT_DISTANCE,
+    };
+
     // 減速の基準はtarget.positionへの実距離(distance)を使う
     // （操舵方向は仕想WP/迂回点だが、停止の基準は実際の目的地への
     // 距離であるべき。_applyApproachForceのコメント参照）。
@@ -1946,7 +1985,7 @@ const ThrusterSolver = {
     // されるが、ここでも明示しておく）。
     const stoppingBasisDistance =
       stopAtDistance !== undefined ? Math.max(0, distance - stopAtDistance) : distance;
-    this._applyApproachForce(ship, steerTarget, maxBrakingDistance, desiredForce, stoppingBasisDistance);
+    this._applyApproachForce(ship, forceAimPoint, maxBrakingDistance, desiredForce, stoppingBasisDistance);
 
     // v56: _applyApproachForceの横滑りブレーキ(lateralVel成分の除去)
     // だけでは、進入軸に対する横方向の「位置ズレ」自体を縮める力には
