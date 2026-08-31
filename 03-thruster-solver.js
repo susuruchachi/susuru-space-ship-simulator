@@ -1066,12 +1066,26 @@ const ThrusterSolver = {
   // -----------------------------------------------------------
   // 艦のrollを、target.quaternionが定めるroll角へ向けるトルク要求を
   // desiredTorque.zに書き込む。戻り値: rollLocked (bool)
+  //
+  // v64-fix2: fullTorqueAngleを省略可能な引数として追加。従来は
+  // 常にDOCKING_ROLL_FULL_TORQUE_ANGLE(1.05rad、約60°)固定で、
+  // headingTorque側（_computeHeadingFullTorqueAngleでdistance=
+  // ZONE_APPROACH_START(800)→ZONE_BRAKE300(300)の間に1.05rad→
+  // 0.35radへ補間、brake300以降は0.35rad固定）のように近づくほど
+  // 小さい誤差でもフルトルクになる、という厳格化が一切効いておらず、
+  // headingは距離が縮むほど速く追従するのにrollだけ常に緩いまま、
+  // という非対称な挙動になっていた（「距離250での姿勢制御が遅い、
+  // 特にロールが遅い」の直接原因）。呼び出し側からheadingと同じ
+  // fullTorqueAngleを渡すことで、rollもheadingと同じ厳格化
+  // プロファイルに揃える。省略時は従来通りDOCKING_ROLL_FULL_TORQUE_
+  // ANGLEを使う（後方互換のためのデフォルト）。
   // -----------------------------------------------------------
-  _applyRollTorque(ship, target, desiredTorque) {
+  _applyRollTorque(ship, target, desiredTorque, fullTorqueAngle) {
+    const effectiveFullTorqueAngle = fullTorqueAngle !== undefined ? fullTorqueAngle : this.DOCKING_ROLL_FULL_TORQUE_ANGLE;
     const rollError = this._computeRollErrorAngle(ship, target);
     const rollLocked = this._lockRollIfWithinTolerance(ship, rollError.angle);
     if (!rollLocked && Math.abs(rollError.angle) > this.DOCKING_ROLL_MIN_ANGLE) {
-      const rollTorqueStrength = clamp(rollError.angle / this.DOCKING_ROLL_FULL_TORQUE_ANGLE, -1, 1);
+      const rollTorqueStrength = clamp(rollError.angle / effectiveFullTorqueAngle, -1, 1);
       desiredTorque.z = rollError.axis.z * rollTorqueStrength;
     }
     return rollLocked;
@@ -1353,8 +1367,26 @@ const ThrusterSolver = {
     // 安全な位置まで回り込ませる。
     // tunnel/overshoot自身の遷移ロジックは下のブロックで別途扱うため
     // ここでは対象外とする。
+    //
+    // v64-fix1: 発動条件がalongDist<0（進入軸に対して奥側かどうかの
+    // 符号）だけだったため、遠方（例: distance=5000）で単に横方向・
+    // 角度的に離れているだけのケースでも、alongDistがわずかでも
+    // 負ならいきなりreturn_to_axisに入ってしまっていた（実測ログ
+    // docking-log-2026-08-30T14-34-58-478Zで確認: distance=5000,
+    // lateral=4698というほぼ真横の位置から、開始直後にreturn_to_axis
+    // へ入り、approachへ合流するまでの間ずっと大回り込みを続けて
+    // いた）。return_to_axisは本来「このまま直進するとNO_ENTRY_RADIUS
+    // の円柱（トンネル）を横切ってしまう」場合の回避策であり、
+    // lateralが円柱半径より大きければ直進しても円柱に触れないため
+    // 迂回は不要。lateral < NO_ENTRY_RADIUSの場合（実際に円柱を
+    // 横切りうる位置関係にある場合）のみ発動するよう条件を追加した。
     const inTunnelHandling = prevPhase === 'tunnel' || prevPhase === 'overshoot';
-    if (!inTunnelHandling && alongDist < 0 && distance >= params.NO_ENTRY_RADIUS) {
+    if (
+      !inTunnelHandling &&
+      alongDist < 0 &&
+      distance >= params.NO_ENTRY_RADIUS &&
+      lateral < params.NO_ENTRY_RADIUS
+    ) {
       return 'return_to_axis';
     }
     // 一度return_to_axisに入ったら、alongDistがわずかに0を超えた
@@ -1847,7 +1879,7 @@ const ThrusterSolver = {
     const headingTargetWorld = wpDist > 1e-4 ? vecScale(toWP, 1 / wpDist) : approachAxisWorld;
 
     this._applyHeadingTorque(ship, headingTargetWorld, this.DOCKING_HEADING_FULL_TORQUE_ANGLE, desiredTorque);
-    this._applyRollTorque(ship, target, desiredTorque);
+    this._applyRollTorque(ship, target, desiredTorque, this.DOCKING_HEADING_FULL_TORQUE_ANGLE);
     this._applyAngularDamping(ship, desiredTorque, dt, params.ARRIVAL_ANGULAR_SPEED);
 
     // 速度上限自体(speedCap)は無制限のまま。「distance=ZONE_APPROACH_
@@ -1967,7 +1999,7 @@ const ThrusterSolver = {
 
     const fullTorqueAngle = this._computeHeadingFullTorqueAngle(distance, params);
     this._applyHeadingTorque(ship, headingTargetWorld, fullTorqueAngle, desiredTorque);
-    this._applyRollTorque(ship, target, desiredTorque);
+    this._applyRollTorque(ship, target, desiredTorque, fullTorqueAngle);
     this._applyAngularDamping(ship, desiredTorque, dt, params.ARRIVAL_ANGULAR_SPEED);
 
     // v58-fix2: 上のheadingTargetWorldと同じ理由で、_applyApproachForce
@@ -2169,7 +2201,7 @@ const ThrusterSolver = {
     // 姿勢は常にtarget.quaternion方向へ合わせにいく（厳しめ角度）。
     const headingTargetWorld = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion));
     this._applyHeadingTorque(ship, headingTargetWorld, this.DOCKING_FINAL_HEADING_FULL_TORQUE_ANGLE, desiredTorque);
-    this._applyRollTorque(ship, target, desiredTorque);
+    this._applyRollTorque(ship, target, desiredTorque, this.DOCKING_FINAL_HEADING_FULL_TORQUE_ANGLE);
     this._applyAngularDamping(ship, desiredTorque, dt, params.ARRIVAL_ANGULAR_SPEED);
 
     const toTargetWorld = {
@@ -2248,7 +2280,7 @@ const ThrusterSolver = {
   _runFinalApproachAdjustPhase(ship, target, approachAxisWorld, distance, params, desiredForce, desiredTorque, dt) {
     const headingTargetWorld = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion));
     this._applyHeadingTorque(ship, headingTargetWorld, this.DOCKING_FINAL_HEADING_FULL_TORQUE_ANGLE, desiredTorque);
-    this._applyRollTorque(ship, target, desiredTorque);
+    this._applyRollTorque(ship, target, desiredTorque, this.DOCKING_FINAL_HEADING_FULL_TORQUE_ANGLE);
     this._applyAngularDamping(ship, desiredTorque, dt, params.ARRIVAL_ANGULAR_SPEED);
 
     // 並進: target.positionへ、ADJUST_MAX_BRAKING_DISTANCE程度の
@@ -2459,7 +2491,7 @@ const ThrusterSolver = {
     const headingTargetWorld = steerDist > 1e-4 ? vecScale(toReturnTarget, 1 / steerDist) : approachAxisWorld;
 
     this._applyHeadingTorque(ship, headingTargetWorld, this.DOCKING_HEADING_FULL_TORQUE_ANGLE, desiredTorque);
-    this._applyRollTorque(ship, target, desiredTorque);
+    this._applyRollTorque(ship, target, desiredTorque, this.DOCKING_HEADING_FULL_TORQUE_ANGLE);
     this._applyAngularDamping(ship, desiredTorque, dt, params.ARRIVAL_ANGULAR_SPEED);
 
     // 制動距離ベースの速度上限を設け、「まず勢いを殺してから
