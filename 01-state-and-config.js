@@ -5,7 +5,7 @@
 
 // v27: 画面右下のバージョン表示・<title>で共通して使うバージョン名。
 // リリースのたびにここだけ書き換えれば全画面に反映される。
-const GAME_VERSION = 'v66';
+const GAME_VERSION = 'v67';
 
 // -------------------------------------------------------------
 // 速度制限モード
@@ -727,6 +727,24 @@ async function removePortModelData(portId) {
     tx.oncomplete = resolve;
     tx.onerror = () => reject(tx.error);
   });
+}
+
+// v67: 保存済みGLB(base64 data URL)をArrayBufferへ戻す共通ヘルパー。
+// 従来は09-ship-builder.js・10-docking-platform.js・12-port-builder.js
+// それぞれがfetch(dataUrl).then(r => r.arrayBuffer())で読み戻していたが、
+// iPad(iOS版Chrome。WebKitベースのためSafariと同様の制約を受ける)で
+// 巨大なdata URL（実測で100MB超のGLB）に対しfetchが読み込み失敗する
+// 不具合が確認された。PC・Android(Chromium)では問題なく動いていたため
+// 発覚が遅れた。fetchを使わずatobで直接バイト列へデコードする方式は
+// 環境に依存せず同じ結果になるため、3箇所とも本関数に統一する。
+function dataUrlToArrayBuffer(dataUrl) {
+  const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
 }
 
 // -------------------------------------------------------------

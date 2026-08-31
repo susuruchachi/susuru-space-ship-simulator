@@ -158,17 +158,20 @@ const DockingPlatform = {
     };
 
     if (saved.format === 'glb') {
-      fetch(saved.glbDataUrl)
-        .then((r) => r.arrayBuffer())
-        .then((buf) => {
-          const manager = new THREE.LoadingManager();
-          const loader = new THREE.GLTFLoader(manager);
-          loader.textureLoader = new THREE.TextureLoader(manager);
-          loader.parse(buf, '', (gltf) => onLoaded(gltf.scene), (err) => {
-            console.warn('ポートモデル(GLB)の読み込みに失敗しました。簡易ゲート表示のままにします。', err);
-          });
-        })
-        .catch((err) => console.warn('ポートモデル(GLB)の読み込みに失敗しました。簡易ゲート表示のままにします。', err));
+      // v67: fetch(dataUrl)はiPad(iOS WebKit)で巨大なdata URLの読み込みに
+      // 失敗することがあったため、atob直接デコード(dataUrlToArrayBuffer、
+      // 01-state-and-config.js)に変更。
+      try {
+        const buf = dataUrlToArrayBuffer(saved.glbDataUrl);
+        const manager = new THREE.LoadingManager();
+        const loader = new THREE.GLTFLoader(manager);
+        loader.textureLoader = new THREE.TextureLoader(manager);
+        loader.parse(buf, '', (gltf) => onLoaded(gltf.scene), (err) => {
+          console.warn('ポートモデル(GLB)の読み込みに失敗しました。簡易ゲート表示のままにします。', err);
+        });
+      } catch (err) {
+        console.warn('ポートモデル(GLB)の読み込みに失敗しました。簡易ゲート表示のままにします。', err);
+      }
     } else if (saved.format === 'obj') {
       const finish = (materials) => {
         const objLoader = new THREE.OBJLoader();

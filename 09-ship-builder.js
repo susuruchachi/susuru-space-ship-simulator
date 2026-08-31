@@ -996,22 +996,26 @@
     setStatus('保存済みのモデルを読み込んでいます…', false);
 
     if (existing.format === 'glb') {
-      fetch(existing.glbDataUrl)
-        .then((r) => r.arrayBuffer())
-        .then((buf) => {
-          const loader = createRobustGltfLoader();
-          loader.parse(buf, '', (gltf) => {
-            onModelLoadedIntoScene(gltf.scene);
-            pendingSaveFormat = 'glb';
-            pendingSaveFileName = existing.fileName;
-            pendingSaveGlbArrayBuffer = buf;
-            // onModelLoadedIntoScene内で一旦nullに戻されるため、
-            // 保存されていた接舷面をここで明示的に復元する。
-            if (existing.dockingFace) setDockingFace({ ...existing.dockingFace, tiltDeg: { ...existing.dockingFace.tiltDeg } });
-            setStatus('保存済みモデルを読み込みました。', false);
-          }, (err) => setStatus('保存済みモデルの読み込みに失敗しました。', true));
-        })
-        .catch(() => setStatus('保存済みモデルの読み込みに失敗しました。', true));
+      // v67: fetch(dataUrl)はiPad(iOS WebKit)で巨大なdata URLの読み込みに
+      // 失敗することがあったため、atob直接デコード(dataUrlToArrayBuffer、
+      // 01-state-and-config.js)に変更。
+      try {
+        const buf = dataUrlToArrayBuffer(existing.glbDataUrl);
+        const loader = createRobustGltfLoader();
+        loader.parse(buf, '', (gltf) => {
+          onModelLoadedIntoScene(gltf.scene);
+          pendingSaveFormat = 'glb';
+          pendingSaveFileName = existing.fileName;
+          pendingSaveGlbArrayBuffer = buf;
+          // onModelLoadedIntoScene内で一旦nullに戻されるため、
+          // 保存されていた接舷面をここで明示的に復元する。
+          if (existing.dockingFace) setDockingFace({ ...existing.dockingFace, tiltDeg: { ...existing.dockingFace.tiltDeg } });
+          setStatus('保存済みモデルを読み込みました。', false);
+        }, (err) => setStatus('保存済みモデルの読み込みに失敗しました。', true));
+      } catch (e) {
+        console.error(e);
+        setStatus('保存済みモデルの読み込みに失敗しました。', true);
+      }
     } else if (existing.format === 'obj') {
       const finish = (materials) => {
         const objLoader = new THREE.OBJLoader();

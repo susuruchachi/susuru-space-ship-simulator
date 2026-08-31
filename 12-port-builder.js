@@ -1071,19 +1071,24 @@
     setModelStatus('保存済みのモデルを読み込んでいます…', false);
 
     if (existing.format === 'glb') {
-      fetch(existing.glbDataUrl)
-        .then((r) => r.arrayBuffer())
-        .then((buf) => {
-          const loader = createRobustGltfLoader();
-          loader.parse(buf, '', (gltf) => {
-            onModelLoadedIntoScene(gltf.scene);
-            pendingSaveFormat = 'glb';
-            pendingSaveFileName = existing.fileName;
-            pendingSaveGlbArrayBuffer = buf;
-            setModelStatus('保存済みモデルを読み込みました。', false);
-          }, () => setModelStatus('保存済みモデルの読み込みに失敗しました。', true));
-        })
-        .catch(() => setModelStatus('保存済みモデルの読み込みに失敗しました。', true));
+      // v67: fetch(dataUrl)はiPad(iOS WebKit)で巨大なdata URLに対して
+      // 読み込み失敗することがあったため、atobによる直接デコードに変更。
+      // PC・Androidでは元々問題なかったが、fetch経由をやめても挙動は
+      // 同一（同じArrayBufferが得られる）。
+      try {
+        const buf = dataUrlToArrayBuffer(existing.glbDataUrl);
+        const loader = createRobustGltfLoader();
+        loader.parse(buf, '', (gltf) => {
+          onModelLoadedIntoScene(gltf.scene);
+          pendingSaveFormat = 'glb';
+          pendingSaveFileName = existing.fileName;
+          pendingSaveGlbArrayBuffer = buf;
+          setModelStatus('保存済みモデルを読み込みました。', false);
+        }, () => setModelStatus('保存済みモデルの読み込みに失敗しました。', true));
+      } catch (e) {
+        console.error(e);
+        setModelStatus('保存済みモデルの読み込みに失敗しました。', true);
+      }
     } else if (existing.format === 'obj') {
       const finish = (materials) => {
         const objLoader = new THREE.OBJLoader();
