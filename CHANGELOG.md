@@ -6,6 +6,77 @@ v50以降、変更のたびにここへ追記していく想定です（それ�
 
 ---
 
+## v65 - 2026-08-31
+
+3件の操縦ログ(docking-log-2026-08-31T05-10-31-967Z.csv /
+05-15-20-415Z.csv / 05-17-30-407Z.csv)を精査し、「巡洋艦級が
+オーバーシュートしがち」「距離800のアプローチ手前で減速し、
+distance=800で速度0になって動かなくなることがある」「減速時に
+主機関と逆噴射の凄い勢いでの往復が起きる」の3点に対応。
+
+### 修正: cruise中に距離800で速度0まで減速して止まってしまう
+
+- **症状**: distance=10000から巡航してくると、distance=805付近
+  から急激に減速し、distance=800到達時点でspeed≈1.1とほぼ完全に
+  停止していた（実測ログ05-15-20-415Zで確認: distance=805.2で
+  speed=12.1、distance=800.0で速度1.14）。
+- **原因**: v64まで、cruiseフェーズは`_applyApproachForce`の
+  `stoppingDistanceForCapOverride`に「distance=ZONE_APPROACH_START
+  (800)までの残り距離」を渡し、「境界到達時にちょうど速度0になる」
+  制動距離ベースの減速をしていた（v50-fix4で導入）。これは
+  cruise→approach境界でのオーバーシュート対策としては機能していた
+  が、意図せず「境界=停止目標」になってしまい、境界到達後の
+  approachフェーズでの再加速を待つ間、実質的に静止してしまう
+  結果になっていた。
+- **対応**: 「境界で速度0」ではなく「境界の先にあるapproachフェーズ
+  の巡航速度上限(APPROACH_MAX_BRAKING_DISTANCE相当)」を目標にする
+  よう変更。stoppingDistanceForCapOverrideによる0狙いの制動距離
+  キャップを廃止し、_runApproachPhaseと同じ固定速度上限方式
+  （maxBrakingDistanceOverride=APPROACH_MAX_BRAKING_DISTANCE）に
+  統一した（`03-thruster-solver.js` `_runCruisePhase`）。cruise中は
+  この速度上限まで巡航し続け、distance=800到達時点でもその速度を
+  保ったままapproachへ滑らかに合流するようになる。
+
+### 修正: 減速時に主機関と逆噴射が激しく往復する（境界付近のハンチング）
+
+- **症状**: adjust/final_approachフェーズで、艦がZONE_BRAKE300(300)
+  やZONE_BRAKE250(250)の境界のごく手前で、前進・後退を繰り返し
+  ながら小刻みに往復し続ける現象が起きていた（実測ログ
+  05-17-30-407Zで確認: adjustフェーズでdistance=300.0〜301.1の間を
+  約6秒周期で2往復以上し続けていた）。速度も往復のたびに符号が
+  反転していた。
+- **原因**: `_applyApproachForce`のv50-fix4の「stoppingSpeedCap
+  （境界までの物理的な制動限界）を超過している場合は超過量に
+  関わらず問答無用でフルブレーキ」という判定が、境界
+  （distance≒目標距離、stoppingSpeedCap≒0）のごく近傍でオン・オフ
+  的に反転していた。closingSpeedがstoppingSpeedCapをわずかにでも
+  超えると即フルブレーキ(brakeStrength=1)になり、艦が境界の内側へ
+  わずかに押し戻される→内側では前進推力(approachStrength)が働く
+  →再び境界を超えてまたフルブレーキ、というオン・オフの繰り返し
+  でハンチング（振動）していた。簡易物理シミュレーションで、旧
+  ロジックは境界通過の1フレームで速度が+0.058→-0.219へ急反転する
+  一方、新ロジックでは滑らかに減衰することを確認した。
+- **対応**: closingSpeedのstoppingSpeedCap超過量がARRIVAL_SPEED
+  程度の小さい範囲内では即フルブレーキにせず、通常の緩やかな比例
+  ブレーキ側に回すことで境界付近に不感帯を設けた（`03-thruster-
+  solver.js` `_applyApproachForce`）。`_applyApproachForce`の
+  シグニチャにparamsを追加し、adjust/final_approach/cruise/
+  return_to_axisの全4呼び出し箇所から港ごとのARRIVAL_SPEED設定を
+  参照できるようにした。
+
+### 巡洋艦級のオーバーシュートについて
+
+- 3件のログではdistanceが目標を追い越す意味での真のオーバー
+  シュート（alongDistの符号反転）は確認できなかった。ただし
+  上記のハンチングと同一ロジックが原因と考えられ、減速力の低い
+  （＝1フレームあたりの速度変化が大きい）艦ほど振動が顕著になる
+  傾向があるため、巡洋艦級で「オーバーシュートしがち」と感じる
+  体感は、実際には境界付近のこのハンチング（行き過ぎては戻る動き）
+  だった可能性が高い。上記の修正で解消される見込み。改善しない
+  場合は改めてログを確認する。
+
+---
+
 ## v64 - 2026-08-30
 
 ### 修正: 遠方からでもreturn_to_axis（進入軸への回り込み）にいきなり入ってしまう不具合

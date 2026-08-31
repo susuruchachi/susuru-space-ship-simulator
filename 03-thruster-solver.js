@@ -1171,7 +1171,9 @@ const ThrusterSolver = {
   //     招く。この引数でtarget.positionまでの実距離を渡すことで、
   //     「操舵方向は仕想WPへ、減速の基準はtarget.positionへの実距離」
   //     を両立させる。
-  _applyApproachForce(ship, targetPosWorld, maxBrakingDistanceOverride, desiredForce, stoppingDistanceForCapOverride) {
+  //   params: ARRIVAL_SPEED（境界付近の不感帯マージンに使用、v64-fix2）
+  //     など、港ごとにオーバーライド可能なドッキングパラメータ一式。
+  _applyApproachForce(ship, targetPosWorld, maxBrakingDistanceOverride, desiredForce, stoppingDistanceForCapOverride, params) {
     const toTargetWorld = {
       x: targetPosWorld.x - ship.position.x,
       y: targetPosWorld.y - ship.position.y,
@@ -1242,7 +1244,25 @@ const ThrusterSolver = {
       // adjustの巡航速度目安）側の超過は、引き続き緩やかな比例
       // ブレーキのままでよい（巡航速度の目安に過ぎず、間に合わなく
       // なる性質のものではないため）。
-      const overStoppingCap = closingSpeed > stoppingSpeedCap;
+      //
+      // v64-fix2: 上のoverStoppingCapのオン・オフ的な即フルブレーキが、
+      // stopAtDistance境界（distance≒stopAtDistance、stoppingSpeedCap
+      // ≒0）のごく近傍で振動を引き起こしていた。closingSpeedが
+      // stoppingSpeedCapをわずか（ARRIVAL_SPEED未満程度）に超えた
+      // だけでも即フルブレーキ(brakeStrength=1)になり、艦が境界の
+      // 内側へわずかに押し戻される→内側ではapproachStrengthによる
+      // 前進推力が働く→再び境界を超えてまたフルブレーキ、という
+      // オン・オフの繰り返しで「主機関と逆噴射の凄い勢いでの往復」に
+      // なっていた（実測ログdocking-log-2026-08-31T05-17-30-407Zで
+      // 確認: adjustフェーズでdistance=300.01〜301.1の間を主機関・
+      // 逆噴射を切り替えながら20往復以上し続けていた）。
+      // closingSpeedの超過量自体がARRIVAL_SPEED未満の小さい間は、
+      // 間に合わなくなる速度超過ではなく単なる整定誤差なので、
+      // 即フルブレーキにせず緩やかな比例ブレーキ側へ回すことで
+      // 境界付近に不感帯を持たせ、振動を抑える。
+      const stoppingCapOver = closingSpeed - stoppingSpeedCap;
+      const arrivalSpeed = (params && params.ARRIVAL_SPEED !== undefined) ? params.ARRIVAL_SPEED : this.DOCKING_DEFAULTS.ARRIVAL_SPEED;
+      const overStoppingCap = stoppingCapOver > arrivalSpeed;
       const over = closingSpeed - effectiveCap;
       const brakeStrength = overStoppingCap ? 1 : Math.min(1, over / this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR);
       desiredForce.x += -dirLocal.x * brakeStrength;
@@ -1840,31 +1860,33 @@ const ThrusterSolver = {
     return { desiredForce, desiredTorque };
   },
 
-  // v50-fix4: 従来はCRUISE_BRAKE_LEAD_DISTANCE(1200)という固定距離を
-  // 使い、「ZONE_APPROACH_START+1200」から「approachフェーズの速度
-  // 上限(APPROACH_MAX_BRAKING_DISTANCE相当)」へ向けてmaxBrakingDistance
-  // Overrideを線形に絞っていた。この設計は艦の実際の制動能力
-  // （_estimateMaxLinearDecel）と無関係な固定距離だったため、
-  // 最高速度が高い・減速力が低い艦種では1200の距離では全く
-  // 間に合わず、cruise→approach境界(distance=800)通過時点でまだ
-  // 大幅な速度超過を抱えたまま次のフェーズへなだれ込み、300/250の
-  // ブレーキポイントで止まりきれずオーバーシュートする不具合が
-  // あった（実測ログで、最高速度267.8の艦がdistance=800到達時点で
-  // まだ216.1もの速度を残していたことを確認済み）。
+  // v64-fix1: 従来はstoppingDistanceForCapOverride（「distance=ZONE_
+  // APPROACH_STARTまでの残り距離」を制動距離の基準にする方式）で
+  // 「境界到達時にちょうど速度0になる」よう減速していた。これは
+  // オーバーシュート対策としては有効だったが、行き過ぎで
+  // 「distance=800に着く頃には速度がほぼ0まで落ちて、そこから
+  // approachフェーズの再加速を待つ間ほぼ静止してしまう」という
+  // 新たな不具合を生んだ（実測ログdocking-log-2026-08-31T05-15-20
+  // -415Zで確認: distance=800到達時点でspeed=1.14、その手前
+  // distance=805でspeed=12.1と、800にかなり手前から速度0近くまで
+  // 丁寧に減速し切っていた）。
   //
-  // 代わりに、_applyApproachForceのstoppingDistanceForCapOverride
-  // （目的地への物理的な制動距離を計算する基準距離）に「ZONE_
-  // APPROACH_STARTまでの残り距離」を渡す方式に変更した。これは
-  // 艦の実際の制動能力から逆算されるため、艦種に関わらず
-  // 「境界到達時にちょうど速度0になる」よう自然に減速プロファイルが
-  // 決まる（adjust/final_approachフェーズが既にstopAtDistanceで
-  // 採用している考え方と同じ）。固定距離の先読みロジックは不要に
-  // なったため削除。
+  // 「境界で速度0」ではなく「境界の先にあるapproachフェーズの巡航
+  // 速度上限(APPROACH_MAX_BRAKING_DISTANCE相当)」を目標にすれば
+  // 十分なので、stoppingDistanceForCapOverrideによる0狙いの制動距離
+  // キャップは廃止し、_runApproachPhaseと同じ固定速度上限方式
+  // （maxBrakingDistanceOverride=APPROACH_MAX_BRAKING_DISTANCE）に
+  // 統一した。「目的地に近づけば自然に減速する」効果自体は
+  // stoppingDistanceForCapOverride省略時のデフォルト（targetPos
+  // Worldへの実距離を使う）でdistance=10000超のような遠方では
+  // 全く効かず、速度上限のみが効くため、cruise中はAPPROACH_MAX_
+  // BRAKING_DISTANCE相当の速度に張り付いたまま巡航し、distance=800
+  // 到達時点でもその速度を保ったままapproachへ滑らかに合流する。
   //
   // -----------------------------------------------------------
-  // cruise: 自由巡航。仕想WPへの最短ベクトルへ向け、加速・最高速
-  // 巡航・「distance=ZONE_APPROACH_STARTでちょうど速度0」になる
-  // 制動距離ベースの減速を行う単純なボング＝ボング制御。
+  // cruise: 自由巡航。仕想WPへの最短ベクトルへ向け、加速・
+  // APPROACH_MAX_BRAKING_DISTANCE相当の速度上限まで巡航する単純な
+  // ボング＝ボング制御。
   // 姿勢もできれば早めに整えたいが強制はしない
   // （DOCKING_HEADING_FULL_TORQUE_ANGLEの緩い閾値のまま）。
   // -----------------------------------------------------------
@@ -1882,12 +1904,12 @@ const ThrusterSolver = {
     this._applyRollTorque(ship, target, desiredTorque, this.DOCKING_HEADING_FULL_TORQUE_ANGLE);
     this._applyAngularDamping(ship, desiredTorque, dt, params.ARRIVAL_ANGULAR_SPEED);
 
-    // 速度上限自体(speedCap)は無制限のまま。「distance=ZONE_APPROACH_
-    // STARTまでの残り距離」を制動距離の基準にすることで、境界到達時に
-    // ちょうどAPPROACH_MAX_BRAKING_DISTANCE相当（実質速度0近く）まで
-    // 減速するようにする。
-    const stoppingBasisDistance = Math.max(0, distance - params.ZONE_APPROACH_START);
-    this._applyApproachForce(ship, virtualWP, null, desiredForce, stoppingBasisDistance);
+    // APPROACH_MAX_BRAKING_DISTANCE相当の固定速度上限まで巡航する。
+    // target.positionへの実距離に基づく自然減速（stoppingDistanceFor
+    // CapOverride省略時のデフォルト）も併用されるが、cruise開始時点
+    // ではdistanceが十分大きいため通常この上限には掛からず、速度上限
+    // だけが効く。
+    this._applyApproachForce(ship, virtualWP, params.APPROACH_MAX_BRAKING_DISTANCE, desiredForce, undefined, params);
   },
 
   // -----------------------------------------------------------
@@ -2038,7 +2060,7 @@ const ThrusterSolver = {
     // されるが、ここでも明示しておく）。
     const stoppingBasisDistance =
       stopAtDistance !== undefined ? Math.max(0, distance - stopAtDistance) : distance;
-    this._applyApproachForce(ship, forceAimPoint, maxBrakingDistance, desiredForce, stoppingBasisDistance);
+    this._applyApproachForce(ship, forceAimPoint, maxBrakingDistance, desiredForce, stoppingBasisDistance, params);
 
     // v56: _applyApproachForceの横滑りブレーキ(lateralVel成分の除去)
     // だけでは、進入軸に対する横方向の「位置ズレ」自体を縮める力には
@@ -2288,7 +2310,7 @@ const ThrusterSolver = {
     // 減速の基準はdistance=ZONE_BRAKE250までの残り距離
     // （stoppingDistanceForCapOverride）にする。
     const stoppingBasisDistance = Math.max(0, distance - params.ZONE_BRAKE250);
-    this._applyApproachForce(ship, target.position, params.ADJUST_MAX_BRAKING_DISTANCE, desiredForce, stoppingBasisDistance);
+    this._applyApproachForce(ship, target.position, params.ADJUST_MAX_BRAKING_DISTANCE, desiredForce, stoppingBasisDistance, params);
   },
 
   // -----------------------------------------------------------
@@ -2499,6 +2521,6 @@ const ThrusterSolver = {
     // 高速で横切った直後にこのフェーズへ入った場合、そのままの
     // 速度で750先の中間地点へ全力加速してしまい大きく軸から
     // 離れてしまう。
-    this._applyApproachForce(ship, returnTarget, this.RETURN_TO_AXIS_MAX_BRAKING_DISTANCE, desiredForce);
+    this._applyApproachForce(ship, returnTarget, this.RETURN_TO_AXIS_MAX_BRAKING_DISTANCE, desiredForce, undefined, params);
   },
 };
