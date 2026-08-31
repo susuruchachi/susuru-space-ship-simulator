@@ -1403,7 +1403,23 @@ const ThrusterSolver = {
     // 再アプローチ時にbrake300を一度もスキップしてしまう
     // （距離300での正規の停止・軸合わせ手順を踏まなくなる）ため、
     // ここでリセットして次回入港でも正規の手順を踏ませる。
+    //
+    // v70: 上記のリセットは「遠方まで離れて改めて再アプローチする」
+    // ケースを想定したものだが、docked状態から手動操縦でトンネル内
+    // (distance<=ZONE_FINAL_APPROACH)にわずかに前進しただけの場合にも
+    // 無条件に適用されてしまい、この直後の「distance<=ZONE_BRAKE300かつ
+    // _dockingBrake300Done=false」判定（下方）でbrake300が選ばれ、
+    // トンネルの外にある距離300まで後進で戻ろうとする不具合があった。
+    // このとき艦は既にトンネル内におり正規の手順（距離300での外側の
+    // 停止・軸合わせ）を今さら踏む意味がないため、離脱位置がトンネル内
+    // であれば_dockingBrake300Doneのリセットを行わず、代わりに
+    // tunnel/overshootへ直接戻す（下のreturn_to_axisブロックと同じ
+    // 「奥側からの復帰」の考え方を、ここでは「トンネル内からの復帰」に
+    // 適用する）。
     if (prevPhase === 'docked') {
+      if (distance <= params.ZONE_FINAL_APPROACH) {
+        return alongDist < 0 ? 'overshoot' : 'tunnel';
+      }
       ship._dockingBrake300Done = false;
     }
 
@@ -1886,45 +1902,6 @@ const ThrusterSolver = {
         break;
       default:
         break;
-    }
-
-    // v69: 「トンネル内（distance<=ZONE_FINAL_APPROACH）では後進しない
-    // ようにしたい、オーバーシュートと同じ扱いで処理してほしい」との
-    // 要望に対応。tunnel/overshootフェーズ自体は元々進入軸の逆走
-    // （手前方向=-approachAxisWorld方向への推力）を出さない設計だが、
-    // 到着後に手動で少し前進させてトンネル内(distance<200)から
-    // 自動操縦を再開すると、brake300/brake250/final_approach/adjust等の
-    // フェーズは「alongDistがtargetDistanceより奥寄りなら後退方向の
-    // 力が自動的に出る」双方向の位置収束（_runBrakePhaseのコメント
-    // 参照）になっているため、トンネル内であっても距離300/250へ
-    // 戻ろうとして後進してしまっていた（アップロードされた操縦ログ
-    // docking-log-2026-08-31T09-05-10-477Zで確認: t=343336付近、
-    // 到着後に前進してdistance=1.13までの位置からbrake300に入り、
-    // velZが正（手前方向）のまま距離300近くまで押し戻され続けていた）。
-    // tunnel/overshoot自身のロジックは変更せず、distance<=
-    // ZONE_FINAL_APPROACHのときに限り、上のswitchで各フェーズが
-    // 計算したdesiredForce（艦ローカル座標）をワールドへ戻し、
-    // -approachAxisWorld方向（手前方向）の成分だけを0未満にクランプ
-    // してから再度ローカルへ戻す後処理を、全フェーズ共通で一箇所に
-    // 追加した。これによりトンネル内にいる間はどのフェーズであっても
-    // 手前方向への推力が一切出なくなり、オーバーシュート処理
-    // （進入軸逆走禁止）と同じ制約が適用される。奥方向
-    // (+approachAxisWorld方向、目的地に近づく方向)への推力・横方向の
-    // 推力は従来通り制限しない。
-    if (distance <= params.ZONE_FINAL_APPROACH) {
-      const desiredForceWorld = rotateVecByQuat(desiredForce, ship.quaternion);
-      const outwardComponent = vecDot(desiredForceWorld, approachAxisWorld);
-      if (outwardComponent < 0) {
-        const correctedWorld = {
-          x: desiredForceWorld.x - approachAxisWorld.x * outwardComponent,
-          y: desiredForceWorld.y - approachAxisWorld.y * outwardComponent,
-          z: desiredForceWorld.z - approachAxisWorld.z * outwardComponent,
-        };
-        const correctedLocal = rotateVecByQuat(correctedWorld, conjugateQuat(ship.quaternion));
-        desiredForce.x = correctedLocal.x;
-        desiredForce.y = correctedLocal.y;
-        desiredForce.z = correctedLocal.z;
-      }
     }
 
     return { desiredForce, desiredTorque };
