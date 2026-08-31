@@ -1173,7 +1173,7 @@ const ThrusterSolver = {
   //     を両立させる。
   //   params: ARRIVAL_SPEED（境界付近の不感帯マージンに使用、v64-fix2）
   //     など、港ごとにオーバーライド可能なドッキングパラメータ一式。
-  _applyApproachForce(ship, targetPosWorld, maxBrakingDistanceOverride, desiredForce, stoppingDistanceForCapOverride, params) {
+  _applyApproachForce(ship, targetPosWorld, maxBrakingDistanceOverride, desiredForce, stoppingDistanceForCapOverride, params, stoppingTargetSpeedOverride) {
     const toTargetWorld = {
       x: targetPosWorld.x - ship.position.x,
       y: targetPosWorld.y - ship.position.y,
@@ -1218,9 +1218,24 @@ const ThrusterSolver = {
     // 上限として効かせる（速度上限区間内でも、目的地に近づけば
     // 自然に減速していく）。基準距離はstoppingDistanceForCapOverride
     // があればそちらを、なければtargetPosWorldへのdistanceを使う。
+    //
+    // v65-fix: 従来はこの制動距離ベースの上限が常に「終端で速度0」を
+    // 狙う計算(v=sqrt(2*decel*d))だった。cruiseフェーズがdistance=
+    // ZONE_APPROACH_START(800)までの残り距離をこの基準distanceとして
+    // 渡すと、境界到達時にちょうど速度0まで減速してしまい、直後の
+    // approachフェーズで再加速するまで実質停止する不具合になっていた
+    // （speedCap自体は無制限のままでも、この停止狙いの制動距離キャップ
+    // の方がより厳しく効いてしまうため）。stoppingTargetSpeedOverride
+    // （省略時は従来通り0）を指定すると、終端で目指す速度を0以外に
+    // できるようにした。v(d)² = target² + 2*decel*d*margin の形に
+    // 一般化（target=0のときは従来の_speedForBrakingDistanceと同一）。
     const stoppingBasisDistance =
       stoppingDistanceForCapOverride !== undefined ? stoppingDistanceForCapOverride : distance;
-    const stoppingSpeedCap = this._speedForBrakingDistance(maxDecel, stoppingBasisDistance);
+    const stoppingTargetSpeed = stoppingTargetSpeedOverride !== undefined ? stoppingTargetSpeedOverride : 0;
+    const stoppingSpeedCap = Math.sqrt(
+      stoppingTargetSpeed * stoppingTargetSpeed +
+        2 * Math.max(maxDecel, 1e-6) * Math.max(0, stoppingBasisDistance) * this.BRAKE_SAFETY_MARGIN
+    );
     const effectiveCap = Math.min(speedCap, stoppingSpeedCap);
 
     if (closingSpeed > effectiveCap) {
@@ -1860,33 +1875,31 @@ const ThrusterSolver = {
     return { desiredForce, desiredTorque };
   },
 
-  // v64-fix1: 従来はstoppingDistanceForCapOverride（「distance=ZONE_
-  // APPROACH_STARTまでの残り距離」を制動距離の基準にする方式）で
-  // 「境界到達時にちょうど速度0になる」よう減速していた。これは
-  // オーバーシュート対策としては有効だったが、行き過ぎで
-  // 「distance=800に着く頃には速度がほぼ0まで落ちて、そこから
-  // approachフェーズの再加速を待つ間ほぼ静止してしまう」という
-  // 新たな不具合を生んだ（実測ログdocking-log-2026-08-31T05-15-20
-  // -415Zで確認: distance=800到達時点でspeed=1.14、その手前
-  // distance=805でspeed=12.1と、800にかなり手前から速度0近くまで
-  // 丁寧に減速し切っていた）。
+  // cruiseフェーズの速度設計（v66時点）:
+  // - 自由航行中(speedCap)は無制限。艦の最高速度まで自由に加速してよい。
+  // - distance=ZONE_APPROACH_START(800)までの残り距離を制動距離の基準
+  //   (stoppingDistanceForCapOverride)にし、その終端で目指す速度
+  //   (stoppingTargetSpeedOverride)をapproachフェーズの巡航速度上限
+  //   (APPROACH_MAX_BRAKING_DISTANCE相当)にする。これにより境界より
+  //   十分遠い間は減速の必要がなく最高速度で巡航でき、境界に近づくに
+  //   つれ「境界到達時にちょうどapproachフェーズの巡航速度まで（0には
+  //   ならず）滑らかに減速し切る」曲線になる。
   //
-  // 「境界で速度0」ではなく「境界の先にあるapproachフェーズの巡航
-  // 速度上限(APPROACH_MAX_BRAKING_DISTANCE相当)」を目標にすれば
-  // 十分なので、stoppingDistanceForCapOverrideによる0狙いの制動距離
-  // キャップは廃止し、_runApproachPhaseと同じ固定速度上限方式
-  // （maxBrakingDistanceOverride=APPROACH_MAX_BRAKING_DISTANCE）に
-  // 統一した。「目的地に近づけば自然に減速する」効果自体は
-  // stoppingDistanceForCapOverride省略時のデフォルト（targetPos
-  // Worldへの実距離を使う）でdistance=10000超のような遠方では
-  // 全く効かず、速度上限のみが効くため、cruise中はAPPROACH_MAX_
-  // BRAKING_DISTANCE相当の速度に張り付いたまま巡航し、distance=800
-  // 到達時点でもその速度を保ったままapproachへ滑らかに合流する。
+  // 経緯: v64以前はこの制動距離ベースの上限が常に「終端で速度0」を
+  // 狙う計算だったため、境界到達時に速度がほぼ0まで落ち、そこから
+  // approachフェーズの再加速を待つ間ほぼ静止してしまう不具合があった
+  // （実測ログdocking-log-2026-08-31T05-15-20-415Zで確認）。v65は
+  // これを「speedCap自体をAPPROACH_MAX_BRAKING_DISTANCE相当に固定する」
+  // 形で対応したが、今度はcruise開始直後からその低い上限に張り付いて
+  // しまい、「自由航行中は最高速度まで出してよい」という要件を壊して
+  // いた（実測ログdocking-log-2026-08-31T06-21-00-245Zで確認）。v66で
+  // は_applyApproachForceに終端目標速度を指定できる引数を追加し、
+  // speedCapは無制限のまま・制動距離ベースの上限だけが0以外の値へ
+  // 収束するようにして両方の要件を同時に満たす形にした。
   //
   // -----------------------------------------------------------
-  // cruise: 自由巡航。仕想WPへの最短ベクトルへ向け、加速・
-  // APPROACH_MAX_BRAKING_DISTANCE相当の速度上限まで巡航する単純な
-  // ボング＝ボング制御。
+  // cruise: 自由巡航。仕想WPへの最短ベクトルへ向け、加速・上記の速度
+  // プロファイルに従って巡航する単純なボング＝ボング制御。
   // 姿勢もできれば早めに整えたいが強制はしない
   // （DOCKING_HEADING_FULL_TORQUE_ANGLEの緩い閾値のまま）。
   // -----------------------------------------------------------
@@ -1904,12 +1917,19 @@ const ThrusterSolver = {
     this._applyRollTorque(ship, target, desiredTorque, this.DOCKING_HEADING_FULL_TORQUE_ANGLE);
     this._applyAngularDamping(ship, desiredTorque, dt, params.ARRIVAL_ANGULAR_SPEED);
 
-    // APPROACH_MAX_BRAKING_DISTANCE相当の固定速度上限まで巡航する。
-    // target.positionへの実距離に基づく自然減速（stoppingDistanceFor
-    // CapOverride省略時のデフォルト）も併用されるが、cruise開始時点
-    // ではdistanceが十分大きいため通常この上限には掛からず、速度上限
-    // だけが効く。
-    this._applyApproachForce(ship, virtualWP, params.APPROACH_MAX_BRAKING_DISTANCE, desiredForce, undefined, params);
+    // v65-fix2: cruise中のspeedCap自体は無制限（艦の最高速度まで自由に
+    // 巡航してよい）に戻す。distance=ZONE_APPROACH_START(800)までの
+    // 残り距離を制動距離の基準にしつつ、その終端で目指す速度を0では
+    // なくAPPROACH_MAX_BRAKING_DISTANCE相当のapproachフェーズ巡航速度
+    // にすることで、「境界到達時に速度0で停止」ではなく「境界到達時に
+    // approachフェーズの上限速度まで滑らかに減速し、そのままapproachへ
+    // 合流する」という本来の意図通りの挙動にする。
+    const stoppingBasisDistance = Math.max(0, distance - params.ZONE_APPROACH_START);
+    const approachCapSpeed = this._speedForBrakingDistance(
+      this._estimateMaxLinearDecel(ship),
+      params.APPROACH_MAX_BRAKING_DISTANCE
+    );
+    this._applyApproachForce(ship, virtualWP, null, desiredForce, stoppingBasisDistance, params, approachCapSpeed);
   },
 
   // -----------------------------------------------------------

@@ -6,6 +6,49 @@ v50以降、変更のたびにここへ追記していく想定です（それ�
 
 ---
 
+## v66 - 2026-08-31
+
+### 修正: v65の対応後、自由航行(cruise)中もずっと低速のままになる不具合
+
+- **症状**: v65で「cruise中に距離800で速度0まで減速して止まってしまう」
+  問題を修正したはずが、今度はcruise中ずっと（距離800からかなり遠い
+  地点でも）低速のまま巡航してしまい、艦本来の最高速度まで加速しなく
+  なった（アップロードされたログdocking-log-2026-08-31T06-21-00-245Zで
+  確認: distance=2000でspeed=0、その後もspeed≈37.17に頭打ちのまま
+  distance=800付近まで一定）。
+- **原因**: v65の対応は、`_runCruisePhase`が`_applyApproachForce`へ
+  渡す`maxBrakingDistanceOverride`（速度上限そのものを決める
+  `speedCap`）に、本来approach/adjustフェーズの巡航速度上限を表す
+  `APPROACH_MAX_BRAKING_DISTANCE`(50)をそのまま渡す形にしてしまって
+  いた。これにより`speedCap`自体がcruise開始直後から
+  「distance=50で止まれる速度」＝約37.17に固定され、cruise中は常に
+  この低い上限で頭打ちになっていた（「境界で速度0」問題は解消したが、
+  「自由航行中は最高速度まで出してよい」という設計要件を壊していた）。
+- **対応**: `03-thruster-solver.js`を修正。
+  - `_applyApproachForce`に新しい引数`stoppingTargetSpeedOverride`
+    （省略時0、既存の3呼び出し箇所は変更なしで従来通り動作）を追加。
+    目的地・境界までの物理的な制動距離から速度上限を逆算する
+    `stoppingSpeedCap`の計算を、「終端で速度0」固定から
+    `v(d)² = target² + 2*decel*d*margin`（`target`はこの引数、0なら
+    従来と同一）に一般化した。
+  - `_runCruisePhase`を、v63以前と同様に`maxBrakingDistanceOverride`
+    には`null`（speedCap無制限）を渡す形に戻した上で、
+    `stoppingDistanceForCapOverride`に「distance=ZONE_APPROACH_START
+    (800)までの残り距離」、新設の`stoppingTargetSpeedOverride`に
+    「APPROACH_MAX_BRAKING_DISTANCE相当のapproachフェーズ巡航速度
+    （≈37.17、艦の制動能力による）」を渡すよう変更。これにより、
+    境界から十分遠い間はspeedCap無制限で艦の最高速度まで自由に加速し、
+    境界に近づくにつれ「境界到達時にちょうどapproachフェーズの巡航
+    速度まで（0にはならず）滑らかに減速し切る」曲線で減速するように
+    なる。approach以降のフェーズ（`APPROACH_MAX_BRAKING_DISTANCE`
+    自体の速度上限としての使われ方）は変更していない。
+- 簡易シミュレーションで、distance=2000→800まで一貫して速度上限が
+  185.83→143.94→…→37.17(distance=800到達時)と滑らかに単調減少し、
+  境界より十分遠い区間では実質無制限（艦の最高速度まで加速可能）に
+  なることを確認済み。
+
+---
+
 ## v65 - 2026-08-31
 
 3件の操縦ログ(docking-log-2026-08-31T05-10-31-967Z.csv /
