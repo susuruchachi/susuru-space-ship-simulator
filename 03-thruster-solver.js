@@ -1259,7 +1259,6 @@ const ThrusterSolver = {
       // adjustの巡航速度目安）側の超過は、引き続き緩やかな比例
       // ブレーキのままでよい（巡航速度の目安に過ぎず、間に合わなく
       // なる性質のものではないため）。
-      //
       // v64-fix2: 上のoverStoppingCapのオン・オフ的な即フルブレーキが、
       // stopAtDistance境界（distance≒stopAtDistance、stoppingSpeedCap
       // ≒0）のごく近傍で振動を引き起こしていた。closingSpeedが
@@ -1271,15 +1270,32 @@ const ThrusterSolver = {
       // なっていた（実測ログdocking-log-2026-08-31T05-17-30-407Zで
       // 確認: adjustフェーズでdistance=300.01〜301.1の間を主機関・
       // 逆噴射を切り替えながら20往復以上し続けていた）。
-      // closingSpeedの超過量自体がARRIVAL_SPEED未満の小さい間は、
-      // 間に合わなくなる速度超過ではなく単なる整定誤差なので、
-      // 即フルブレーキにせず緩やかな比例ブレーキ側へ回すことで
-      // 境界付近に不感帯を持たせ、振動を抑える。
+      //
+      // v67-fix: v64-fix2の対応（overStoppingCapが閾値ARRIVAL_SPEEDを
+      // 境に0→1へ「段差」で切り替わる）は静止目標（brake300/250等、
+      // stoppingSpeedCap≒0固定）では十分機能していたが、cruiseのように
+      // stoppingSpeedCapが距離とともに連続的に縮み続ける「動く上限」に
+      // 対しては、段差の両側で実際のbrakeStrengthが1↔弱いブレーキの間を
+      // 毎フレーム往復するオン・オフ振動を新たに引き起こしていた
+      // （実測ログdocking-log-2026-08-31T09-05-10-477Zで確認: cruise中
+      // distance=1420〜1380付近で速度の減り方が「大きく減る×6〜7回→
+      // わずかに減る1回」を周期的に繰り返していた。フルブレーキ中は
+      // stoppingSpeedCapの縮小より減速の方が速く進むため数フレームで
+      // 超過量がARRIVAL_SPEEDを下回って弱いブレーキに切り替わり、弱い
+      // ブレーキでは逆に上限の縮小に追いつけず再び超過量がARRIVAL_SPEED
+      // を超えてフルブレーキへ戻る、というリミットサイクルだった）。
+      // 段差そのものをなくし、超過量が0→ARRIVAL_SPEEDの範囲では
+      // brakeStrengthを比例ブレーキ値→1へ線形に滑らかに遷移させる形に
+      // 変更した。超過量が0の時点（境界ちょうど）は従来と同じ比例
+      // ブレーキ値、ARRIVAL_SPEED以上超過した時点で従来と同じ
+      // フルブレーキ(1)になり、その間は連続的に変化するため、段差に
+      // 起因する振動が原理的に起きなくなる。
       const stoppingCapOver = closingSpeed - stoppingSpeedCap;
       const arrivalSpeed = (params && params.ARRIVAL_SPEED !== undefined) ? params.ARRIVAL_SPEED : this.DOCKING_DEFAULTS.ARRIVAL_SPEED;
-      const overStoppingCap = stoppingCapOver > arrivalSpeed;
       const over = closingSpeed - effectiveCap;
-      const brakeStrength = overStoppingCap ? 1 : Math.min(1, over / this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR);
+      const proportionalBrake = Math.min(1, over / this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR);
+      const fullBrakeBlend = arrivalSpeed > 1e-6 ? clamp(stoppingCapOver / arrivalSpeed, 0, 1) : (stoppingCapOver > 0 ? 1 : 0);
+      const brakeStrength = proportionalBrake + (1 - proportionalBrake) * fullBrakeBlend;
       desiredForce.x += -dirLocal.x * brakeStrength;
       desiredForce.y += -dirLocal.y * brakeStrength;
       desiredForce.z += -dirLocal.z * brakeStrength;
@@ -1870,6 +1886,45 @@ const ThrusterSolver = {
         break;
       default:
         break;
+    }
+
+    // v69: 「トンネル内（distance<=ZONE_FINAL_APPROACH）では後進しない
+    // ようにしたい、オーバーシュートと同じ扱いで処理してほしい」との
+    // 要望に対応。tunnel/overshootフェーズ自体は元々進入軸の逆走
+    // （手前方向=-approachAxisWorld方向への推力）を出さない設計だが、
+    // 到着後に手動で少し前進させてトンネル内(distance<200)から
+    // 自動操縦を再開すると、brake300/brake250/final_approach/adjust等の
+    // フェーズは「alongDistがtargetDistanceより奥寄りなら後退方向の
+    // 力が自動的に出る」双方向の位置収束（_runBrakePhaseのコメント
+    // 参照）になっているため、トンネル内であっても距離300/250へ
+    // 戻ろうとして後進してしまっていた（アップロードされた操縦ログ
+    // docking-log-2026-08-31T09-05-10-477Zで確認: t=343336付近、
+    // 到着後に前進してdistance=1.13までの位置からbrake300に入り、
+    // velZが正（手前方向）のまま距離300近くまで押し戻され続けていた）。
+    // tunnel/overshoot自身のロジックは変更せず、distance<=
+    // ZONE_FINAL_APPROACHのときに限り、上のswitchで各フェーズが
+    // 計算したdesiredForce（艦ローカル座標）をワールドへ戻し、
+    // -approachAxisWorld方向（手前方向）の成分だけを0未満にクランプ
+    // してから再度ローカルへ戻す後処理を、全フェーズ共通で一箇所に
+    // 追加した。これによりトンネル内にいる間はどのフェーズであっても
+    // 手前方向への推力が一切出なくなり、オーバーシュート処理
+    // （進入軸逆走禁止）と同じ制約が適用される。奥方向
+    // (+approachAxisWorld方向、目的地に近づく方向)への推力・横方向の
+    // 推力は従来通り制限しない。
+    if (distance <= params.ZONE_FINAL_APPROACH) {
+      const desiredForceWorld = rotateVecByQuat(desiredForce, ship.quaternion);
+      const outwardComponent = vecDot(desiredForceWorld, approachAxisWorld);
+      if (outwardComponent < 0) {
+        const correctedWorld = {
+          x: desiredForceWorld.x - approachAxisWorld.x * outwardComponent,
+          y: desiredForceWorld.y - approachAxisWorld.y * outwardComponent,
+          z: desiredForceWorld.z - approachAxisWorld.z * outwardComponent,
+        };
+        const correctedLocal = rotateVecByQuat(correctedWorld, conjugateQuat(ship.quaternion));
+        desiredForce.x = correctedLocal.x;
+        desiredForce.y = correctedLocal.y;
+        desiredForce.z = correctedLocal.z;
+      }
     }
 
     return { desiredForce, desiredTorque };
