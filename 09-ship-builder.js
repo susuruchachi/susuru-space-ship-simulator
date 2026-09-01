@@ -316,16 +316,27 @@
     return { right, up };
   }
 
+  // v73: パンの向きが逆との報告を受けて符号を反転（08-camera.jsと統一）。
   function applyScreenPan(dx, dy) {
     const { right, up } = computeScreenAxes();
     const scale = orbitState.radius * PAN_SENSITIVITY;
-    orbitState.target.x += (-right.x * dx + up.x * dy) * scale;
-    orbitState.target.y += (-right.y * dx + up.y * dy) * scale;
-    orbitState.target.z += (-right.z * dx + up.z * dy) * scale;
+    orbitState.target.x += (right.x * dx - up.x * dy) * scale;
+    orbitState.target.y += (right.y * dx - up.y * dy) * scale;
+    orbitState.target.z += (right.z * dx - up.z * dy) * scale;
   }
+
+  // v73: 「パンするときに回転しちゃう」不具合を修正。
+  // 従来はpointerdownのたびにpanning = e.shiftKeyで上書きしていたため、
+  // 2本指目が触れた瞬間（shiftKeyはfalseなので）panningがfalseに
+  // リセットされ、単指用の回転処理（下のpointermove）がactivePointers
+  // ベースの2本指パン処理と同時に動いてしまっていた。
+  // activePointersを先に定義し、「今アクティブな指が1本だけか」で
+  // 単指ドラッグ＝回転／パンを判定するよう統一する。
+  const activePointers = new Map();
 
   canvas.addEventListener('pointerdown', (e) => {
     if (!modelRoot) return;
+    activePointers.set(e.pointerId, e);
     dragging = true;
     panning = e.shiftKey;
     lastX = e.clientX;
@@ -334,6 +345,9 @@
   });
   canvas.addEventListener('pointermove', (e) => {
     if (!dragging) return;
+    // 2本指以上がアクティブな間は、下の2本指パン処理に任せる
+    // （単指用の回転/パン処理はここで止める）。
+    if (activePointers.size >= 2) return;
     const dx = e.clientX - lastX;
     const dy = e.clientY - lastY;
     lastX = e.clientX;
@@ -357,8 +371,6 @@
 
   // 簡易ピンチズーム（2本指）。二本指スワイプ（中点の移動）はパンとして
   // 同時に処理する。
-  const activePointers = new Map();
-  canvas.addEventListener('pointerdown', (e) => activePointers.set(e.pointerId, e));
   canvas.addEventListener('pointermove', (e) => {
     if (!activePointers.has(e.pointerId)) return;
     activePointers.set(e.pointerId, e);

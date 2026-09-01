@@ -249,14 +249,15 @@ const CameraSystem = {
     up = { x: up.x / upLen, y: up.y / upLen, z: up.z / upLen };
 
     const scale = distance * this.PAN_SENSITIVITY;
-    // 右へドラッグ(dx>0)したら視点は左へ動いてほしい(=注視点は右へ、
-    // つまり見えている景色が指の動きについてくる)ため-dxを使う。
-    // 上へドラッグ(dy<0、clientYは上ほど小さい)したら注視点は上へ
-    // 動いてほしいので、dyの符号をそのまま使う。
+    // v73: パンの向きが逆との報告を受けて符号を反転。
+    // 右へドラッグ(dx>0)したら注視点も右へ動く(景色が指と逆方向に
+    // 流れる、一般的なカメラパン操作の感覚)。
+    // 上へドラッグ(dy<0、clientYは上ほど小さい)したら注視点は下へ
+    // 動くようにするため、dyの符号を反転させる。
     const worldDelta = {
-      x: (-right.x * dx + up.x * dy) * scale,
-      y: (-right.y * dx + up.y * dy) * scale,
-      z: (-right.z * dx + up.z * dy) * scale,
+      x: (right.x * dx - up.x * dy) * scale,
+      y: (right.y * dx - up.y * dy) * scale,
+      z: (right.z * dx - up.z * dy) * scale,
     };
     // ワールド座標の移動量を、船のローカル座標系に変換してから
     // _panOffsetLocalへ加算する（保持理由は_panOffsetLocalのコメント参照）。
