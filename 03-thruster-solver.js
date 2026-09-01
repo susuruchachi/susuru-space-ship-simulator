@@ -709,6 +709,18 @@ const ThrusterSolver = {
   // するための許容マージン。TUNNEL_REENTRY_TOLERANCEと同じ考え方。
   BRAKE250_REENTRY_TOLERANCE: 1.0,
 
+  // v71: 一度tunnelに入った後、艦の姿勢のわずかな傾きによる小さな
+  // 周期的横ズレ(lateral)の振動（実測ログでは概ね0〜0.165の範囲）が
+  // DOCKING_POSITION_MIN_DISTANCE(0.15)という狭い閾値をわずかに
+  // 超えるたびにbrake250へ差し戻され、tunnelの滑らかな減速
+  // プロファイルが「急減速→ほぼ停止→再加速」を繰り返すガクガクした
+  // 挙動になっていた。brake250からtunnelへの新規突入時の判定
+  // （安全策）には従来通りDOCKING_POSITION_MIN_DISTANCEを使うが、
+  // 一度tunnelに入った後の継続判定にはこちらの緩い許容値を使う
+  // （TUNNEL_REENTRY_TOLERANCE等と同じ「継続時は入場時より緩く」の
+  // 考え方）。実測の振動幅(最大0.165)に対して十分な余裕を持たせた値。
+  TUNNEL_LATERAL_REENTRY_TOLERANCE: 0.3,
+
   // v57: approachフェーズがdistance=ZONE_ADJUST_STARTへ収束しようと
   // する過程で境界をわずかに上下し、adjustへなかなか進めない
   // デッドロックを避けるための許容マージン。TUNNEL_REENTRY_TOLERANCE/
@@ -1700,7 +1712,34 @@ const ThrusterSolver = {
     // tunnelへ入れない（トンネル内は横方向の力を出さないため、
     // 一度入ると横ズレが永久に残ってしまう）。brake250へ送り、
     // 横方向・姿勢・速度をきっちり合わせ直させる。
-    if (lateral > this.DOCKING_POSITION_MIN_DISTANCE) {
+    //
+    // v71: 「最終進入で逆噴射を一気にかけて途中で止まってを
+    // 繰り返す、できるだけ滑らかに減速して止まるようにしたい」との
+    // 要望を受けて調査。アップロードされた操縦ログ（docking-log-
+    // 2026-08-31T23-37-24-934Zで確認）で、tunnel内をdistance=250から
+    // 0まで一貫して滑らかに減速していく設計（v53のプロファイル）が
+    // 途中で3回、distance≈107/42/8付近でbrake250へ差し戻され、
+    // その都度brake250側の急停止＋位置収束制御（一度ほぼ0まで
+    // 減速してから再加速して速度を作り直す)が働いていたため、
+    // 「急減速→ほぼ停止→再加速」を繰り返すガクガクした挙動になって
+    // いた。原因はlateral（横ズレ）が、tunnel内で艦の姿勢がわずかに
+    // 傾いていることによる小さな周期的振動（実測ログでは概ね0〜0.165
+    // の範囲）で、下のDOCKING_POSITION_MIN_DISTANCE(0.15)という
+    // わずかな閾値をわずかに超えるたびにbrake250へ落とされていた
+    // こと。この振動自体は実害のない程度の小さなブレであり、
+    // 一度tunnelに入った後の継続判定にまでこの狭い閾値をそのまま
+    // 使う必要はない。他のTUNNEL_REENTRY_TOLERANCE/BRAKE250_
+    // REENTRY_TOLERANCEと同種の考え方で、tunnel継続時専用の緩い
+    // 許容値TUNNEL_LATERAL_REENTRY_TOLERANCEを新設し、prevPhaseが
+    // 既にtunnelの場合はこちらを使う。brake250からtunnelへ新規に
+    // 突入する際の判定（上のブロック、prevPhase==='brake250'の
+    // 分岐）はDOCKING_POSITION_MIN_DISTANCEのまま変更していない
+    // ため、「横ズレが十分小さいことを確認してからでないとトンネル
+    // に入れない」という安全策は従来通り機能する。
+    const lateralLimit = prevPhase === 'tunnel'
+      ? this.TUNNEL_LATERAL_REENTRY_TOLERANCE
+      : this.DOCKING_POSITION_MIN_DISTANCE;
+    if (lateral > lateralLimit) {
       return 'brake250';
     }
     return 'tunnel';
