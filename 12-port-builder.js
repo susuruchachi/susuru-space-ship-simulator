@@ -700,13 +700,46 @@
   }
 
   // ---- ポインタ操作: ドラッグで回転、ホイール/ピンチでズーム ----
+  // v72: シフト+ドラッグ、および二本指スワイプ（ピンチと同時）で
+  // orbitState.targetをずらせる「パン」を追加。09-ship-builder.jsと
+  // 同じ実装（このファイルは重力方向固定の単純なオービットカメラ
+  // のため、姿勢クォータニオンの考慮は不要）。
   let dragging = false;
+  let panning = false;
   let lastX = 0, lastY = 0;
   let pinchStartDist = 0;
   let pinchStartRadius = 0;
+  let pinchLastMidX = 0, pinchLastMidY = 0;
+  const PAN_SENSITIVITY = 0.0015;
+
+  function computeScreenAxes() {
+    const { theta, phi } = orbitState;
+    const sinPhi = Math.sin(phi);
+    const forward = { x: sinPhi * Math.sin(theta), y: Math.cos(phi), z: sinPhi * Math.cos(theta) };
+    let right = { x: forward.z, y: 0, z: -forward.x };
+    const rightLen = Math.hypot(right.x, right.y, right.z) || 1;
+    right = { x: right.x / rightLen, y: right.y / rightLen, z: right.z / rightLen };
+    let up = {
+      x: right.y * forward.z - right.z * forward.y,
+      y: right.z * forward.x - right.x * forward.z,
+      z: right.x * forward.y - right.y * forward.x,
+    };
+    const upLen = Math.hypot(up.x, up.y, up.z) || 1;
+    up = { x: up.x / upLen, y: up.y / upLen, z: up.z / upLen };
+    return { right, up };
+  }
+
+  function applyScreenPan(dx, dy) {
+    const { right, up } = computeScreenAxes();
+    const scale = orbitState.radius * PAN_SENSITIVITY;
+    orbitState.target.x += (-right.x * dx + up.x * dy) * scale;
+    orbitState.target.y += (-right.y * dx + up.y * dy) * scale;
+    orbitState.target.z += (-right.z * dx + up.z * dy) * scale;
+  }
 
   canvas.addEventListener('pointerdown', (e) => {
     dragging = true;
+    panning = e.shiftKey;
     lastX = e.clientX;
     lastY = e.clientY;
     canvas.setPointerCapture(e.pointerId);
@@ -717,11 +750,16 @@
     const dy = e.clientY - lastY;
     lastX = e.clientX;
     lastY = e.clientY;
+    if (panning) {
+      applyScreenPan(dx, dy);
+      return;
+    }
     orbitState.theta -= dx * 0.008;
     orbitState.phi = clamp(orbitState.phi - dy * 0.008, 0.15, Math.PI - 0.15);
   });
   canvas.addEventListener('pointerup', (e) => {
     dragging = false;
+    panning = false;
     try { canvas.releasePointerCapture(e.pointerId); } catch (err) {}
   });
   canvas.addEventListener('wheel', (e) => {
@@ -737,11 +775,18 @@
     if (activePointers.size === 2) {
       const pts = Array.from(activePointers.values());
       const dist = Math.hypot(pts[0].clientX - pts[1].clientX, pts[0].clientY - pts[1].clientY);
+      const midX = (pts[0].clientX + pts[1].clientX) / 2;
+      const midY = (pts[0].clientY + pts[1].clientY) / 2;
       if (pinchStartDist === 0) {
         pinchStartDist = dist;
         pinchStartRadius = orbitState.radius;
+        pinchLastMidX = midX;
+        pinchLastMidY = midY;
       } else {
         orbitState.radius = clamp(pinchStartRadius * (pinchStartDist / Math.max(1, dist)), 5, 2000);
+        applyScreenPan(midX - pinchLastMidX, midY - pinchLastMidY);
+        pinchLastMidX = midX;
+        pinchLastMidY = midY;
       }
     }
   });

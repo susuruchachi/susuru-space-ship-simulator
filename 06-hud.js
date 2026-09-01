@@ -215,16 +215,19 @@ const HUD = {
         <button data-preset="top">上</button>
         <button data-preset="bottom">下</button>
       </div>
+      <div class="camera-pan-hint" style="display:none;">シフト+ドラッグ／二本指スワイプで視点パン</div>
     `;
     domRoot.appendChild(wrap);
 
     const modeBtn = wrap.querySelector('.btn-camera-mode');
     const presetPanel = wrap.querySelector('.camera-preset-panel');
+    const panHint = wrap.querySelector('.camera-pan-hint');
 
     const refreshModeUI = () => {
       const isOrbit = State.settings.cameraMode === 'orbit';
       modeBtn.textContent = isOrbit ? '視点: 自由' : '視点: 追従';
       presetPanel.style.display = isOrbit ? 'flex' : 'none';
+      panHint.style.display = isOrbit ? 'block' : 'none';
     };
 
     modeBtn.addEventListener('click', () => {

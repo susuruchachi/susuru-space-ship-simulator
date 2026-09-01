@@ -19,21 +19,37 @@ const CameraSystem = {
     distance: 30,
   },
 
+  // v72: 「二本指スワイプ／シフト+左クリックドラッグで視点をずらせる
+  // ようにしてほしい」との要望を受けて追加。orbitモードの注視点は
+  // 従来ship.position固定だったが、そこにこのオフセットを足すことで、
+  // 船から注視点自体を自由に離せる「真のパン」にする。船のローカル
+  // 座標系で保持することで、船が移動・回転してもパンでずらした
+  // ズレ量がそのまま保たれる（ワールド座標の差分として保持すると、
+  // 船が動くたびに視界に対する相対的なズレが変わってしまい、
+  // パン操作をしていないのに視界がズレて見える）。
+  // カメラ位置・注視点の両方に同じオフセットを加えるため、パン操作は
+  // 視点をずらすだけでカメラの向き（船を見る角度）自体は変えない。
+  _panOffsetLocal: { x: 0, y: 0, z: 0 },
+
   _dragState: {
     active: false,
     lastX: 0,
     lastY: 0,
+    panMode: false, // true: シフト押下中のドラッグ=パン、false: 通常ドラッグ=視点回転
   },
 
-  // 2本指ピンチズーム用の状態
+  // 2本指ピンチズーム/パン用の状態
   _pinchState: {
     active: false,
     lastDist: 0,
+    lastMidX: 0,
+    lastMidY: 0,
   },
 
   // ドラッグ感度・制限
   DRAG_SENSITIVITY: 0.006,
   PINCH_SENSITIVITY: 0.05,
+  PAN_SENSITIVITY: 0.0015, // ドラッグ1pxかつdistance=1あたりのワールド移動量。distanceに比例させ、ズーム倍率が変わっても画面上の動きの体感速度を揃える
   MIN_ELEVATION: -1.4, // 真下近くまで（真下=-PI/2=-1.57は特異点なので少し手前で止める）
   MAX_ELEVATION: 1.4,
   MIN_DISTANCE: 8,
@@ -54,9 +70,10 @@ const CameraSystem = {
   // ドラッグのみがここに到達する（イベントバブリング上の競合なし）。
   // -----------------------------------------------------------
   _bindDrag(canvasEl) {
-    const onDragStart = (x, y) => {
+    const onDragStart = (x, y, panMode) => {
       if (State.settings.cameraMode !== 'orbit') return;
       this._dragState.active = true;
+      this._dragState.panMode = !!panMode;
       this._dragState.lastX = x;
       this._dragState.lastY = y;
     };
@@ -68,6 +85,11 @@ const CameraSystem = {
       this._dragState.lastX = x;
       this._dragState.lastY = y;
 
+      if (this._dragState.panMode) {
+        this._applyScreenPan(dx, dy);
+        return;
+      }
+
       this._orbit.azimuth -= dx * this.DRAG_SENSITIVITY;
       this._orbit.elevation = clamp(
         this._orbit.elevation + dy * this.DRAG_SENSITIVITY,
@@ -78,6 +100,7 @@ const CameraSystem = {
 
     const onDragEnd = () => {
       this._dragState.active = false;
+      this._dragState.panMode = false;
     };
 
     // 2本指の距離（ピンチ）
@@ -86,13 +109,20 @@ const CameraSystem = {
       const dy = touches[0].clientY - touches[1].clientY;
       return Math.sqrt(dx * dx + dy * dy);
     };
+    const pinchMidpoint = (touches) => ({
+      x: (touches[0].clientX + touches[1].clientX) / 2,
+      y: (touches[0].clientY + touches[1].clientY) / 2,
+    });
 
     const onPinchMove = (touches) => {
       if (State.settings.cameraMode !== 'orbit') return;
       const dist = pinchDistance(touches);
+      const mid = pinchMidpoint(touches);
       if (!this._pinchState.active) {
         this._pinchState.active = true;
         this._pinchState.lastDist = dist;
+        this._pinchState.lastMidX = mid.x;
+        this._pinchState.lastMidY = mid.y;
         return;
       }
       const delta = dist - this._pinchState.lastDist;
@@ -103,13 +133,21 @@ const CameraSystem = {
         this.MIN_DISTANCE,
         this.MAX_DISTANCE
       );
+      // v72: 二本指スワイプ（2本の指の中点の移動）でパンできるように。
+      // ピンチ（指の間隔の変化）とスワイプ（中点の移動）は同時に
+      // 発生しうる一般的なジェスチャーなので、両方を同フレームで処理する。
+      const midDx = mid.x - this._pinchState.lastMidX;
+      const midDy = mid.y - this._pinchState.lastMidY;
+      this._pinchState.lastMidX = mid.x;
+      this._pinchState.lastMidY = mid.y;
+      this._applyScreenPan(midDx, midDy);
     };
 
     const onPinchEnd = () => {
       this._pinchState.active = false;
     };
 
-    canvasEl.addEventListener('mousedown', (e) => onDragStart(e.clientX, e.clientY));
+    canvasEl.addEventListener('mousedown', (e) => onDragStart(e.clientX, e.clientY, e.shiftKey));
     window.addEventListener('mousemove', (e) => onDragMove(e.clientX, e.clientY));
     window.addEventListener('mouseup', onDragEnd);
 
@@ -132,6 +170,9 @@ const CameraSystem = {
         this._dragState.active = false; // ピンチ開始時はドラッグ回転を止める
         this._pinchState.active = true;
         this._pinchState.lastDist = pinchDistance(e.touches);
+        const mid = pinchMidpoint(e.touches);
+        this._pinchState.lastMidX = mid.x;
+        this._pinchState.lastMidY = mid.y;
       }
     }, { passive: false });
 
@@ -172,6 +213,61 @@ const CameraSystem = {
   },
 
   // -----------------------------------------------------------
+  // v72: 画面上のドラッグ量(dx, dy)を、現在のカメラの向きを基準にした
+  // 「画面右方向」「画面上方向」のワールドベクトルに変換し、
+  // _panOffsetへ加算する。distanceに比例させることで、カメラが
+  // 近い時は小さく・遠い時は大きく動く（画面上の見た目の移動量が
+  // 距離によらず揃う）。
+  // -----------------------------------------------------------
+  _applyScreenPan(dx, dy) {
+    const ship = State.ship;
+    if (!ship || !ship.mesh) return;
+    const { azimuth, elevation, distance } = this._orbit;
+
+    // 船からカメラへ向かう方向（正規化済み想定でよい単位ベクトル）
+    const forward = {
+      x: Math.cos(elevation) * Math.sin(azimuth),
+      y: Math.sin(elevation),
+      z: Math.cos(elevation) * Math.cos(azimuth),
+    };
+    const worldUpRef = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
+    // right = forward × worldUpRef を正規化
+    let right = {
+      x: forward.y * worldUpRef.z - forward.z * worldUpRef.y,
+      y: forward.z * worldUpRef.x - forward.x * worldUpRef.z,
+      z: forward.x * worldUpRef.y - forward.y * worldUpRef.x,
+    };
+    const rightLen = Math.hypot(right.x, right.y, right.z) || 1;
+    right = { x: right.x / rightLen, y: right.y / rightLen, z: right.z / rightLen };
+    // up = right × forward を正規化（カメラのその場のup、真上/真下付近でのねじれを避ける）
+    let up = {
+      x: right.y * forward.z - right.z * forward.y,
+      y: right.z * forward.x - right.x * forward.z,
+      z: right.x * forward.y - right.y * forward.x,
+    };
+    const upLen = Math.hypot(up.x, up.y, up.z) || 1;
+    up = { x: up.x / upLen, y: up.y / upLen, z: up.z / upLen };
+
+    const scale = distance * this.PAN_SENSITIVITY;
+    // 右へドラッグ(dx>0)したら視点は左へ動いてほしい(=注視点は右へ、
+    // つまり見えている景色が指の動きについてくる)ため-dxを使う。
+    // 上へドラッグ(dy<0、clientYは上ほど小さい)したら注視点は上へ
+    // 動いてほしいので、dyの符号をそのまま使う。
+    const worldDelta = {
+      x: (-right.x * dx + up.x * dy) * scale,
+      y: (-right.y * dx + up.y * dy) * scale,
+      z: (-right.z * dx + up.z * dy) * scale,
+    };
+    // ワールド座標の移動量を、船のローカル座標系に変換してから
+    // _panOffsetLocalへ加算する（保持理由は_panOffsetLocalのコメント参照）。
+    const inverseQuat = conjugateQuat(ship.quaternion);
+    const localDelta = rotateVecByQuat(worldDelta, inverseQuat);
+    this._panOffsetLocal.x += localDelta.x;
+    this._panOffsetLocal.y += localDelta.y;
+    this._panOffsetLocal.z += localDelta.z;
+  },
+
+  // -----------------------------------------------------------
   // 定点ビューへのリセット（HUDのボタンから呼ばれる）
   //   preset: 'front' | 'back' | 'left' | 'right' | 'top' | 'bottom'
   // -----------------------------------------------------------
@@ -188,6 +284,10 @@ const CameraSystem = {
     if (!p) return;
     this._orbit.azimuth = p.azimuth;
     this._orbit.elevation = p.elevation;
+    // v72: 定点ビューへ戻す操作なので、パンでずらした注視点も
+    // 船中心へ戻す。ここでリセットしないと「正面ボタンを押したのに
+    // 船が画面端に寄ったまま」になり、定点リセットの意図と食い違う。
+    this._panOffsetLocal = { x: 0, y: 0, z: 0 };
   },
 
   // -----------------------------------------------------------
@@ -254,16 +354,25 @@ const CameraSystem = {
     };
 
     const worldOffset = rotateVecByQuat(localOffset, ship.quaternion);
+    // v72: パンオフセット（船のローカル座標系で保持）をワールドへ
+    // 変換し、注視点・カメラ位置の両方に同じだけ加える。カメラ位置に
+    // も同じ量を足すことで、パンしても船との距離(distance)や見る
+    // 角度自体は変わらず、視界全体が平行にずれる。
+    const panWorld = rotateVecByQuat(this._panOffsetLocal, ship.quaternion);
+    const targetX = ship.position.x + panWorld.x;
+    const targetY = ship.position.y + panWorld.y;
+    const targetZ = ship.position.z + panWorld.z;
+
     camera.position.set(
-      ship.position.x + worldOffset.x,
-      ship.position.y + worldOffset.y,
-      ship.position.z + worldOffset.z
+      targetX + worldOffset.x,
+      targetY + worldOffset.y,
+      targetZ + worldOffset.z
     );
 
     // orbitモードでも船のロールに応じてupを追従させる（真上/真下
     // 付近を除き、chaseと同じ理屈で自然な傾きになる）
     const upWorld = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
     camera.up.set(upWorld.x, upWorld.y, upWorld.z);
-    camera.lookAt(ship.position.x, ship.position.y, ship.position.z);
+    camera.lookAt(targetX, targetY, targetZ);
   },
 };

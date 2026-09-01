@@ -437,6 +437,35 @@
   }
 
   input[type="file"] { display: none; }
+
+  /* -----------------------------------------------------------
+     横画面（landscape）対応: 下部の調整パネルを右側のカラムに
+     切り替える。ship-builder.htmlと同じ考え方。
+  ----------------------------------------------------------- */
+  @media (orientation: landscape) and (min-width: 640px) {
+    .editor-wrap {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      grid-template-rows: 1fr auto;
+    }
+    .viewport-wrap {
+      grid-column: 1;
+      grid-row: 1;
+    }
+    .adjust-panel {
+      grid-column: 2;
+      grid-row: 1;
+      max-height: none;
+      height: 100%;
+      overflow-y: auto;
+      border-top: none;
+      border-left: 1px solid rgba(255,255,255,0.12);
+    }
+    .footer-bar {
+      grid-column: 1 / -1;
+      grid-row: 2;
+    }
+  }
 </style>
 </head>
 <body>
@@ -464,7 +493,7 @@
   <div class="editor-wrap hidden" id="editorWrap">
     <div class="viewport-wrap">
       <canvas id="viewportCanvas"></canvas>
-      <div class="viewport-hint">ドラッグ: 視点回転 / ピンチ・ホイール: ズーム</div>
+      <div class="viewport-hint">ドラッグ: 視点回転 / ピンチ・ホイール: ズーム / シフト+ドラッグ・二本指スワイプ: 視点パン</div>
 
       <div class="model-empty-state" id="modelEmptyState">
         <div class="icon">🛰️</div>

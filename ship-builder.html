@@ -357,6 +357,50 @@
   }
 
   input[type="file"] { display: none; }
+
+  /* -----------------------------------------------------------
+     横画面（landscape）対応: 下部の調整パネルを右側のカラムに
+     切り替える。スマホを横向きに持った時、縦持ち前提の「下から
+     せり上がるパネル」だとビューポートの縦幅が圧迫されて操作
+     しづらいとの要望を受けて追加。
+     幅・高さ両方の条件で判定する(min-width)のは、タブレット等の
+     横長デスクトップウィンドウでも同じ扱いにしたいことと、
+     ごく小さい横長ウィンドウ(横380px未満)では2カラム化すると
+     逆に窮屈になるため。
+  ----------------------------------------------------------- */
+  @media (orientation: landscape) and (min-width: 640px) {
+    #app {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      grid-template-rows: auto auto 1fr auto;
+      height: 100%;
+    }
+    .topbar {
+      grid-column: 1 / -1;
+      grid-row: 1;
+    }
+    #buildVersionLine {
+      grid-column: 1 / -1;
+      grid-row: 2;
+    }
+    .viewport-wrap {
+      grid-column: 1;
+      grid-row: 3;
+    }
+    .adjust-panel {
+      grid-column: 2;
+      grid-row: 3;
+      max-height: none;
+      height: 100%;
+      overflow-y: auto;
+      border-top: none;
+      border-left: 1px solid rgba(255,255,255,0.12);
+    }
+    .footer-bar {
+      grid-column: 1 / -1;
+      grid-row: 4;
+    }
+  }
 </style>
 </head>
 <body>
@@ -373,7 +417,7 @@
 
   <div class="viewport-wrap">
     <canvas id="viewportCanvas"></canvas>
-    <div class="viewport-hint" id="viewportHint">ドラッグ: 視点回転 / ピンチ・ホイール: ズーム</div>
+    <div class="viewport-hint" id="viewportHint">ドラッグ: 視点回転 / ピンチ・ホイール: ズーム / シフト+ドラッグ・二本指スワイプ: 視点パン</div>
 
     <div class="empty-state" id="emptyState">
       <div class="icon">🛰️</div>
