@@ -214,6 +214,7 @@ const HUD = {
         <button data-preset="right">右</button>
         <button data-preset="top">上</button>
         <button data-preset="bottom">下</button>
+        <button class="btn-camera-reset" title="ズーム・パンも含めて視点を初期状態に戻す">視点リセット</button>
       </div>
       <div class="camera-pan-hint" style="display:none;">シフト+ドラッグ／二本指スワイプで視点パン</div>
     `;
@@ -222,6 +223,7 @@ const HUD = {
     const modeBtn = wrap.querySelector('.btn-camera-mode');
     const presetPanel = wrap.querySelector('.camera-preset-panel');
     const panHint = wrap.querySelector('.camera-pan-hint');
+    const resetBtn = wrap.querySelector('.btn-camera-reset');
 
     const refreshModeUI = () => {
       const isOrbit = State.settings.cameraMode === 'orbit';
@@ -239,6 +241,13 @@ const HUD = {
       btn.addEventListener('click', () => {
         CameraSystem.setOrbitPreset(btn.dataset.preset);
       });
+    });
+
+    // v74: 定点(前後左右上下)ボタンは角度とパンのみをリセットする
+    // ため、ズーム(distance)がずれたままだと「リセットしたのに
+    // 遠い/近いまま」になる。ズームも含めた完全リセット用のボタン。
+    resetBtn.addEventListener('click', () => {
+      CameraSystem.resetView();
     });
 
     refreshModeUI();

@@ -74,6 +74,29 @@
     line-height: 1.5;
   }
 
+  .ortho-view-panel {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    display: flex;
+    gap: 6px;
+    z-index: 5;
+  }
+  .ortho-view-btn {
+    width: 52px;
+    height: 30px;
+    border-radius: 6px;
+    background: rgba(0,0,0,0.45);
+    border: 1px solid rgba(255,255,255,0.2);
+    color: #cfe8ff;
+    font-size: 11px;
+  }
+  .ortho-view-btn.active {
+    background: rgba(120,180,255,0.35);
+    border-color: rgba(150,200,255,0.7);
+    color: #fff;
+  }
+
   .empty-state {
     position: absolute;
     inset: 0;
@@ -418,6 +441,13 @@
   <div class="viewport-wrap">
     <canvas id="viewportCanvas"></canvas>
     <div class="viewport-hint" id="viewportHint">ドラッグ: 視点回転 / ピンチ・ホイール: ズーム / シフト+ドラッグ・二本指スワイプ: 視点パン</div>
+
+    <div class="ortho-view-panel">
+      <button class="ortho-view-btn" data-ortho-face="front" title="正面（もう一度押すと背面）">正面</button>
+      <button class="ortho-view-btn" data-ortho-face="right" title="側面（もう一度押すと反対側）">側面</button>
+      <button class="ortho-view-btn" data-ortho-face="top" title="上面（もう一度押すと下面）">上面</button>
+      <button class="ortho-view-btn" id="viewResetBtn" title="視点をリセット">リセット</button>
+    </div>
 
     <div class="empty-state" id="emptyState">
       <div class="icon">🛰️</div>

@@ -224,26 +224,31 @@ const CameraSystem = {
     if (!ship || !ship.mesh) return;
     const { azimuth, elevation, distance } = this._orbit;
 
-    // 船からカメラへ向かう方向（正規化済み想定でよい単位ベクトル）
-    const forward = {
+    // 船からカメラへ向かう方向（backward）。実際にカメラが見ている
+    // 向き（view方向）はこの逆なので、right/upの算出にはview方向を使う。
+    // v73時点ではここにbackwardをそのまま使っていたため、rightの符号が
+    // 反転し「パンの左右が逆」になっていた（upはforward/rightの符号が
+    // 両方反転するため偶然相殺され、上下は正しく見えていた）。
+    const backward = {
       x: Math.cos(elevation) * Math.sin(azimuth),
       y: Math.sin(elevation),
       z: Math.cos(elevation) * Math.cos(azimuth),
     };
+    const view = { x: -backward.x, y: -backward.y, z: -backward.z };
     const worldUpRef = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
-    // right = forward × worldUpRef を正規化
+    // right = view × worldUpRef を正規化
     let right = {
-      x: forward.y * worldUpRef.z - forward.z * worldUpRef.y,
-      y: forward.z * worldUpRef.x - forward.x * worldUpRef.z,
-      z: forward.x * worldUpRef.y - forward.y * worldUpRef.x,
+      x: view.y * worldUpRef.z - view.z * worldUpRef.y,
+      y: view.z * worldUpRef.x - view.x * worldUpRef.z,
+      z: view.x * worldUpRef.y - view.y * worldUpRef.x,
     };
     const rightLen = Math.hypot(right.x, right.y, right.z) || 1;
     right = { x: right.x / rightLen, y: right.y / rightLen, z: right.z / rightLen };
-    // up = right × forward を正規化（カメラのその場のup、真上/真下付近でのねじれを避ける）
+    // up = right × view を正規化（カメラのその場のup、真上/真下付近でのねじれを避ける）
     let up = {
-      x: right.y * forward.z - right.z * forward.y,
-      y: right.z * forward.x - right.x * forward.z,
-      z: right.x * forward.y - right.y * forward.x,
+      x: right.y * view.z - right.z * view.y,
+      y: right.z * view.x - right.x * view.z,
+      z: right.x * view.y - right.y * view.x,
     };
     const upLen = Math.hypot(up.x, up.y, up.z) || 1;
     up = { x: up.x / upLen, y: up.y / upLen, z: up.z / upLen };
@@ -288,6 +293,19 @@ const CameraSystem = {
     // v72: 定点ビューへ戻す操作なので、パンでずらした注視点も
     // 船中心へ戻す。ここでリセットしないと「正面ボタンを押したのに
     // 船が画面端に寄ったまま」になり、定点リセットの意図と食い違う。
+    this._panOffsetLocal = { x: 0, y: 0, z: 0 };
+  },
+
+  // -----------------------------------------------------------
+  // 視点リセット（HUDの「視点リセット」ボタンから呼ばれる）
+  // 角度を初期値（船の後方やや上）へ戻し、ズーム（distance）と
+  // パンによる注視点ズレも初期状態へ戻す。setOrbitPresetは角度と
+  // パンのみのリセットだが、こちらはズームも含めて完全に初期化する。
+  // -----------------------------------------------------------
+  resetView() {
+    this._orbit.azimuth = 0;
+    this._orbit.elevation = 0.2;
+    this._orbit.distance = 30;
     this._panOffsetLocal = { x: 0, y: 0, z: 0 };
   },
 

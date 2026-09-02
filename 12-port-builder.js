@@ -593,7 +593,7 @@
   // （ライブラリ非依存）。ゲートメッシュ自体は10-docking-platform.jsの
   // DockingPlatform._buildGateMesh()をそのまま呼んで生成する。
   // -----------------------------------------------------------
-  let renderer, scene, camera;
+  let renderer, scene, camera, orthoCamera;
   let gateMesh = null;
   let sceneInited = false;
 
@@ -604,12 +604,26 @@
   let modelRoot = null;
   let modelCorrectionGroup = null;
 
+  // v74: 平行投影（正面/側面/上面など、ブレンダー風の6方向固定視点）
+  // 対応。09-ship-builder.jsと同じ設計（詳細はそちらのコメント参照）。
   const orbitState = {
     radius: 90,
     theta: Math.PI * 0.25,
     phi: Math.PI * 0.35,
     target: new THREE.Vector3(0, 0, 0),
+    ortho: null,
+    orthoZoom: 90,
   };
+
+  const ORTHO_VIEWS = {
+    front:  { theta: 0,               phi: Math.PI / 2 },
+    back:   { theta: Math.PI,         phi: Math.PI / 2 },
+    right:  { theta: Math.PI / 2,     phi: Math.PI / 2 },
+    left:   { theta: -Math.PI / 2,    phi: Math.PI / 2 },
+    top:    { theta: 0,               phi: 0.001 },
+    bottom: { theta: 0,               phi: Math.PI - 0.001 },
+  };
+  const ORTHO_OPPOSITE = { front: 'back', back: 'front', left: 'right', right: 'left', top: 'bottom', bottom: 'top' };
 
   function ensureSceneInited() {
     if (sceneInited) {
@@ -621,6 +635,7 @@
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0a0e16);
     camera = new THREE.PerspectiveCamera(55, 1, 0.05, 20000);
+    orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.05, 20000);
     renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
@@ -654,26 +669,84 @@
     const rect = canvas.parentElement.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return;
     renderer.setSize(rect.width, rect.height, false);
-    camera.aspect = rect.width / Math.max(1, rect.height);
+    const aspect = rect.width / Math.max(1, rect.height);
+    camera.aspect = aspect;
     camera.updateProjectionMatrix();
+    orthoCamera.left = -orbitState.orthoZoom * aspect;
+    orthoCamera.right = orbitState.orthoZoom * aspect;
+    orthoCamera.top = orbitState.orthoZoom;
+    orthoCamera.bottom = -orbitState.orthoZoom;
+    orthoCamera.updateProjectionMatrix();
+  }
+
+  function getActiveCamera() {
+    return orbitState.ortho ? orthoCamera : camera;
   }
 
   function updateCameraFromOrbit() {
     const { radius, theta, phi, target } = orbitState;
     const sinPhi = Math.sin(phi);
+    const dir = {
+      x: sinPhi * Math.sin(theta),
+      y: Math.cos(phi),
+      z: sinPhi * Math.cos(theta),
+    };
     camera.position.set(
-      target.x + radius * sinPhi * Math.sin(theta),
-      target.y + radius * Math.cos(phi),
-      target.z + radius * sinPhi * Math.cos(theta)
+      target.x + radius * dir.x,
+      target.y + radius * dir.y,
+      target.z + radius * dir.z
     );
     camera.lookAt(target);
+
+    if (orbitState.ortho) {
+      const orthoDist = Math.max(radius, 5);
+      orthoCamera.position.set(
+        target.x + orthoDist * dir.x,
+        target.y + orthoDist * dir.y,
+        target.z + orthoDist * dir.z
+      );
+      orthoCamera.lookAt(target);
+      const rect = canvas.parentElement.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        const aspect = rect.width / Math.max(1, rect.height);
+        orthoCamera.left = -orbitState.orthoZoom * aspect;
+        orthoCamera.right = orbitState.orthoZoom * aspect;
+        orthoCamera.top = orbitState.orthoZoom;
+        orthoCamera.bottom = -orbitState.orthoZoom;
+        orthoCamera.updateProjectionMatrix();
+      }
+    }
+  }
+
+  // -----------------------------------------------------------
+  // 6方向固定視点（正面/背面/左/右/上/下）の切り替え。
+  // 同じ面をもう一度指定すると反対面へ切り替わる（ブレンダー風）。
+  // -----------------------------------------------------------
+  function setOrthoView(face) {
+    if (orbitState.ortho === face) {
+      face = ORTHO_OPPOSITE[face];
+    }
+    const view = ORTHO_VIEWS[face];
+    if (!view) return;
+    orbitState.ortho = face;
+    orbitState.theta = view.theta;
+    orbitState.phi = view.phi;
+    orbitState.orthoZoom = orbitState.radius;
+    resizeRenderer();
+    refreshOrthoButtons();
+  }
+
+  function exitOrthoView() {
+    if (!orbitState.ortho) return;
+    orbitState.ortho = null;
+    refreshOrthoButtons();
   }
 
   function animate() {
     requestAnimationFrame(animate);
     if (editorWrap.classList.contains('hidden')) return; // 一覧表示中は描画不要
     updateCameraFromOrbit();
-    renderer.render(scene, camera);
+    renderer.render(scene, getActiveCamera());
   }
 
   function updateGateFromEditState() {
@@ -715,14 +788,18 @@
   function computeScreenAxes() {
     const { theta, phi } = orbitState;
     const sinPhi = Math.sin(phi);
-    const forward = { x: sinPhi * Math.sin(theta), y: Math.cos(phi), z: sinPhi * Math.cos(theta) };
-    let right = { x: forward.z, y: 0, z: -forward.x };
+    // target→camera方向（backward）。実際にカメラが見ているview方向は
+    // この逆なので、right/upはview方向から算出する（09-ship-builder.js
+    // と同じ理由・同じ修正）。
+    const backward = { x: sinPhi * Math.sin(theta), y: Math.cos(phi), z: sinPhi * Math.cos(theta) };
+    const view = { x: -backward.x, y: -backward.y, z: -backward.z };
+    let right = { x: view.z, y: 0, z: -view.x };
     const rightLen = Math.hypot(right.x, right.y, right.z) || 1;
     right = { x: right.x / rightLen, y: right.y / rightLen, z: right.z / rightLen };
     let up = {
-      x: right.y * forward.z - right.z * forward.y,
-      y: right.z * forward.x - right.x * forward.z,
-      z: right.x * forward.y - right.y * forward.x,
+      x: right.y * view.z - right.z * view.y,
+      y: right.z * view.x - right.x * view.z,
+      z: right.x * view.y - right.y * view.x,
     };
     const upLen = Math.hypot(up.x, up.y, up.z) || 1;
     up = { x: up.x / upLen, y: up.y / upLen, z: up.z / upLen };
@@ -732,7 +809,7 @@
   // v73: パンの向きが逆との報告を受けて符号を反転（08-camera.jsと統一）。
   function applyScreenPan(dx, dy) {
     const { right, up } = computeScreenAxes();
-    const scale = orbitState.radius * PAN_SENSITIVITY;
+    const scale = (orbitState.ortho ? orbitState.orthoZoom : orbitState.radius) * PAN_SENSITIVITY;
     orbitState.target.x += (right.x * dx - up.x * dy) * scale;
     orbitState.target.y += (right.y * dx - up.y * dy) * scale;
     orbitState.target.z += (right.z * dx - up.z * dy) * scale;
@@ -770,6 +847,7 @@
     }
     orbitState.theta -= dx * 0.008;
     orbitState.phi = clamp(orbitState.phi - dy * 0.008, 0.15, Math.PI - 0.15);
+    exitOrthoView();
   });
   canvas.addEventListener('pointerup', (e) => {
     dragging = false;
@@ -778,7 +856,11 @@
   });
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
-    orbitState.radius = clamp(orbitState.radius * (1 + e.deltaY * 0.001), 5, 2000);
+    if (orbitState.ortho) {
+      orbitState.orthoZoom = clamp(orbitState.orthoZoom * (1 + e.deltaY * 0.001), 2, 2000);
+    } else {
+      orbitState.radius = clamp(orbitState.radius * (1 + e.deltaY * 0.001), 5, 2000);
+    }
   }, { passive: false });
 
   canvas.addEventListener('pointermove', (e) => {
@@ -791,11 +873,16 @@
       const midY = (pts[0].clientY + pts[1].clientY) / 2;
       if (pinchStartDist === 0) {
         pinchStartDist = dist;
-        pinchStartRadius = orbitState.radius;
+        pinchStartRadius = orbitState.ortho ? orbitState.orthoZoom : orbitState.radius;
         pinchLastMidX = midX;
         pinchLastMidY = midY;
       } else {
-        orbitState.radius = clamp(pinchStartRadius * (pinchStartDist / Math.max(1, dist)), 5, 2000);
+        const scaled = clamp(pinchStartRadius * (pinchStartDist / Math.max(1, dist)), orbitState.ortho ? 2 : 5, 2000);
+        if (orbitState.ortho) {
+          orbitState.orthoZoom = scaled;
+        } else {
+          orbitState.radius = scaled;
+        }
         applyScreenPan(midX - pinchLastMidX, midY - pinchLastMidY);
         pinchLastMidX = midX;
         pinchLastMidY = midY;
@@ -1178,6 +1265,30 @@
         finish(materials);
       }
     }
+  }
+
+  // -----------------------------------------------------------
+  // 6方向固定視点ボタン（正面/背面/左/右/上/下、平行投影）
+  // -----------------------------------------------------------
+  const orthoButtons = Array.from(document.querySelectorAll('.ortho-view-btn'));
+  function refreshOrthoButtons() {
+    orthoButtons.forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.orthoFace === orbitState.ortho);
+    });
+  }
+  orthoButtons.forEach((btn) => {
+    btn.addEventListener('click', () => setOrthoView(btn.dataset.orthoFace));
+  });
+
+  const viewResetBtn = document.getElementById('viewResetBtn');
+  if (viewResetBtn) {
+    viewResetBtn.addEventListener('click', () => {
+      orbitState.ortho = null;
+      orbitState.theta = Math.PI * 0.25;
+      orbitState.phi = Math.PI * 0.35;
+      orbitState.radius = 90;
+      refreshOrthoButtons();
+    });
   }
 
   // -----------------------------------------------------------
