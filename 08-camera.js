@@ -224,23 +224,30 @@ const CameraSystem = {
     if (!ship || !ship.mesh) return;
     const { azimuth, elevation, distance } = this._orbit;
 
-    // 船からカメラへ向かう方向（backward）。実際にカメラが見ている
-    // 向き（view方向）はこの逆なので、right/upの算出にはview方向を使う。
-    // v73時点ではここにbackwardをそのまま使っていたため、rightの符号が
-    // 反転し「パンの左右が逆」になっていた（upはforward/rightの符号が
-    // 両方反転するため偶然相殺され、上下は正しく見えていた）。
-    const backward = {
+    // 船からカメラへ向かう方向（backward、船のローカル座標系）。
+    // 実際にカメラが見ている向き（view方向）はこの逆。
+    const backwardLocal = {
       x: Math.cos(elevation) * Math.sin(azimuth),
       y: Math.sin(elevation),
       z: Math.cos(elevation) * Math.cos(azimuth),
     };
-    const view = { x: -backward.x, y: -backward.y, z: -backward.z };
-    const worldUpRef = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
-    // right = view × worldUpRef を正規化
+    const viewLocal = { x: -backwardLocal.x, y: -backwardLocal.y, z: -backwardLocal.z };
+    // v74: view・upはどちらも「ワールド座標」で計算しなければならない。
+    // _updateOrbitがcamera.upに設定しているworldUp（船のローカルup
+    // (0,1,0)をship.quaternionで回転したもの）と同じ基準を使うことで、
+    // 実際にcamera.lookAt()した後の画面上の右・上と一致させる。
+    // 以前はview（ローカル系のまま）とworldUpRef（ワールド系）を
+    // 混在させて外積を取っていたため、船が無回転のとき以外は
+    // rightの向きが実際の画面右方向とズレていた（無回転時は
+    // ローカル座標とワールド座標が一致するため問題が表面化せず、
+    // 船の姿勢によって左右パンの感覚がズレる/逆になる形で現れる）。
+    const view = rotateVecByQuat(viewLocal, ship.quaternion);
+    const worldUp = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
+    // right = view × worldUp を正規化
     let right = {
-      x: view.y * worldUpRef.z - view.z * worldUpRef.y,
-      y: view.z * worldUpRef.x - view.x * worldUpRef.z,
-      z: view.x * worldUpRef.y - view.y * worldUpRef.x,
+      x: view.y * worldUp.z - view.z * worldUp.y,
+      y: view.z * worldUp.x - view.x * worldUp.z,
+      z: view.x * worldUp.y - view.y * worldUp.x,
     };
     const rightLen = Math.hypot(right.x, right.y, right.z) || 1;
     right = { x: right.x / rightLen, y: right.y / rightLen, z: right.z / rightLen };
@@ -254,18 +261,27 @@ const CameraSystem = {
     up = { x: up.x / upLen, y: up.y / upLen, z: up.z / upLen };
 
     const scale = distance * this.PAN_SENSITIVITY;
-    // v73: パンの向きが逆との報告を受けて符号を反転。
-    // 右へドラッグ(dx>0)したら注視点も右へ動く(景色が指と逆方向に
-    // 流れる、一般的なカメラパン操作の感覚)。
-    // 上へドラッグ(dy<0、clientYは上ほど小さい)したら注視点は下へ
-    // 動くようにするため、dyの符号を反転させる。
+    // 右へドラッグ(dx>0)したらカメラの視界が右へパンする（右ドラッグで
+    // 景色は画面上で左へ流れる）。09-ship-builder.js・12-port-builder.js
+    // の平行移動パンと同じ向きの感覚に統一する。
+    // 上へドラッグ(dy<0、clientYは上ほど小さい)したら視界が上へパンする
+    // ようにするため、dyの符号を反転させる。
+    // v74: 一度「景色が指についてくる」向き(worldDeltaの符号反転)へ
+    // 変更したが、その結果09/12ファイルとプレイ画面とでパンの向きの
+    // 感覚が食い違ってしまった（プレイ画面だけ逆に感じる、との報告）。
+    // 09/12ファイルの実装（艦船建造・ポート設定画面、こちらはユーザー
+    // 確認済みで正しい）と実際にThree.jsのcamera.project()で比較した
+    // 結果、符号反転していない以下の形が09/12と一致することを確認した。
+    // right/upはワールド座標系のベクトルなので、この時点の
+    // worldDeltaもワールド座標系。_panOffsetLocalは船のローカル
+    // 座標系で保持する仕様（保持理由は_panOffsetLocalのコメント
+    // 参照）なので、conjugateQuatでローカル座標系へ変換してから
+    // 加算する。
     const worldDelta = {
       x: (right.x * dx - up.x * dy) * scale,
       y: (right.y * dx - up.y * dy) * scale,
       z: (right.z * dx - up.z * dy) * scale,
     };
-    // ワールド座標の移動量を、船のローカル座標系に変換してから
-    // _panOffsetLocalへ加算する（保持理由は_panOffsetLocalのコメント参照）。
     const inverseQuat = conjugateQuat(ship.quaternion);
     const localDelta = rotateVecByQuat(worldDelta, inverseQuat);
     this._panOffsetLocal.x += localDelta.x;
