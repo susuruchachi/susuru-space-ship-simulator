@@ -261,26 +261,28 @@ const CameraSystem = {
     up = { x: up.x / upLen, y: up.y / upLen, z: up.z / upLen };
 
     const scale = distance * this.PAN_SENSITIVITY;
-    // 右へドラッグ(dx>0)したらカメラの視界が右へパンする（右ドラッグで
-    // 景色は画面上で左へ流れる）。09-ship-builder.js・12-port-builder.js
-    // の平行移動パンと同じ向きの感覚に統一する。
-    // 上へドラッグ(dy<0、clientYは上ほど小さい)したら視界が上へパンする
-    // ようにするため、dyの符号を反転させる。
-    // v74: 一度「景色が指についてくる」向き(worldDeltaの符号反転)へ
-    // 変更したが、その結果09/12ファイルとプレイ画面とでパンの向きの
-    // 感覚が食い違ってしまった（プレイ画面だけ逆に感じる、との報告）。
-    // 09/12ファイルの実装（艦船建造・ポート設定画面、こちらはユーザー
-    // 確認済みで正しい）と実際にThree.jsのcamera.project()で比較した
-    // 結果、符号反転していない以下の形が09/12と一致することを確認した。
+    // v75: 09-ship-builder.js・12-port-builder.js（ユーザー確認済みで
+    // 正しい）と、カメラ行列から直接求めた「真の画面右方向」への
+    // 投影量で厳密に比較した結果、右へドラッグ(dx>0)すると景色（注視点）
+    // も右へついてくる（＝ワールド固定点が画面上でさらに右へ動く）
+    // のが正しい向きだと判明した。以前の版はこれと逆（カメラ自体が
+    // 右へパンする＝景色が左へ流れる）向きになっており、09/12方式と
+    // 同じ条件で並べて初めてこの食い違いが見つかった。
+    // これを実現するには、right/upへdx,dyを素直に掛けた量をそのまま
+    // 注視点に加えるのではなく、符号を反転させて加える必要がある
+    // （カメラは注視点を中心に置かれるため、注視点を左へ動かすと、
+    // 結果的にカメラも左へ動き、ワールド固定点は画面上で右へ動く）。
+    // 上へドラッグ(dy<0、clientYは上ほど小さい)したら景色も上へ
+    // ついてくるようにする。
     // right/upはワールド座標系のベクトルなので、この時点の
     // worldDeltaもワールド座標系。_panOffsetLocalは船のローカル
     // 座標系で保持する仕様（保持理由は_panOffsetLocalのコメント
     // 参照）なので、conjugateQuatでローカル座標系へ変換してから
     // 加算する。
     const worldDelta = {
-      x: (right.x * dx - up.x * dy) * scale,
-      y: (right.y * dx - up.y * dy) * scale,
-      z: (right.z * dx - up.z * dy) * scale,
+      x: -(right.x * dx - up.x * dy) * scale,
+      y: -(right.y * dx - up.y * dy) * scale,
+      z: -(right.z * dx - up.z * dy) * scale,
     };
     const inverseQuat = conjugateQuat(ship.quaternion);
     const localDelta = rotateVecByQuat(worldDelta, inverseQuat);
