@@ -1015,3 +1015,175 @@ function computeEffectiveShipDockingTarget(dockingTarget, ship) {
     dockingParams: dockingTarget.dockingParams,
   };
 }
+
+// =============================================================
+// v76: 衝突判定用の「区間分割バウンディングボックス」計算
+//
+// 逆走進入防止（新機能）で、艦・ポートそれぞれの「大雑把な形状
+// マスク」として使う。精密な衝突形状ではなく、細長いロケット型・
+// 太い戦艦型といった見た目の違いをある程度反映した近似形状を
+// 安く得ることが目的。
+//
+// 手法: 対象オブジェクトのローカルZ軸（前後方向）をSEGMENT_COUNT個の
+// 等間隔区間に分割し、各区間に頂点が1つでも入るメッシュについて、
+// その区間内に入る頂点だけを対象にX/Y方向の境界（min/max）を求める。
+// 結果、各区間ごとに1つの直方体（ローカル座標系のAABB、区間の前後端
+// をZ方向の境界とする）ができる。「艦の先端が細く、本体が太い」等の
+// 概形が、区間ごとに幅・高さが変わる階段状の形で近似される。
+//
+// 09-ship-builder.js（艦モデル保存時）・12-port-builder.js（ポート
+// モデル保存時）の両方から呼ばれ、結果を保存データに含めることで、
+// プレイ中（13-collision.js）は全頂点走査をせずこの事前計算結果を
+// そのまま使う。
+//
+// object3d: 対象のTHREE.Object3D（Group等の階層で良い。内部の全
+//           メッシュを走査する）。object3d自身のローカル座標系
+//           （= object3dの親から見た変換より内側）を基準とする。
+// 戻り値: 区間ボックスの配列（前から順、object3dに頂点が1つも
+//         無ければ空配列）。各要素は
+//         { zMin, zMax, xMin, xMax, yMin, yMax }
+//         （すべてobject3dのローカル座標系の値）。
+function computeSegmentedBoundsFromObject3D(object3d, segmentCount) {
+  const count = segmentCount || 8;
+  if (!object3d) return [];
+
+  // object3d自身のワールド行列の逆行列。各メッシュのワールド頂点座標を
+  // object3dローカル座標系へ変換するのに使う（object3d配下のメッシュは
+  // 個々に独自の回転・オフセットを持ちうるため、単純にmesh.geometryの
+  // 生の頂点座標を使うのではなく、必ずワールド座標経由でobject3d
+  // ローカルへ変換する）。
+  // v76-fix1: 全体のZ範囲もTHREE.Box3().setFromObject()（ワールド座標系
+  // で計算される）ではなく、ここで頂点を集計する際に同時にローカル
+  // 座標系で求める。setFromObject()を使うと、object3d自身がワールド上
+  // で移動・回転している場合にzMin/zMaxがワールド座標の値になって
+  // しまい、区間ごとの幅・高さ自体は正しくてもz座標の絶対値がずれる
+  // 不具合があった（Three.js実測で確認済み）。
+  object3d.updateWorldMatrix(true, true);
+  const toLocal = new THREE.Matrix4().copy(object3d.matrixWorld).invert();
+
+  let zMin = Infinity;
+  let zMax = -Infinity;
+  const localPoints = [];
+  const v = new THREE.Vector3();
+
+  object3d.traverse((node) => {
+    if (!node.isMesh || !node.geometry) return;
+    const geo = node.geometry;
+    const posAttr = geo.attributes && geo.attributes.position;
+    if (!posAttr) return;
+
+    const localToObject3d = new THREE.Matrix4().multiplyMatrices(toLocal, node.matrixWorld);
+
+    for (let i = 0; i < posAttr.count; i++) {
+      v.fromBufferAttribute(posAttr, i);
+      v.applyMatrix4(localToObject3d);
+      localPoints.push({ x: v.x, y: v.y, z: v.z });
+      if (v.z < zMin) zMin = v.z;
+      if (v.z > zMax) zMax = v.z;
+    }
+  });
+
+  if (localPoints.length === 0) return [];
+
+  const zSpan = zMax - zMin;
+  // 全長がほぼ0（点や平面）の場合は区間分割の意味が無いので、
+  // 全体を1個の箱として返す。
+  if (zSpan < 1e-6) {
+    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+    for (const p of localPoints) {
+      if (p.x < xMin) xMin = p.x;
+      if (p.x > xMax) xMax = p.x;
+      if (p.y < yMin) yMin = p.y;
+      if (p.y > yMax) yMax = p.y;
+    }
+    return [{ zMin, zMax, xMin, xMax, yMin, yMax }];
+  }
+
+  // 区間ごとの集計用バケツ
+  const buckets = [];
+  for (let i = 0; i < count; i++) {
+    buckets.push({
+      zMin: zMin + (zSpan * i) / count,
+      zMax: zMin + (zSpan * (i + 1)) / count,
+      xMin: Infinity, xMax: -Infinity,
+      yMin: Infinity, yMax: -Infinity,
+      hasPoint: false,
+    });
+  }
+
+  for (const p of localPoints) {
+    // pはこれでobject3dローカル座標系になっている。所属する区間を
+    // 求める（末尾の浮動小数誤差でcountを超えないようclampする）。
+    let idx = Math.floor(((p.z - zMin) / zSpan) * count);
+    if (idx < 0) idx = 0;
+    if (idx >= count) idx = count - 1;
+
+    const b = buckets[idx];
+    b.hasPoint = true;
+    if (p.x < b.xMin) b.xMin = p.x;
+    if (p.x > b.xMax) b.xMax = p.x;
+    if (p.y < b.yMin) b.yMin = p.y;
+    if (p.y > b.yMax) b.yMax = p.y;
+  }
+
+  // 頂点が1つも入らなかった区間（極端に薄い/歪なモデルで起こりうる）
+  // は、前後の隣接区間のX/Y範囲を借りて埋める（穴を作らないため）。
+  for (let i = 0; i < buckets.length; i++) {
+    if (buckets[i].hasPoint) continue;
+    // 直前の有効区間を探す。無ければ直後を探す。
+    let src = null;
+    for (let j = i - 1; j >= 0; j--) {
+      if (buckets[j].hasPoint) { src = buckets[j]; break; }
+    }
+    if (!src) {
+      for (let j = i + 1; j < buckets.length; j++) {
+        if (buckets[j].hasPoint) { src = buckets[j]; break; }
+      }
+    }
+    if (src) {
+      buckets[i].xMin = src.xMin;
+      buckets[i].xMax = src.xMax;
+      buckets[i].yMin = src.yMin;
+      buckets[i].yMax = src.yMax;
+    } else {
+      // 全区間が空（起こらないはずだが安全側）
+      buckets[i].xMin = buckets[i].xMax = 0;
+      buckets[i].yMin = buckets[i].yMax = 0;
+    }
+  }
+
+  return buckets.map((b) => ({
+    zMin: b.zMin, zMax: b.zMax,
+    xMin: b.xMin, xMax: b.xMax,
+    yMin: b.yMin, yMax: b.yMax,
+  }));
+}
+
+// v76: シリアライズ用の軽量ヘルパー。computeSegmentedBoundsFromObject3D
+// の戻り値（{zMin,zMax,xMin,xMax,yMin,yMax}の配列）は既にプレーンな
+// オブジェクトのみで構成されているためJSON.stringifyにそのまま渡せるが、
+// 呼び出し側での意図を明確にするための薄いラッパーとして用意する。
+function serializeSegmentedBounds(segments) {
+  return (segments || []).map((s) => ({
+    zMin: s.zMin, zMax: s.zMax,
+    xMin: s.xMin, xMax: s.xMax,
+    yMin: s.yMin, yMax: s.yMax,
+  }));
+}
+
+// v76: モデル未設定時（簡易ゲート表示のみ・GLB/OBJ未読み込み）の
+// フォールバック用に、固定寸法から単一区間の「区間分割ボックス」を
+// 生成する（配列の要素数は常に1）。halfExtentsはローカル座標系の
+// 半寸法{x,y,z}（中心が原点である前提。10-docking-platform.jsの
+// ゲート・艦のcorrectionGroup原点はどちらもこの前提を満たす）。
+function makeFallbackSegmentedBounds(halfExtents) {
+  const hx = (halfExtents && halfExtents.x) || 0;
+  const hy = (halfExtents && halfExtents.y) || 0;
+  const hz = (halfExtents && halfExtents.z) || 0;
+  return [{
+    zMin: -hz, zMax: hz,
+    xMin: -hx, xMax: hx,
+    yMin: -hy, yMax: hy,
+  }];
+}
+

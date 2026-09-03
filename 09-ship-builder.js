@@ -526,6 +526,10 @@
     // 早期returnするだけなので無駄コストは小さい。
     // 関数宣言のためホイスティングにより、定義順に関わらず参照可能。
     if (typeof rebuildDockingFaceGizmo === 'function') rebuildDockingFaceGizmo();
+    // v76-debug: 区間分割バウンディングボックスの確認表示（デバッグ用）。
+    // 本実装（モデル保存時の事前計算）とは別に、開発中の目視確認のため
+    // 一時的に追加。トグルボタンがオンの間だけ再計算・再描画する。
+    if (typeof refreshSegmentedBoundsDebug === 'function') refreshSegmentedBoundsDebug();
   }
 
   // ---- スライダーDOM ----
@@ -1237,6 +1241,76 @@
       orbitState.target.set(0, 0, 0);
       if (modelRoot) frameCameraOnModel();
       refreshOrthoButtons();
+    });
+  }
+
+  // -----------------------------------------------------------
+  // v76-debug: 区間分割バウンディングボックスの確認表示（デバッグ用、
+  // 一時的な機能）。トグルボタンで表示/非表示を切り替え、オンの間は
+  // モデル調整（回転・スケール・オフセット）のたびに再計算・再描画する。
+  // 本実装（保存時にcomputeSegmentedBoundsFromObject3Dの結果を保存
+  // データへ含める処理）とは無関係で、目視確認専用。
+  // -----------------------------------------------------------
+  let segmentedBoundsDebugOn = false;
+  let segmentedBoundsDebugGroup = null;
+  const segmentedBoundsDebugBtn = document.getElementById('segmentedBoundsDebugBtn');
+
+  function clearSegmentedBoundsDebug() {
+    if (segmentedBoundsDebugGroup) {
+      correctionGroup.remove(segmentedBoundsDebugGroup);
+      segmentedBoundsDebugGroup.traverse((obj) => {
+        if (obj.geometry) obj.geometry.dispose();
+        if (obj.material) obj.material.dispose();
+      });
+      segmentedBoundsDebugGroup = null;
+    }
+  }
+
+  function refreshSegmentedBoundsDebug() {
+    clearSegmentedBoundsDebug();
+    if (!segmentedBoundsDebugOn || !modelRoot) return;
+
+    const segments = computeSegmentedBoundsFromObject3D(correctionGroup, 8);
+    if (segments.length === 0) return;
+
+    const group = new THREE.Group();
+    // 区間ごとに色を変えて、前後の並びが見た目で分かるようにする
+    // （前方=寒色〜後方=暖色のグラデーション）。
+    const colors = [0x3388ff, 0x33aaff, 0x33ffcc, 0x66ff66, 0xccff33, 0xffcc33, 0xff8833, 0xff3333];
+
+    segments.forEach((seg, i) => {
+      const width = Math.max(seg.xMax - seg.xMin, 1e-3);
+      const height = Math.max(seg.yMax - seg.yMin, 1e-3);
+      const depth = Math.max(seg.zMax - seg.zMin, 1e-3);
+      const cx = (seg.xMin + seg.xMax) / 2;
+      const cy = (seg.yMin + seg.yMax) / 2;
+      const cz = (seg.zMin + seg.zMax) / 2;
+
+      const geo = new THREE.BoxGeometry(width, height, depth);
+      const edges = new THREE.EdgesGeometry(geo);
+      const mat = new THREE.LineBasicMaterial({
+        color: colors[i % colors.length],
+        transparent: true,
+        opacity: 0.85,
+      });
+      const box = new THREE.LineSegments(edges, mat);
+      box.position.set(cx, cy, cz);
+      group.add(box);
+      geo.dispose();
+    });
+
+    // correctionGroupの子として追加することで、モデルと同じ回転・
+    // スケール・オフセットが自動的に適用される（区間分割の計算基準と
+    // 一致させるため）。
+    correctionGroup.add(group);
+    segmentedBoundsDebugGroup = group;
+  }
+
+  if (segmentedBoundsDebugBtn) {
+    segmentedBoundsDebugBtn.addEventListener('click', () => {
+      segmentedBoundsDebugOn = !segmentedBoundsDebugOn;
+      segmentedBoundsDebugBtn.classList.toggle('active', segmentedBoundsDebugOn);
+      refreshSegmentedBoundsDebug();
     });
   }
 
