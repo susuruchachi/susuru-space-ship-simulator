@@ -1229,10 +1229,24 @@ function computeCrossSegmentedBoundsFromObject3D(object3d, zSegmentCount, xSegme
 
   const zSpan = zMax - zMin;
   const xSpan = xMax - xMin;
+  // v76: 全長に対して幅の方が大きいモデルや、元モデルの向きが90度
+  // ズレている等、Z軸・X軸のどちらが「長辺」になるかはモデルによって
+  // 変わる。固定でZ軸だけ細かく分割すると、実際に長く伸びている方が
+  // X軸だった場合に粗いままになってしまうため、実際のスパン
+  // （zSpan/xSpan）を比較し、長い方の軸だけ分割数を2倍（8→16）にする。
+  // 差がわずかな場合はどちらを選んでも粗さの体感差はほぼ無いはずなので、
+  // 特別な閾値は設けずMath.max/Math.minの比較のみで決める。
+  let zBaseCount = zCount;
+  let xBaseCount = xCount;
+  if (zSpan > xSpan) {
+    zBaseCount = zCount * 2;
+  } else if (xSpan > zSpan) {
+    xBaseCount = xCount * 2;
+  }
   // どちらかの幅がほぼ0（板状・平面的なモデル）の場合、その軸は
   // 分割の意味が無いため1区間として扱う。
-  const effectiveZCount = zSpan < 1e-6 ? 1 : zCount;
-  const effectiveXCount = xSpan < 1e-6 ? 1 : xCount;
+  const effectiveZCount = zSpan < 1e-6 ? 1 : zBaseCount;
+  const effectiveXCount = xSpan < 1e-6 ? 1 : xBaseCount;
 
   // セルをMapで管理（キー: "zIdx,xIdx"）。頂点が実際に入ったセルだけが
   // 生成されるため、空セルを後から除外する処理は不要（生成しない）。

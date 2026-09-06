@@ -1281,19 +1281,30 @@
     if (segments.length === 0) return;
 
     const group = new THREE.Group();
-    // 区間ごとに色を変えて、前後の並びが見た目で分かるようにする
-    // （前方=寒色〜後方=暖色のグラデーション）。交差モードではセル数が
-    // 8を超えうるため、Z区間の位置（zMinの値）から色を補間して割り当てる
-    // （Z軸単独モードは従来通り配列の並び順=前後順そのものを使う）。
+    // 区間ごとに色を変えて、実際に長い方の軸に沿った並びが見た目で
+    // 分かるようにする（寒色〜暖色のグラデーション）。交差モードでは
+    // Z軸・X軸のうち実際にスパンが大きい方（＝内部で16分割されている
+    // 方）を軸にして色を補間する。どちらの軸が長いかはモデルにより
+    // 変わる（元モデルが90度ズレている等）ため、セルの実測範囲から
+    // 都度判定する（Z軸単独モードは従来通り配列の並び順=前後順その
+    // ものを使う）。
     const colors = [0x3388ff, 0x33aaff, 0x33ffcc, 0x66ff66, 0xccff33, 0xffcc33, 0xff8833, 0xff3333];
     let colorForIndex;
     if (segmentedBoundsDebugMode === 'cross') {
       const allZMin = segments.map((s) => s.zMin);
-      const zLo = Math.min(...allZMin);
-      const zHi = Math.max(...allZMin);
-      const zRange = Math.max(zHi - zLo, 1e-6);
+      const allXMin = segments.map((s) => s.xMin);
+      const zLo = Math.min(...allZMin), zHi = Math.max(...allZMin);
+      const xLo = Math.min(...allXMin), xHi = Math.max(...allXMin);
+      const zRange = zHi - zLo;
+      const xRange = xHi - xLo;
+      // computeCrossSegmentedBoundsFromObject3D側の判定（スパンが
+      // 大きい方を16分割）と同じ考え方で、セルの重心位置のばらつきが
+      // 大きい方の軸を採用する。
+      const useX = xRange > zRange;
+      const lo = useX ? xLo : zLo;
+      const range = Math.max((useX ? xRange : zRange), 1e-6);
       colorForIndex = (seg) => {
-        const t = (seg.zMin - zLo) / zRange; // 0(前方)〜1(後方)
+        const t = ((useX ? seg.xMin : seg.zMin) - lo) / range; // 0〜1
         const idx = Math.min(colors.length - 1, Math.floor(t * colors.length));
         return colors[idx];
       };
