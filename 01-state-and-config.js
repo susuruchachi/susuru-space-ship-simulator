@@ -1163,12 +1163,111 @@ function computeSegmentedBoundsFromObject3D(object3d, segmentCount) {
 // の戻り値（{zMin,zMax,xMin,xMax,yMin,yMax}の配列）は既にプレーンな
 // オブジェクトのみで構成されているためJSON.stringifyにそのまま渡せるが、
 // 呼び出し側での意図を明確にするための薄いラッパーとして用意する。
+// computeCrossSegmentedBoundsFromObject3Dの戻り値（同じ形のオブジェクト
+// の配列）にもそのまま使える。
 function serializeSegmentedBounds(segments) {
   return (segments || []).map((s) => ({
     zMin: s.zMin, zMax: s.zMax,
     xMin: s.xMin, xMax: s.xMax,
     yMin: s.yMin, yMax: s.yMax,
   }));
+}
+
+// v76: computeSegmentedBoundsFromObject3D（Z軸単独の8区間）を拡張し、
+// Z軸とX軸（Y軸周りに90度回した軸＝艦の左右方向）の両方で輪切りにし、
+// その交差（Z区間×X区間の格子セル）に実際に頂点が入るものだけを箱と
+// して残す。Z軸だけでは表現できない左右非対称な形状（片側に張り出した
+// ウイングなど）を、より艦の形状にタイトにフィットした形で近似する
+// のが目的。
+//
+// 頂点が1つも入らない格子セルは単純に除外する（隣接セルからの補完は
+// 行わない。単一軸方式で行っていた「隣接区間から埋める」処理は、
+// 格子状になると「隣接」の定義自体が曖昧になるため。モデルの形状に
+// よっては結果に穴が空きうる点に注意）。
+//
+// object3d: 対象のTHREE.Object3D（Group等の階層で良い）。
+// zSegmentCount / xSegmentCount: 各軸の分割数（デフォルト8）。
+// 戻り値: セルの配列（最大 zSegmentCount * xSegmentCount 個、実際は
+//         モデル形状に応じてそれより少ない）。各要素は
+//         { zMin, zMax, xMin, xMax, yMin, yMax }
+//         （すべてobject3dのローカル座標系の値）。
+function computeCrossSegmentedBoundsFromObject3D(object3d, zSegmentCount, xSegmentCount) {
+  const zCount = zSegmentCount || 8;
+  const xCount = xSegmentCount || 8;
+  if (!object3d) return [];
+
+  // object3d自身のワールド行列の逆行列。computeSegmentedBoundsFromObject3D
+  // と同じ理由（v76-fix1参照）で、全頂点をobject3dローカル座標系へ変換
+  // した上で min/max・格子分けを行う。
+  object3d.updateWorldMatrix(true, true);
+  const toLocal = new THREE.Matrix4().copy(object3d.matrixWorld).invert();
+
+  let zMin = Infinity, zMax = -Infinity;
+  let xMin = Infinity, xMax = -Infinity;
+  const localPoints = [];
+  const v = new THREE.Vector3();
+
+  object3d.traverse((node) => {
+    if (!node.isMesh || !node.geometry) return;
+    const posAttr = node.geometry.attributes && node.geometry.attributes.position;
+    if (!posAttr) return;
+
+    const localToObject3d = new THREE.Matrix4().multiplyMatrices(toLocal, node.matrixWorld);
+
+    for (let i = 0; i < posAttr.count; i++) {
+      v.fromBufferAttribute(posAttr, i);
+      v.applyMatrix4(localToObject3d);
+      localPoints.push({ x: v.x, y: v.y, z: v.z });
+      if (v.z < zMin) zMin = v.z;
+      if (v.z > zMax) zMax = v.z;
+      if (v.x < xMin) xMin = v.x;
+      if (v.x > xMax) xMax = v.x;
+    }
+  });
+
+  if (localPoints.length === 0) return [];
+
+  const zSpan = zMax - zMin;
+  const xSpan = xMax - xMin;
+  // どちらかの幅がほぼ0（板状・平面的なモデル）の場合、その軸は
+  // 分割の意味が無いため1区間として扱う。
+  const effectiveZCount = zSpan < 1e-6 ? 1 : zCount;
+  const effectiveXCount = xSpan < 1e-6 ? 1 : xCount;
+
+  // セルをMapで管理（キー: "zIdx,xIdx"）。頂点が実際に入ったセルだけが
+  // 生成されるため、空セルを後から除外する処理は不要（生成しない）。
+  const cells = new Map();
+
+  for (const p of localPoints) {
+    let zIdx = effectiveZCount === 1
+      ? 0
+      : Math.floor(((p.z - zMin) / zSpan) * effectiveZCount);
+    if (zIdx < 0) zIdx = 0;
+    if (zIdx >= effectiveZCount) zIdx = effectiveZCount - 1;
+
+    let xIdx = effectiveXCount === 1
+      ? 0
+      : Math.floor(((p.x - xMin) / xSpan) * effectiveXCount);
+    if (xIdx < 0) xIdx = 0;
+    if (xIdx >= effectiveXCount) xIdx = effectiveXCount - 1;
+
+    const key = zIdx + ',' + xIdx;
+    let cell = cells.get(key);
+    if (!cell) {
+      cell = {
+        zMin: zMin + (zSpan * zIdx) / effectiveZCount,
+        zMax: zSpan < 1e-6 ? zMax : zMin + (zSpan * (zIdx + 1)) / effectiveZCount,
+        xMin: xMin + (xSpan * xIdx) / effectiveXCount,
+        xMax: xSpan < 1e-6 ? xMax : xMin + (xSpan * (xIdx + 1)) / effectiveXCount,
+        yMin: Infinity, yMax: -Infinity,
+      };
+      cells.set(key, cell);
+    }
+    if (p.y < cell.yMin) cell.yMin = p.y;
+    if (p.y > cell.yMax) cell.yMax = p.y;
+  }
+
+  return Array.from(cells.values());
 }
 
 // v76: モデル未設定時（簡易ゲート表示のみ・GLB/OBJ未読み込み）の

@@ -1248,12 +1248,17 @@
   // v76-debug: 区間分割バウンディングボックスの確認表示（デバッグ用、
   // 一時的な機能）。トグルボタンで表示/非表示を切り替え、オンの間は
   // モデル調整（回転・スケール・オフセット）のたびに再計算・再描画する。
-  // 本実装（保存時にcomputeSegmentedBoundsFromObject3Dの結果を保存
-  // データへ含める処理）とは無関係で、目視確認専用。
+  // 本実装（保存時に計算結果を保存データへ含める処理）とは無関係で、
+  // 目視確認専用。
+  // v76: Z軸単独8分割（computeSegmentedBoundsFromObject3D）と、
+  // Z軸×X軸の交差方式（computeCrossSegmentedBoundsFromObject3D、
+  // 左右非対称な形状をよりタイトに近似）の2モードを、それぞれ別の
+  // ボタンで排他的に切り替えて確認できるようにする。
   // -----------------------------------------------------------
-  let segmentedBoundsDebugOn = false;
+  let segmentedBoundsDebugMode = null; // null | 'z' | 'cross'
   let segmentedBoundsDebugGroup = null;
   const segmentedBoundsDebugBtn = document.getElementById('segmentedBoundsDebugBtn');
+  const crossSegmentedBoundsDebugBtn = document.getElementById('crossSegmentedBoundsDebugBtn');
 
   function clearSegmentedBoundsDebug() {
     if (segmentedBoundsDebugGroup) {
@@ -1268,15 +1273,33 @@
 
   function refreshSegmentedBoundsDebug() {
     clearSegmentedBoundsDebug();
-    if (!segmentedBoundsDebugOn || !modelRoot) return;
+    if (!segmentedBoundsDebugMode || !modelRoot) return;
 
-    const segments = computeSegmentedBoundsFromObject3D(correctionGroup, 8);
+    const segments = segmentedBoundsDebugMode === 'cross'
+      ? computeCrossSegmentedBoundsFromObject3D(correctionGroup, 8, 8)
+      : computeSegmentedBoundsFromObject3D(correctionGroup, 8);
     if (segments.length === 0) return;
 
     const group = new THREE.Group();
     // 区間ごとに色を変えて、前後の並びが見た目で分かるようにする
-    // （前方=寒色〜後方=暖色のグラデーション）。
+    // （前方=寒色〜後方=暖色のグラデーション）。交差モードではセル数が
+    // 8を超えうるため、Z区間の位置（zMinの値）から色を補間して割り当てる
+    // （Z軸単独モードは従来通り配列の並び順=前後順そのものを使う）。
     const colors = [0x3388ff, 0x33aaff, 0x33ffcc, 0x66ff66, 0xccff33, 0xffcc33, 0xff8833, 0xff3333];
+    let colorForIndex;
+    if (segmentedBoundsDebugMode === 'cross') {
+      const allZMin = segments.map((s) => s.zMin);
+      const zLo = Math.min(...allZMin);
+      const zHi = Math.max(...allZMin);
+      const zRange = Math.max(zHi - zLo, 1e-6);
+      colorForIndex = (seg) => {
+        const t = (seg.zMin - zLo) / zRange; // 0(前方)〜1(後方)
+        const idx = Math.min(colors.length - 1, Math.floor(t * colors.length));
+        return colors[idx];
+      };
+    } else {
+      colorForIndex = (seg, i) => colors[i % colors.length];
+    }
 
     segments.forEach((seg, i) => {
       const width = Math.max(seg.xMax - seg.xMin, 1e-3);
@@ -1289,7 +1312,7 @@
       const geo = new THREE.BoxGeometry(width, height, depth);
       const edges = new THREE.EdgesGeometry(geo);
       const mat = new THREE.LineBasicMaterial({
-        color: colors[i % colors.length],
+        color: colorForIndex(seg, i),
         transparent: true,
         opacity: 0.85,
       });
@@ -1306,10 +1329,27 @@
     segmentedBoundsDebugGroup = group;
   }
 
+  function refreshSegmentedBoundsDebugButtons() {
+    if (segmentedBoundsDebugBtn) {
+      segmentedBoundsDebugBtn.classList.toggle('active', segmentedBoundsDebugMode === 'z');
+    }
+    if (crossSegmentedBoundsDebugBtn) {
+      crossSegmentedBoundsDebugBtn.classList.toggle('active', segmentedBoundsDebugMode === 'cross');
+    }
+  }
+
   if (segmentedBoundsDebugBtn) {
     segmentedBoundsDebugBtn.addEventListener('click', () => {
-      segmentedBoundsDebugOn = !segmentedBoundsDebugOn;
-      segmentedBoundsDebugBtn.classList.toggle('active', segmentedBoundsDebugOn);
+      // 同じモードをもう一度押したらオフ、それ以外はこのモードへ切替
+      segmentedBoundsDebugMode = segmentedBoundsDebugMode === 'z' ? null : 'z';
+      refreshSegmentedBoundsDebugButtons();
+      refreshSegmentedBoundsDebug();
+    });
+  }
+  if (crossSegmentedBoundsDebugBtn) {
+    crossSegmentedBoundsDebugBtn.addEventListener('click', () => {
+      segmentedBoundsDebugMode = segmentedBoundsDebugMode === 'cross' ? null : 'cross';
+      refreshSegmentedBoundsDebugButtons();
       refreshSegmentedBoundsDebug();
     });
   }

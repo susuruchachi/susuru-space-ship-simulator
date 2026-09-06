@@ -102,7 +102,10 @@
     top: 46px;
     right: 12px;
     display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     gap: 6px;
+    max-width: 260px;
     z-index: 5;
   }
   .debug-btn {
@@ -474,7 +477,8 @@
     </div>
 
     <div class="debug-panel">
-      <button class="debug-btn" id="segmentedBoundsDebugBtn" title="衝突判定用の区間分割ボックス（8分割）を確認表示（開発用の一時機能）">当たり判定確認</button>
+      <button class="debug-btn" id="segmentedBoundsDebugBtn" title="衝突判定用の区間分割ボックス（Z軸8分割）を確認表示（開発用の一時機能）">当たり判定(Z軸)</button>
+      <button class="debug-btn" id="crossSegmentedBoundsDebugBtn" title="衝突判定用の交差区間分割ボックス（Z軸8×X軸8の交差、最大64分割）を確認表示（開発用の一時機能）">当たり判定(Z×X軸)</button>
     </div>
 
     <div class="empty-state" id="emptyState">
