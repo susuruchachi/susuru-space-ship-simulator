@@ -65,8 +65,10 @@ const ApproachVisualizer = {
 
   update() {
     const target = State.dockingTarget;
+    // v77: 母港（ポートのある座標系）を離れている間は誘導表示をすべて隠す
+    const atHome = typeof Navigation === 'undefined' || Navigation.isHome();
 
-    const axisVisible = !!target && State.settings.showApproachGuides !== false;
+    const axisVisible = !!target && atHome && State.settings.showApproachGuides !== false;
     if (!axisVisible) {
       this._clearAxis();
     } else {
@@ -75,7 +77,7 @@ const ApproachVisualizer = {
 
     this._recordTrail(target);
 
-    const routeVisible = !!target && State.settings.showRouteLine !== false;
+    const routeVisible = !!target && atHome && State.settings.showRouteLine !== false;
     if (!routeVisible) {
       this._clearRoute();
       this._clearTrailLine();

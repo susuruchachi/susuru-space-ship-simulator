@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>宇宙船シミュレーター v73</title>
+<title>宇宙船シミュレーター</title>
 <style>
   html, body {
     margin: 0;
@@ -380,6 +380,368 @@
     color: #dfefff;
     font-size: 12px;
   }
+
+  /* -----------------------------------------------------------
+     v77: 宇宙航行HUD（17-space-hud.js）
+  ----------------------------------------------------------- */
+  .space-nav-panel {
+    position: fixed;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(540px, calc(100vw - 24px));
+    padding: 6px 10px 8px;
+    background: rgba(0, 8, 20, 0.55);
+    border: 1px solid rgba(108, 195, 255, 0.35);
+    border-radius: 8px;
+    color: #cfe8ff;
+    font-size: 12px;
+    z-index: 30;
+    box-sizing: border-box;
+  }
+  .space-nav-line {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.5;
+  }
+  .space-nav-target { color: #ffd9a0; }
+  .space-nav-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .space-nav-buttons button,
+  .space-nav-buttons select {
+    padding: 5px 9px;
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(108,195,255,0.45);
+    border-radius: 6px;
+    color: #dfefff;
+    font-size: 12px;
+  }
+  .space-nav-buttons select { max-width: 170px; }
+  /* 画面幅が中くらい（iPadなど）: 左上のデバッグ表示と重ならないよう右へ寄せる */
+  @media (max-width: 1150px) {
+    .space-nav-panel {
+      left: auto;
+      right: max(12px, calc(50% - 300px));
+      transform: none;
+      width: min(500px, calc(100vw - 330px));
+    }
+    .space-nav-buttons select { max-width: 120px; }
+  }
+  /* コンパクト表示（スマホ・▴ボタン）: 1行の状態表示とアイコンボタンだけ */
+  .space-nav-panel.is-compact {
+    width: auto;
+    max-width: calc(100vw - 16px);
+    left: max(50%, 300px);
+    right: auto;
+    transform: translateX(-50%);
+    padding: 4px 6px 5px;
+    font-size: 11px;
+  }
+  .space-nav-panel.is-compact .space-nav-location,
+  .space-nav-panel.is-compact .space-nav-target,
+  .space-nav-panel.is-compact .space-target-select,
+  .space-nav-panel.is-compact .snb-text { display: none; }
+  .space-nav-panel.is-compact .space-nav-buttons { margin-top: 3px; gap: 4px; flex-wrap: nowrap; }
+  .space-nav-panel.is-compact .space-nav-buttons button { padding: 4px 7px; }
+  @media (max-width: 600px) {
+    .space-nav-panel.is-compact { left: 50%; }
+  }
+  .space-nav-buttons button.is-on {
+    background: rgba(255,170,51,0.25);
+    border-color: rgba(255,190,90,0.8);
+    color: #ffe9c4;
+  }
+  .space-nav-buttons button.is-off { color: rgba(255,255,255,0.4); }
+
+  #hud-root > .space-label-layer,
+  #hud-root > .space-warning {
+    pointer-events: none;
+  }
+  .space-label-layer {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    z-index: 5;
+  }
+  .space-label {
+    position: absolute;
+    left: 0;
+    top: 0;
+    font-size: 11px;
+    color: rgba(200, 225, 255, 0.85);
+    text-shadow: 0 0 3px #000, 0 0 2px #000;
+    white-space: nowrap;
+    display: none;
+  }
+  .space-label-star { color: #ffe7a8; }
+  .space-label-moon { color: rgba(190, 200, 215, 0.8); font-size: 10px; }
+  .space-label-dwarf, .space-label-asteroid, .space-label-comet { color: rgba(220, 200, 170, 0.8); font-size: 10px; }
+  .space-label.is-target { color: #ffcf7a; font-weight: bold; }
+  .space-target-marker {
+    position: absolute;
+    left: 0;
+    top: 0;
+    display: none;
+  }
+  .stm-corner {
+    position: absolute;
+    width: 8px;
+    height: 8px;
+    border-color: #ffb547;
+    border-style: solid;
+    border-width: 0;
+  }
+  .stm-corner.tl { left: 0; top: 0; border-left-width: 2px; border-top-width: 2px; }
+  .stm-corner.tr { right: 0; top: 0; border-right-width: 2px; border-top-width: 2px; }
+  .stm-corner.bl { left: 0; bottom: 0; border-left-width: 2px; border-bottom-width: 2px; }
+  .stm-corner.br { right: 0; bottom: 0; border-right-width: 2px; border-bottom-width: 2px; }
+  .stm-text {
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin-top: 4px;
+    font-size: 11px;
+    color: #ffcf7a;
+    text-shadow: 0 0 3px #000;
+    white-space: nowrap;
+  }
+  .space-target-arrow {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 20px;
+    height: 20px;
+    line-height: 20px;
+    text-align: center;
+    color: #ffb547;
+    font-size: 18px;
+    text-shadow: 0 0 4px #000;
+    display: none;
+  }
+  .space-warning {
+    position: fixed;
+    top: 40%;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 8px 14px;
+    background: rgba(80, 10, 0, 0.6);
+    border: 1px solid rgba(255, 120, 80, 0.7);
+    border-radius: 6px;
+    color: #ffd2c4;
+    font-size: 13px;
+    display: none;
+    z-index: 40;
+  }
+  .space-credits {
+    position: fixed;
+    left: 8px;
+    bottom: 4px;
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.32);
+    z-index: 9999;
+    pointer-events: none;
+    white-space: nowrap;
+    max-width: calc(100vw - 120px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .space-credits a { color: rgba(170, 210, 255, 0.6); pointer-events: auto; }
+  .space-credits-dialog {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+  }
+  .space-credits-body {
+    max-width: min(560px, calc(100vw - 32px));
+    max-height: 80vh;
+    overflow-y: auto;
+    padding: 16px 20px;
+    background: #0b1626;
+    border: 1px solid rgba(108, 195, 255, 0.4);
+    border-radius: 10px;
+    color: #dfefff;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .space-credits-body h3 { margin: 0 0 8px; font-size: 15px; }
+  .space-credits-body ul { padding-left: 18px; margin: 0 0 12px; }
+  .space-credits-close {
+    padding: 6px 16px;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(108,195,255,0.5);
+    border-radius: 6px;
+    color: #dfefff;
+  }
+
+  /* -----------------------------------------------------------
+     v77: 星図（19-star-map.js）
+  ----------------------------------------------------------- */
+  body.map-open #hud-root { display: none; }
+  .star-map-root {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: none;
+    touch-action: none;
+    cursor: grab;
+  }
+  .star-map-header {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    right: 8px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: #dfefff;
+    font-size: 13px;
+    pointer-events: none;
+  }
+  .star-map-header > * { pointer-events: auto; }
+  .star-map-title { font-size: 16px; font-weight: bold; text-shadow: 0 0 4px #000; }
+  .star-map-scale { color: rgba(200, 225, 255, 0.75); text-shadow: 0 0 3px #000; flex: 1; }
+  .star-map-close,
+  .star-map-presets button,
+  .star-map-time button,
+  .smi-actions button {
+    padding: 6px 10px;
+    background: rgba(0, 10, 25, 0.6);
+    border: 1px solid rgba(108, 195, 255, 0.45);
+    border-radius: 6px;
+    color: #dfefff;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .star-map-presets {
+    position: absolute;
+    top: 44px;
+    left: 8px;
+    right: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .star-map-time {
+    position: absolute;
+    bottom: 22px;
+    left: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    color: #cfe8ff;
+    font-size: 12px;
+    max-width: calc(100vw - 16px);
+  }
+  .star-map-date { text-shadow: 0 0 3px #000; margin-right: 4px; }
+  .star-map-time button.is-on { background: rgba(255, 170, 51, 0.3); border-color: rgba(255, 190, 90, 0.8); }
+  .star-map-labels { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+  .sm-label {
+    position: absolute;
+    left: 0;
+    top: 0;
+    font-size: 11px;
+    color: rgba(205, 225, 255, 0.9);
+    text-shadow: 0 0 3px #000, 0 0 2px #000;
+    white-space: nowrap;
+    pointer-events: auto;
+    cursor: pointer;
+    padding: 2px 3px;
+    display: none;
+  }
+  .sm-label::before {
+    content: '';
+    position: absolute;
+    left: -6px;
+    top: 8px;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: currentColor;
+    opacity: 0.8;
+  }
+  .sm-label.sm-star { color: #ffe39a; font-weight: bold; }
+  .sm-label.sm-planet { color: #cfe3ff; font-size: 12px; }
+  .sm-label.sm-moon { color: rgba(185, 200, 220, 0.85); font-size: 10px; }
+  .sm-label.sm-dwarf, .sm-label.sm-asteroid, .sm-label.sm-comet { color: rgba(225, 205, 175, 0.9); font-size: 10px; }
+  .sm-label.sm-starname { color: rgba(255, 236, 200, 0.85); font-size: 10px; }
+  .sm-label.sm-arm { color: rgba(170, 200, 255, 0.9); font-size: 12px; }
+  .sm-label.sm-gc { color: #ffd38a; font-size: 12px; }
+  .sm-label.sm-galaxy { color: #e7d4ff; font-size: 12px; }
+  .sm-label.sm-ship { color: #7dffa8; font-weight: bold; }
+  .sm-label.sm-home { color: #7dffa8; }
+  .sm-label.sm-region { color: rgba(255, 214, 160, 0.85); font-size: 11px; font-style: italic; }
+  .sm-label.is-selected { color: #fff; background: rgba(60, 120, 200, 0.45); border-radius: 4px; }
+  .sm-label.is-target { color: #ffcf7a; }
+  .star-map-info {
+    position: absolute;
+    right: 8px;
+    bottom: 22px;
+    width: min(340px, calc(100vw - 16px));
+    max-height: 50vh;
+    overflow-y: auto;
+    padding: 10px 12px;
+    background: rgba(0, 10, 25, 0.78);
+    border: 1px solid rgba(108, 195, 255, 0.45);
+    border-radius: 8px;
+    color: #dfefff;
+    font-size: 12px;
+    line-height: 1.6;
+    cursor: default;
+    box-sizing: border-box;
+  }
+  .star-map-legend {
+    position: absolute;
+    left: 8px;
+    bottom: 60px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    max-width: min(560px, calc(100vw - 16px));
+    font-size: 10px;
+    color: rgba(225, 235, 255, 0.8);
+    text-shadow: 0 0 3px #000;
+    pointer-events: none;
+  }
+  .sml-item { white-space: nowrap; }
+  .sml-item i {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    margin-right: 4px;
+    vertical-align: 0;
+  }
+  .smi-title { font-size: 16px; font-weight: bold; }
+  .smi-en { font-size: 11px; color: rgba(200, 220, 255, 0.6); font-weight: normal; }
+  .smi-type { color: #ffd9a0; margin-bottom: 4px; }
+  .smi-desc { margin-top: 6px; color: rgba(225, 235, 255, 0.85); }
+  .smi-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .star-map-hint {
+    position: absolute;
+    bottom: 4px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.4);
+    white-space: nowrap;
+    pointer-events: none;
+  }
+  @media (max-width: 700px) {
+    .star-map-info { bottom: 70px; }
+    .star-map-hint { display: none; }
+    .star-map-legend { bottom: 96px; }
+  }
 </style>
 </head>
 <body>
@@ -402,6 +764,16 @@
 <script src="08-camera.js"></script>
 <script src="10-docking-platform.js"></script>
 <script src="11-approach-visualizer.js"></script>
+<!-- v77: 実在の宇宙（太陽系・星空・天の川） -->
+<script src="data/star-catalog.js"></script>
+<script src="13-astro-core.js"></script>
+<script src="14-solar-system.js"></script>
+<script src="15-universe-render.js"></script>
+<script src="16-navigation.js"></script>
+<script src="17-space-hud.js"></script>
+<script src="18-galaxy.js"></script>
+<script src="19-star-map.js"></script>
+<script src="20-small-bodies.js"></script>
 
 <script>
 // =============================================================
@@ -413,7 +785,9 @@ let clock;
 
 function initScene() {
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x000005);
+  // v77: 背景は宇宙（Universe）側で描くため、ローカルシーンには背景色を
+  // 設定しない（Three.jsは背景色があると描画のたびに画面を塗りつぶしてしまう）。
+  scene.background = null;
 
   camera = new THREE.PerspectiveCamera(
     60, window.innerWidth / window.innerHeight, 0.1, 100000
@@ -422,26 +796,23 @@ function initScene() {
   renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  // 宇宙（星空・天体）→ 艦などのローカルシーン、の順に重ねて描くため自動クリアを切る
+  renderer.autoClear = false;
+  renderer.setClearColor(0x000000, 1);
   document.body.appendChild(renderer.domElement);
 
-  // 簡易的な星空（背景の目印。本格的なワープ演出は後続バージョンで拡張）
-  const starGeo = new THREE.BufferGeometry();
-  const starCount = 4000;
-  const positions = new Float32Array(starCount * 3);
-  for (let i = 0; i < starCount; i++) {
-    positions[i * 3 + 0] = (Math.random() - 0.5) * 20000;
-    positions[i * 3 + 1] = (Math.random() - 0.5) * 20000;
-    positions[i * 3 + 2] = (Math.random() - 0.5) * 20000;
-  }
-  starGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  const starMat = new THREE.PointsMaterial({ color: 0xffffff, size: 1.2 });
-  scene.add(new THREE.Points(starGeo, starMat));
-
-  const ambient = new THREE.AmbientLight(0x334455, 0.6);
-  scene.add(ambient);
-  const sun = new THREE.DirectionalLight(0xffffff, 1.2);
-  sun.position.set(500, 300, 200);
-  scene.add(sun);
+  // v77: 以前はランダムな点を並べた簡易的な星空と固定の照明だったが、
+  // 実在の星表・天の川・太陽系の天体（15-universe-render.js）に置き換えた。
+  // 照明も太陽の実際の方向から当たる（地球の影に入れば暗くなる）。
+  SimClock.resetToNow();
+  SolarSystem.init();
+  const maxTex = renderer.capabilities.maxTextureSize >= 8192 ? '4k' : '2k';
+  // 銀河系モデルの点の数（タッチ端末は控えめに。?galaxyPoints=N で上書き可）
+  const isTouch = (navigator.maxTouchPoints || 0) > 0;
+  const gpParam = parseInt(new URLSearchParams(location.search).get('galaxyPoints'), 10);
+  const galaxyPoints = Number.isFinite(gpParam) ? gpParam : (isTouch ? 50000 : 90000);
+  Universe.init(renderer, { maxTexture: maxTex, galaxyPoints });
+  Universe.initLocalLights(scene);
 
   window.addEventListener('resize', onResize);
 }
@@ -603,6 +974,10 @@ function initGame() {
   const ship = ShipController.spawnPlayerShip(shipClass, mesh, { x: 0, y: 0, z: 0 });
   loadSavedShipModelInto(mesh, shipClass, ship);
 
+  // v77: 母港（地球の高度2,000km）を基準にした座標系を用意する。
+  // 艦・ポートのローカル座標は従来どおりで、その原点が地球周回軌道上にある。
+  Navigation.init();
+
   const capParam = params.get('speedCapMode');
   const effectiveCapMode =
     (capParam === SpeedCapMode.HARD_CAP || capParam === SpeedCapMode.SOFT_GLOW)
@@ -661,6 +1036,7 @@ function initGame() {
   // querySelectorが要素を見つけられずタッチ入力が一切バインドされない
   // （バグとして報告：「タッチ操作が効かない」）
   HUD.init(hudRoot);
+  SpaceHud.init(hudRoot);
   InputSystem.init(hudRoot);
   EngineFx.init(scene);
   CameraSystem.init(renderer.domElement);
@@ -672,14 +1048,40 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.05); // タブ切り替え等の大ジャンプ対策
 
+  // v77: 宇宙の時刻を進め、太陽系の天体の位置・自転を更新してから艦を動かす
+  SimClock.update(dt);
+  SolarSystem.update(SimClock.jd);
+
   ShipController.update(dt);
+  Navigation.postUpdate();
   EngineFx.update(dt);
   CameraSystem.update(camera);
   DockingPlatform.update();
   ApproachVisualizer.update();
 
+  // 宇宙の視点（カメラの宇宙座標・向き）を渡して、星空と天体を更新。
+  // 星図を開いている間は星図のカメラで描く。
+  const mapOpen = StarMap.isOpen();
+  if (mapOpen) StarMap.update(dt);
+  else Universe.setView(Navigation.buildView(camera));
+  Universe.update(window.innerWidth, window.innerHeight, renderer.getPixelRatio());
+  if (State.ship) {
+    Universe.updateLocalLights(Navigation.frame.rotT, Navigation.shipUniverse(), State.ship.position);
+    const fwd = Astro.mat3MulVec(Navigation.frame.rot, rotateVecByQuat({ x: 0, y: 0, z: -1 }, State.ship.quaternion));
+    Universe.setWarpEffect(Navigation.isWarping() ? Navigation.warp.speed : 0, fwd, dt);
+  }
+
   HUD.update();
-  renderer.render(scene, camera);
+  SpaceHud.update();
+
+  renderer.clear();
+  Universe.render(renderer);
+  if (mapOpen) {
+    StarMap.postRender();
+  } else {
+    renderer.clearDepth();
+    renderer.render(scene, camera);
+  }
 }
 
 initScene();
@@ -691,6 +1093,7 @@ clock = new THREE.Clock();
 // でも同じ要素id・定数を使えば流用できる。
 const versionLabelEl = document.getElementById('version-label');
 if (versionLabelEl) versionLabelEl.textContent = GAME_VERSION;
+document.title = `宇宙船シミュレーター ${GAME_VERSION}`;
 
 animate();
 </script>

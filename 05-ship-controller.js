@@ -22,14 +22,31 @@ const ShipController = {
     return ship;
   },
 
+  // v77: 物理1ステップの最大時間[s]。宇宙の描画が加わって端末によっては
+  // フレームレートが下がるため、1フレームの時間が長いときは分割して進める。
+  // 自動ドッキングの停止判定（速度0.05未満）は刻みが粗い（20fps以下）と
+  // 噴射1回ぶんの速度変化が閾値を超えて止まり切れず、brake300から先へ
+  // 進めなくなるため（60fps・50fpsの端末では従来どおり1フレーム1ステップ）。
+  MAX_PHYSICS_STEP: 1 / 50,
+
   // 毎フレーム呼び出し
   update(dt) {
     const ship = State.ship;
     if (!ship || State.paused) return;
 
     InputSystem.update();
-    FlightPhysics.step(ship, State.input, dt);
-    this._integratePose(ship, dt);
+    // v77: ワープ中は並進をワープ航法（16-navigation.js）が受け持ち、
+    // 回転だけ通常の物理（RCSによる姿勢制御）で動かす。
+    if (typeof Navigation !== 'undefined' && Navigation.isWarping()) {
+      Navigation.stepWarp(ship, State.input, dt);
+    } else {
+      const steps = Math.max(1, Math.ceil(dt / this.MAX_PHYSICS_STEP - 1e-9));
+      const h = dt / steps;
+      for (let i = 0; i < steps; i++) {
+        FlightPhysics.step(ship, State.input, h);
+        this._integratePose(ship, h);
+      }
+    }
     this._syncMesh(ship);
   },
 

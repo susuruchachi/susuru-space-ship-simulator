@@ -53,7 +53,10 @@ const DockingPlatform = {
     // 統一する。State.settings.showApproachGuidesがfalseの間は
     // 目的地ゲートも含めて誘導表示を一括で隠す（06-hud.jsの
     // トグルボタン参照）。
-    const visible = State.settings.showApproachGuides !== false;
+    // v77: ポートの座標は母港（地球周回軌道）のローカル座標なので、ワープで
+    // 母港を離れている間は表示しない（16-navigation.js参照）。
+    const atHome = typeof Navigation === 'undefined' || Navigation.isHome();
+    const visible = State.settings.showApproachGuides !== false && atHome;
 
     if (!target || !visible) {
       if (this._group) {

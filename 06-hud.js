@@ -454,6 +454,10 @@ const HUD = {
     saveBtn.addEventListener('click', () => {
       const ship = State.ship;
       if (!ship) return;
+      if (typeof Navigation !== 'undefined' && !Navigation.isHome()) {
+        alert('入港目的地は母港（地球周回軌道）の座標系でのみ保存できます。');
+        return;
+      }
 
       // v61: 「現在地を目的地として保存」は、素朴には艦の現在の重心
       // 位置・姿勢をそのまま保存すればよいが、艦に接舷面(dockingFace)が
@@ -499,6 +503,11 @@ const HUD = {
     toggleBtn.addEventListener('click', () => {
       const ship = State.ship;
       if (!ship || !State.dockingTarget) return; // 目的地未設定時は切り替えない
+      // v77: ドッキングポートは母港の座標系にあるので、母港を離れている間は使えない
+      if (typeof Navigation !== 'undefined' && !Navigation.isHome()) {
+        alert('自動操船（入港）は母港（地球周回軌道）にいるときだけ使えます。先に「母港」を目的地にして自動航行で戻ってください。');
+        return;
+      }
       ship.autoDockingEnabled = !ship.autoDockingEnabled;
       refresh();
     });
