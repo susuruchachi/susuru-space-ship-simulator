@@ -549,6 +549,17 @@ const Navigation = {
   // -----------------------------------------------------------
   // ワープ
   // -----------------------------------------------------------
+  // v86: 内空航法（重力場機関の艦）。ワープの代わりに使う
+  IS_ACCEL_IKN: 3,   // 船速の上がり方 [IKn/s]
+  IS_DECEL_IKN: 8,   // 船速の下がり方 [IKn/s]
+  isInterspace() {
+    const s = State.ship;
+    return !!(s && s.gravityDrive && s.interspace);
+  },
+  driveName() {
+    return this.isInterspace() ? '内空航行' : 'ワープ';
+  },
+
   engageWarp(autopilot) {
     const ship = State.ship;
     if (!ship) return false;
@@ -557,12 +568,16 @@ const Navigation = {
     this.warp.autopilot = !!autopilot;
     this._leverTouched = false;
     this.warp.speed = Math.max(this.WARP_MIN_SPEED, vecLength(ship.velocity));
+    // 内空航法: 船速は今の速さから始め、航路の圧縮は1倍（圧縮なし）から
+    this.warp.shipSpeed = vecLength(ship.velocity);
+    this.warp.compression = 1;
+    if (this.isInterspace()) this.warp.speed = Math.max(1, this.warp.shipSpeed);
     ship.autoDockingEnabled = false;
     this.arrivalHold = null;
     // 母港フレームから出る（ポートの座標系を壊さないため、艦の位置に新しい原点を置く）
     this._rebaseToDominantBody(false);
     ship.velocity = { x: 0, y: 0, z: 0 };
-    this.warp.status = autopilot ? '自動航行' : 'ワープ';
+    this.warp.status = autopilot ? '自動航行' : this.driveName();
     return true;
   },
 
@@ -624,7 +639,9 @@ const Navigation = {
       const rl = Math.hypot(rx, ry, rz) || 1;
       outward = Math.max(0, (fwd0.x * rx + fwd0.y * ry + fwd0.z * rz) / rl);
     }
-    let vLimit = Math.min(this.WARP_MAX_SPEED, surf * this.WARP_K_SURFACE * (1 + 8 * outward * outward));
+    // v86: 内空航法は、その艦の最高船速 × 最大圧縮比まで
+    const vMaxDrive = this.isInterspace() ? ship.interspace.maxSpeed * ship.interspace.maxCompression : this.WARP_MAX_SPEED;
+    let vLimit = Math.min(vMaxDrive, surf * this.WARP_K_SURFACE * (1 + 8 * outward * outward));
 
     // 目標速度
     let vTarget;
@@ -649,10 +666,15 @@ const Navigation = {
     } else {
       const th = this._warpThrottle(input, dt);
       w.throttle = th;
-      const vMaxThrottle = this.WARP_MIN_SPEED * Math.pow(this.WARP_MAX_SPEED / this.WARP_MIN_SPEED, th);
+      // 内空航法の最高（実効）速度 = 最高船速 × 最大圧縮比
+      const vMaxAll = this.isInterspace() ? ship.interspace.maxSpeed * ship.interspace.maxCompression : this.WARP_MAX_SPEED;
+      const vMaxThrottle = this.WARP_MIN_SPEED * Math.pow(vMaxAll / this.WARP_MIN_SPEED, th);
       vTarget = th <= 0.001 ? 0 : Math.min(vLimit, vMaxThrottle);
     }
 
+    if (this.isInterspace()) {
+      this._stepInterspaceSpeed(ship, w, vTarget, vLimit, dt);
+    } else {
     // 対数スケールで滑らかに加減速
     const cur = Math.max(w.speed, 1);
     const tgt = Math.max(vTarget, 1);
@@ -663,6 +685,7 @@ const Navigation = {
     w.speed = vTarget <= 0 && cur < 50 ? 0 : Math.pow(10, Math.log10(cur) + step);
     // 表面への接近は常に上限で抑える（減速が間に合わない分）
     w.speed = Math.min(w.speed, vLimit * 1.05);
+    }
 
     // v85: 動いている到着点（軌道を回る母港・ラグランジュ点）へは、その動きにも乗って進む
     // （ワープの速さは「到着点に対して」の速さになり、近づくとちゃんと止まれる）
@@ -724,6 +747,33 @@ const Navigation = {
     }
     const k = (best.R * 1.4) / miss;
     return { x: best.b.pos.x + cx * k, y: best.b.pos.y + cy * k, z: best.b.pos.z + cz * k };
+  },
+
+  // -----------------------------------------------------------
+  // v86: 内空航法の速さ（RMIS世界 技術設定資料）
+  //   内空へ入っても船自体の速さ（船速）は増えない。船速は機関で一定の加速度で上げ下げし、
+  //   航路の圧縮（通常空間の距離を何分の1に縮めるか）を上げることで目的地へ早く着く。
+  //   実効の速さ（通常空間で進む速さ）= 船速 × 圧縮比。
+  //   天体の近くでは、ワープと同じく表面までの距離に応じて実効の速さを抑える（圧縮を弱める）。
+  // -----------------------------------------------------------
+  _stepInterspaceSpeed(ship, w, vTarget, vLimit, dt) {
+    const is = ship.interspace;
+    const tgt = Math.max(0, Math.min(vTarget, vLimit));
+    // 船速: 目標の実効の速さを船速だけで出せるならそこまで、出せなければ最高船速まで
+    const shipTarget = Math.min(is.maxSpeed, tgt);
+    const up = this.IS_ACCEL_IKN * SHIP_IKN * dt, down = this.IS_DECEL_IKN * SHIP_IKN * dt;
+    let vs = w.shipSpeed || 0;
+    vs += clamp(shipTarget - vs, -down, up);
+    // 目標より速いままだと止まり切れないので、目標まで落とす（内空からの離脱で一気に落ちる）
+    vs = Math.min(vs, Math.max(tgt, 0));
+    w.shipSpeed = Math.max(0, vs);
+    // 圧縮比: 目標の実効の速さ ÷ 船速（1〜最大）。ワープと同じく対数で滑らかに変える
+    const cTarget = clamp(tgt / Math.max(w.shipSpeed, 1), 1, is.maxCompression);
+    const cur = Math.max(w.compression || 1, 1);
+    const step = clamp(Math.log10(cTarget) - Math.log10(cur), -this.WARP_DECEL_DECADES * dt, this.WARP_ACCEL_DECADES * dt);
+    w.compression = Math.pow(10, Math.log10(cur) + step);
+    w.speed = Math.min(w.shipSpeed * w.compression, vLimit * 1.05);
+    if (w.shipSpeed > 0) w.compression = Math.max(1, w.speed / w.shipSpeed);
   },
 
   // v83: 到着したら、姿勢をいきなり切り替えるのをやめ、到着後に姿勢スラスターで

@@ -918,7 +918,7 @@
     </details>
 
     <details class="adjust-section" id="boundarySection" open>
-      <summary>重力場の密度境界面</summary>
+      <summary>重力場機関（密度境界面・内空航法）</summary>
       <div class="field-row">
         <label for="boundaryHeightInput">境界面の高さ</label>
         <input type="number" id="boundaryHeightInput" class="num-input" step="any" placeholder="船体の中心">
@@ -927,6 +927,19 @@
       <input type="range" id="boundaryHeightSlider" step="any" style="width:100%">
       <div class="derived" id="boundaryLine"></div>
       <p class="hint">重力場機関（三段圧縮・重力波共振）の艦は、この高さの密度境界面に船のように浮いて進みます。高さは船体の中心からの上下（上が＋）。ビューの水色の面が境界面です。主エンジンに重力場機関を選んでいるときだけ使います。</p>
+      <h3>内空航法</h3>
+      <div class="field-row">
+        <label for="isMaxIknInput">最高船速</label>
+        <input type="number" id="isMaxIknInput" class="num-input" min="0" step="any">
+        <span class="unit">IKn</span>
+      </div>
+      <div class="field-row">
+        <label for="isMaxCompInput">最大圧縮比</label>
+        <input type="number" id="isMaxCompInput" class="num-input" min="1" step="any">
+        <span class="unit">倍</span>
+      </div>
+      <div class="derived" id="isLine"></div>
+      <p class="hint">重力場機関の艦は、ワープの代わりに「内空航行」で進みます。内空へ入っても船自体の速さ（船速。1 IKn = 525 km/s）は変わらず、通常空間の航路を短縮（圧縮）することで早く着きます。通常空間で進む実効の速さ = 船速 × 圧縮比。空欄なら機関の種類の目安の値（三段圧縮 22 IKn・3,000倍、重力波共振 29 IKn・100,000倍。設定検討中の仮の値）。</p>
     </details>
 
     <details class="adjust-section" id="gyroSection">

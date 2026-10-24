@@ -139,6 +139,10 @@ function createShipDesign(baseClass, name) {
     // v85: 重力場の密度境界面の高さ [m]（船体の中心からの上下。重力場機関を積んだ艦だけが使う。
     // null なら船体の中心）
     boundary: { height: null },
+    // v86: 内空航法（重力場機関を積んだ艦だけ）。null なら機関の種類の既定値
+    //   maxIKn: 内空航行での最高船速 [IKn]（通常空間での船自体の速さ。1 IKn = 525 km/s）
+    //   maxCompression: 最大圧縮比（通常空間の航路を何分の1に短縮できるか）
+    interspace: { maxIKn: null, maxCompression: null },
     maxSpeed: auto.maxSpeed,       // v85: null なら速度は無制限
     maxAccel: null,                // v85: 最大加速度 [m/s²]（null なら推力のまま）
     maxAngularSpeed: auto.maxAngularSpeed,
@@ -166,6 +170,23 @@ function defaultRcsPodsForBox(dims) {
 function shipDesignHasGravityEngine(d) {
   return (d.mains || []).some((e) => e.engineType === 'gravity3' || e.engineType === 'gwave');
 }
+// v86: 内空航法の既定値（RMIS世界の設定は検討中のため仮の値）。重力波共振機関は圧縮能力が高い
+const SHIP_IKN = 525000; // 1 IKn [m/s]
+const SHIP_INTERSPACE_DEFAULTS = {
+  gravity3: { maxIKn: 22, maxCompression: 3000 },
+  gwave: { maxIKn: 29, maxCompression: 100000 },
+};
+// 艦の内空航法の性能（重力場機関が無ければ null）。重力波共振機関があればそちらの値を既定にする
+function shipDesignInterspace(d) {
+  if (!shipDesignHasGravityEngine(d)) return null;
+  const type = (d.mains || []).some((e) => e.engineType === 'gwave') ? 'gwave' : 'gravity3';
+  const def = SHIP_INTERSPACE_DEFAULTS[type];
+  const is = d.interspace || {};
+  const maxIKn = is.maxIKn > 0 ? is.maxIKn : def.maxIKn;
+  const maxCompression = is.maxCompression >= 1 ? is.maxCompression : def.maxCompression;
+  return { type, maxIKn, maxCompression, maxSpeed: maxIKn * SHIP_IKN, defaults: def };
+}
+
 // 重力場機関の艦が、境界面の向きを変えて90°向きを変えるのにかかる時間の目安 [s]
 const SHIP_BOUNDARY_TURN_TIME = 4;
 
@@ -262,6 +283,13 @@ function normalizeShipDesign(d) {
   }));
   out.rcs = { ...base.rcs, ...(d.rcs || {}) };
   out.gyro = { torque: Math.max(0, Number(d.gyro && d.gyro.torque) || 0) };
+  {
+    const is = d.interspace || {};
+    out.interspace = {
+      maxIKn: Number(is.maxIKn) > 0 ? Number(is.maxIKn) : null,
+      maxCompression: Number(is.maxCompression) >= 1 ? Number(is.maxCompression) : null,
+    };
+  }
   {
     const h = d.boundary && d.boundary.height;
     out.boundary = { height: h === null || h === undefined || h === '' || !Number.isFinite(Number(h)) ? null : Number(h) };
@@ -397,6 +425,7 @@ function buildShipSpecFromDesign(design) {
     cog: { ...c },
     // v85: 密度境界面の高さ（重心からの上下 [m]）
     boundaryHeight: (d.boundary.height ?? 0) - c.y,
+    interspace: shipDesignInterspace(d),
   };
 }
 
@@ -419,6 +448,7 @@ function applyShipDesignToShip(ship, design) {
   ship.gravityDrive = spec.thrusters.some((t) => t.kind === 'main' && (t.engineType === 'gravity3' || t.engineType === 'gwave'));
   ship.boundaryQuat = null;
   ship.boundaryHeight = spec.boundaryHeight;
+  ship.interspace = spec.interspace; // v86: 内空航法の性能（重力場機関が無ければ null）
   ship.designId = design.id;
   // 推力の配分は重心まわりの力・トルクの釣り合いを解く方式（ShipAllocator）
   ship.allocation = 'balanced';

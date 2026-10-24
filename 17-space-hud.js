@@ -174,7 +174,7 @@ const SpaceHud = {
   },
 
   toggleWarp() {
-    if (Navigation.isWarping()) Navigation.disengageWarp('ワープを解除しました');
+    if (Navigation.isWarping()) Navigation.disengageWarp(`${Navigation.driveName()}を解除しました`);
     else Navigation.engageWarp(false);
   },
 
@@ -359,8 +359,15 @@ const SpaceHud = {
     }
     if (w.active) {
       const th = w.autopilot ? '' : ` ・ スロットル ${Math.round(w.throttle * 100)}%`;
-      const ikn = ship.gravityDrive ? `（${this.formatIKn(w.speed)}）` : '';
-      this._els.speed.textContent = `${w.autopilot ? '自動航行' : 'ワープ'}中: ${this.formatSpeed(w.speed)}${ikn}${th}`;
+      if (Navigation.isInterspace()) {
+        // v86: 内空航行: 船速（IKn）・航路の圧縮比・通常空間で進む実効の速さ
+        const c = w.compression || 1;
+        const cText = c < 10 ? c.toFixed(1) : Math.round(c).toLocaleString('ja-JP');
+        this._els.speed.textContent = `${w.autopilot ? '自動航行（内空）' : '内空航行'}中: 船速 ${this.formatIKn(w.shipSpeed || 0)} ・ 圧縮比 ×${cText} ・ 実効 ${this.formatSpeed(w.speed)}${th}`;
+      } else {
+        const ikn = ship.gravityDrive ? `（${this.formatIKn(w.speed)}）` : '';
+        this._els.speed.textContent = `${w.autopilot ? '自動航行' : 'ワープ'}中: ${this.formatSpeed(w.speed)}${ikn}${th}`;
+      }
     } else {
       const v = vecLength(ship.velocity);
       const ikn = ship.gravityDrive && v >= 1000 ? `（${this.formatIKn(v)}）` : '';
@@ -386,7 +393,14 @@ const SpaceHud = {
     } else {
       this._els.target.textContent = '目的地: 未設定（▼から選ぶか、星図で天体をタップ）';
     }
-    this._els.warpBtn.innerHTML = w.active && !w.autopilot ? '⚡<span class="snb-text"> ワープ解除</span>' : '⚡<span class="snb-text"> ワープ</span>';
+    // v86: 重力場機関の艦は「内空航行」
+    const isIS = Navigation.isInterspace();
+    const icon = isIS ? '🌀' : '⚡', name = isIS ? '内空航行' : 'ワープ';
+    const html = w.active && !w.autopilot ? `${icon}<span class="snb-text"> ${name}を解除</span>` : `${icon}<span class="snb-text"> ${name}</span>`;
+    if (this._els.warpBtn.innerHTML !== html) this._els.warpBtn.innerHTML = html;
+    this._els.warpBtn.title = isIS
+      ? '内空航行（重力場機関）。航路を圧縮して進む。スロットルで速さ、操縦桿で向き (J)'
+      : '手動ワープ。スロットルで速度、操縦桿で向き (J)';
     this._els.warpBtn.classList.toggle('is-on', w.active && !w.autopilot);
     this._els.autoBtn.innerHTML = w.active && w.autopilot ? '🎯<span class="snb-text"> 自動航行を中止</span>' : '🎯<span class="snb-text"> 自動航行</span>';
     this._els.autoBtn.classList.toggle('is-on', w.active && w.autopilot);

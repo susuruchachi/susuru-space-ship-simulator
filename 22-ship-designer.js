@@ -1054,11 +1054,32 @@
     if (document.activeElement !== $('boundaryHeightInput')) $('boundaryHeightInput').value = h === null ? '' : inputValue(h);
     const y = h ?? 0;
     const top = design.hull.dims.y / 2;
+    const isp = shipDesignInterspace(design);
+    if (isp) {
+      $('isMaxIknInput').placeholder = `自動（${isp.defaults.maxIKn}）`;
+      $('isMaxCompInput').placeholder = `自動（${isp.defaults.maxCompression.toLocaleString('ja-JP')}）`;
+      if (document.activeElement !== $('isMaxIknInput')) $('isMaxIknInput').value = design.interspace.maxIKn > 0 ? inputValue(design.interspace.maxIKn) : '';
+      if (document.activeElement !== $('isMaxCompInput')) $('isMaxCompInput').value = design.interspace.maxCompression >= 1 ? String(design.interspace.maxCompression) : '';
+      const vEff = isp.maxSpeed * isp.maxCompression;
+      const c = 299792458;
+      $('isLine').textContent = `最高船速 ${fmtNum(isp.maxIKn)} IKn（${Math.round(isp.maxSpeed / 1000).toLocaleString('ja-JP')} km/s）× 最大圧縮比 ${Math.round(isp.maxCompression).toLocaleString('ja-JP')} → 実効 最大 約${vEff >= c ? `光速の${Math.round(vEff / c).toLocaleString('ja-JP')}倍` : `${Math.round(vEff / 1000).toLocaleString('ja-JP')} km/s`}`;
+    }
     $('boundaryLine').textContent = `船体の中心から ${y >= 0 ? '上' : '下'} ${fmtLen(Math.abs(y))}（船底から ${fmtLen(y + top)}・重心から ${fmtLen(Math.abs(y - design.cog.y))} ${y >= design.cog.y ? '上' : '下'}）`;
   }
   $('boundaryHeightInput').addEventListener('change', () => {
     const el = $('boundaryHeightInput');
     design.boundary.height = el.value === '' || !Number.isFinite(Number(el.value)) ? null : Number(el.value);
+    onPhysicsEdit();
+  });
+  // v86: 内空航法の性能
+  $('isMaxIknInput').addEventListener('change', () => {
+    const v = Number($('isMaxIknInput').value);
+    design.interspace.maxIKn = $('isMaxIknInput').value === '' || !(v > 0) ? null : v;
+    onPhysicsEdit();
+  });
+  $('isMaxCompInput').addEventListener('change', () => {
+    const v = Number($('isMaxCompInput').value);
+    design.interspace.maxCompression = $('isMaxCompInput').value === '' || !(v >= 1) ? null : v;
     onPhysicsEdit();
   });
   $('boundaryHeightSlider').addEventListener('input', () => {
