@@ -44,8 +44,20 @@ const FlightPhysics = {
     const adjustedForce = this._clampDesiredForceAtMaxSpeed(ship, desiredForce);
 
     // スラスター出力比を解いて艦の状態に保存（06-hud.js / 07-engine-fx.js が参照）
-    const ratios = ThrusterSolver.solve(ship, adjustedForce, desiredTorque, { manualThrottle: !!manualThrottle });
+    let ratios = ThrusterSolver.solve(ship, adjustedForce, desiredTorque, { manualThrottle: !!manualThrottle });
+    // v85: 最大加速度（艦の設計で指定したときだけ）。超えるときは並進の要求を縮めて解き直す
+    // （回転の要求はそのまま）
+    if (ship.maxAccel > 0) {
+      for (let i = 0; i < 3; i++) {
+        const a = vecLength(this._forceOf(ship, ratios)) / ship.mass;
+        if (a <= ship.maxAccel * 1.001) break;
+        const k = ship.maxAccel / a;
+        adjustedForce.x *= k; adjustedForce.y *= k; adjustedForce.z *= k;
+        ratios = ThrusterSolver.solve(ship, adjustedForce, desiredTorque, { manualThrottle: !!manualThrottle });
+      }
+    }
     ship.thrusterOutputRatios = ratios;
+    ship.fxOutputRatios = this._softGlowFx(ship, ratios, input);
 
     this._applyThrusters(ship, ratios, dt);
     this._applySpeedCap(ship, dt);
@@ -56,6 +68,36 @@ const FlightPhysics = {
   // 加速する」成分を除去する。減速方向（進行方向と逆）の成分は
   // そのまま残すため、最高速到達後も逆噴射でちゃんと減速できる。
   // -----------------------------------------------------------
+  // v85: 出力比 → 艦のローカル座標での合力 [N]
+  _forceOf(ship, ratios) {
+    const f = { x: 0, y: 0, z: 0 };
+    for (const t of ship.thrusters) {
+      const r = ratios[t.id] ?? 0;
+      if (r <= 0) continue;
+      const d = vecNormalize(t.direction);
+      const T = getEffectiveMaxThrust(ship, t) * r;
+      f.x -= d.x * T; f.y -= d.y * T; f.z -= d.z * T;
+    }
+    return f;
+  },
+
+  // v85: soft-glow（速度は頭打ちでも噴射は出続ける）の見た目。手動のスロットルで
+  // 前進しているのに、速度が目標に届いて主エンジンが止まっている（または弱い）ときは、
+  // 噴射の見た目だけスロットルの分を出す（物理には効かない）。それ以外は実際の出力のまま
+  _softGlowFx(ship, ratios, input) {
+    if (getEffectiveSpeedCapMode(ship) !== SpeedCapMode.SOFT_GLOW) return null;
+    const th = input ? input.thrustForward || 0 : 0;
+    if (th <= 0.01 || ship.autoDockingEnabled) return null;
+    const level = Math.min(1, th * (input.boost ? 1.5 : 1));
+    let out = null;
+    for (const t of ship.thrusters) {
+      if (t.kind !== 'main' || (ratios[t.id] ?? 0) >= level) continue;
+      if (!out) out = { ...ratios };
+      out[t.id] = level;
+    }
+    return out;
+  },
+
   _clampDesiredForceAtMaxSpeed(ship, desiredForce) {
     if (!ship.isAtMaxSpeed) return desiredForce;
 

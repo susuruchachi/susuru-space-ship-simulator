@@ -348,6 +348,13 @@ const Navigation = {
     FlightPhysics.step(ship, rotInput, dt);
     ship.velocity = { x: 0, y: 0, z: 0 };
     ShipController._integratePose(ship, dt);
+    // v85: ワープ中も主エンジンの噴射を見せる（見た目だけ。強さはワープの速さの桁で決める）
+    if (w.speed > 50) {
+      const level = clamp(Math.log10(w.speed / this.WARP_MIN_SPEED) / Math.log10(this.WARP_MAX_SPEED / this.WARP_MIN_SPEED) * 0.7 + 0.3, 0.3, 1);
+      const fx = { ...ship.thrusterOutputRatios };
+      for (const t of ship.thrusters) if (t.kind === 'main') fx[t.id] = Math.max(fx[t.id] || 0, level);
+      ship.fxOutputRatios = fx;
+    }
 
     // 速度の上限（天体表面までの距離に比例）。天体から遠ざかる向きに進んで
     // いるときは衝突の心配が無いので、上限を緩めて重力圏を早く抜けられるようにする。

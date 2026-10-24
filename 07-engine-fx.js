@@ -183,7 +183,8 @@ const EngineFx = {
     const mainSizeFx = sizeFx / Math.sqrt(Math.max(1, mainCount));
     const rcsSizeFx = fx > 1 ? sizeFx * 0.7 : 1;
     for (const t of ship.thrusters) {
-      const ratio = ship.thrusterOutputRatios[t.id] ?? 0;
+      // v85: soft-glow で速度が頭打ちのときは見た目だけの出力（04-flight-physics.js _softGlowFx）
+      const ratio = (ship.fxOutputRatios || ship.thrusterOutputRatios)[t.id] ?? 0;
       if (ratio <= 0.01) continue;
 
       const isMain = t.kind === 'main';

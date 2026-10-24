@@ -133,7 +133,8 @@ function createShipDesign(baseClass, name) {
     // v84: 逆噴射のノズルは船体の表面の好きな位置に置ける（推力は全ノズルで等分）
     retro: { thrust: auto.retroThrust, nozzles: defaultRetroNozzles(dims, { x: 0, y: 0, z: 0 }), custom: false },
     rcs: { thrust: auto.rcsThrust, pods: defaultRcsPodsForBox(dims) },
-    maxSpeed: auto.maxSpeed,
+    maxSpeed: auto.maxSpeed,       // v85: null なら速度は無制限
+    maxAccel: null,                // v85: 最大加速度 [m/s²]（null なら推力のまま）
     maxAngularSpeed: auto.maxAngularSpeed,
     speedCapMode: t.speedCapMode,
     dockingFace: null,
@@ -236,6 +237,9 @@ function normalizeShipDesign(d) {
   out.rcs = { ...base.rcs, ...(d.rcs || {}) };
   if (!Array.isArray(out.rcs.pods)) out.rcs.pods = [];
   out.cog = { ...base.cog, ...(d.cog || {}) };
+  // v85: 最高速度は空欄（null）なら無制限。最大加速度は無ければ制限なし
+  out.maxSpeed = d.maxSpeed === null ? null : (Number(d.maxSpeed) > 0 ? Number(d.maxSpeed) : base.maxSpeed);
+  out.maxAccel = Number(d.maxAccel) > 0 ? Number(d.maxAccel) : null;
   return out;
 }
 
@@ -327,7 +331,8 @@ function buildShipSpecFromDesign(design) {
     inertia: (inertiaTensor.x + inertiaTensor.y + inertiaTensor.z) / 3,
     inertiaTensor,
     thrusters,
-    maxSpeed: Math.max(1, d.maxSpeed),
+    maxSpeed: d.maxSpeed > 0 ? Math.max(1, d.maxSpeed) : Infinity,
+    maxAccel: d.maxAccel > 0 ? d.maxAccel : null,
     maxAngularSpeed: Math.max(0.001, d.maxAngularSpeed),
     speedCapMode: d.speedCapMode,
     size,
@@ -345,6 +350,7 @@ function applyShipDesignToShip(ship, design) {
   ship.inertiaTensor = spec.inertiaTensor;
   ship.thrusters = spec.thrusters;
   ship.maxSpeed = spec.maxSpeed;
+  ship.maxAccel = spec.maxAccel;
   ship.maxAngularSpeed = spec.maxAngularSpeed;
   ship.speedCapMode = spec.speedCapMode;
   ship.size = spec.size;

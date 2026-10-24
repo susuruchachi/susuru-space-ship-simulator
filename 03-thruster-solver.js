@@ -821,7 +821,10 @@ const ThrusterSolver = {
     //     時はboostMult倍）。現在のローカルZ速度との差分を比例制御で
     //     埋め、目標に近づくほど推力を弱める。shipが無い場合（テスト等）
     //     は従来通りスロットル値をそのまま推力として使う後方互換。
-    if (ship) {
+    if (ship && !Number.isFinite(ship.maxSpeed)) {
+      // v85: 最高速度が無制限の艦は、スロットル = 推力の割合（離せば慣性で進み続ける）
+      desiredForce.z = clamp(-input.thrustForward * boostMult, -1, 1);
+    } else if (ship) {
       const targetZSpeed = -input.thrustForward * ship.maxSpeed * boostMult;
       const localVelForZ = rotateVecByQuat(ship.velocity, conjugateQuat(ship.quaternion));
       const zError = targetZSpeed - localVelForZ.z;

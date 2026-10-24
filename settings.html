@@ -414,7 +414,7 @@ async function renderShipDesignOptions() {
       <input type="radio" name="shipClass" value="design:${d.id}">
       <div class="title">★ ${d.name.replace(/[<>&]/g, '')}</div>
       <div class="desc">大きさ ${fmtSize(d.hull.size)} / 質量 ${fmtMassT(d.mass)} / 加速 ${g.toFixed(2)} G /
-        主エンジン ${d.mains.length}基 / 姿勢スラスター ${d.rcs.pods.length}基 / 最高速 ${Math.round(d.maxSpeed)}${d.hull.hasModel ? ' / 3Dモデルあり' : ''}</div>
+        主エンジン ${d.mains.length}基 / 姿勢スラスター ${d.rcs.pods.length}基 / 最高速 ${d.maxSpeed > 0 ? Math.round(d.maxSpeed) : '無制限'}${d.hull.hasModel ? ' / 3Dモデルあり' : ''}</div>
     `;
     card.addEventListener('click', () => selectDesign(d.id));
     wrap.appendChild(card);

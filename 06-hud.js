@@ -594,7 +594,7 @@ const HUD = {
 
     this._debugEl.innerHTML = `
       <div>艦種: ${ship.label}</div>
-      <div>速度: ${speed.toFixed(1)} / ${ship.maxSpeed} ${ship.isAtMaxSpeed ? '(MAX)' : ''}</div>
+      <div>速度: ${speed.toFixed(1)} / ${Number.isFinite(ship.maxSpeed) ? ship.maxSpeed : '無制限'} ${ship.isAtMaxSpeed ? '(MAX)' : ''}</div>
       <div>速度上限モード: ${speedCapMode}</div>
       <div>スロットル: ${throttlePercent}%</div>
       <div>主機出力: ${(mainRatio * 100).toFixed(0)}%</div>

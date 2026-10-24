@@ -767,7 +767,8 @@
     $('dimsLine').textContent = `全長 ${fmtLen(d.z)} × 全幅 ${fmtLen(d.x)} × 全高 ${fmtLen(d.y)}`;
 
     if (document.activeElement !== $('massInput')) $('massInput').value = inputValue(design.mass / 1000);
-    if (document.activeElement !== $('maxSpeedInput')) $('maxSpeedInput').value = inputValue(design.maxSpeed);
+    if (document.activeElement !== $('maxSpeedInput')) $('maxSpeedInput').value = design.maxSpeed > 0 ? inputValue(design.maxSpeed) : '';
+    if (document.activeElement !== $('maxAccelInput')) $('maxAccelInput').value = design.maxAccel > 0 ? inputValue(design.maxAccel) : '';
     if (document.activeElement !== $('maxAngInput')) $('maxAngInput').value = inputValue(design.maxAngularSpeed * 180 / Math.PI);
     if (document.activeElement !== $('inertiaInput')) $('inertiaInput').value = inputValue(design.inertiaFactor);
     const selMain = selectedMain();
@@ -985,14 +986,15 @@
       const tc = shipDesignThrustCenter(design);
       const off = Math.hypot(design.cog.x - tc.x, design.cog.y - tc.y);
       const nMain = design.mains.length;
-      const toMax = fwd > 0 ? spec.maxSpeed / fwd : Infinity;
+      const fwdEff = spec.maxAccel > 0 ? Math.min(fwd, spec.maxAccel) : fwd;
+      const toMax = fwdEff > 0 ? spec.maxSpeed / fwdEff : Infinity;
       const pods = design.rcs.pods.length;
       let balance;
       if (off < design.hull.size * 1e-4) balance = '<span class="ok">釣り合っています（推力線が重心を通る）</span>';
       else if (mainUse > 0.98 && resid < 0.02) balance = `<span class="ok">重心のずれは姿勢スラスター${nMain > 1 ? 'とエンジンごとの出力差' : ''}で打ち消せます（主エンジン100%使用可）</span>`;
       else balance = `<span class="warn">重心のずれを打ち消しきれないため、主エンジンは${nMain > 1 ? '全体で' : ''}最大 ${Math.round(mainUse * 100)}% に自動で絞られます（姿勢スラスターを強くするか、重心を推力線に近づけてください）</span>`;
       box.innerHTML = [
-        `前進の最大加速度: <b>${fmtNum(fwd)} m/s²</b>（${fmtNum(fwd / g, 2)} G）・最高速度 ${fmtNum(spec.maxSpeed)} m/s まで約 ${fmtTime(toMax)}`,
+        `前進の最大加速度: <b>${fmtNum(fwdEff)} m/s²</b>（${fmtNum(fwdEff / g, 2)} G）${fwdEff < fwd ? `（推力では ${fmtNum(fwd)} m/s²、最大加速度で制限）` : ''}・${Number.isFinite(spec.maxSpeed) ? `最高速度 ${fmtNum(spec.maxSpeed)} m/s まで約 ${fmtTime(toMax)}` : '最高速度: 無制限'}`,
         `減速（逆噴射）: ${fmtNum(back)} m/s²・横/上下への移動: ${fmtNum(lat)} m/s²`,
         `90°向きを変える時間: ピッチ ${turn(3, I.x)}・ヨー ${turn(4, I.y)}・ロール ${turn(5, I.z)}`,
         `主エンジン全開時: ${balance}`,
@@ -1036,7 +1038,17 @@
   $('boxH').addEventListener('input', () => setBoxRatio('y', Number($('boxH').value)));
 
   $('massInput').addEventListener('change', () => { design.mass = Math.max(0.001, numFromInput($('massInput'), design.mass / 1000)) * 1000; onPhysicsEdit(); });
-  $('maxSpeedInput').addEventListener('change', () => { design.maxSpeed = Math.max(1, numFromInput($('maxSpeedInput'), design.maxSpeed)); onPhysicsEdit(); });
+  // v85: 空欄 = 無制限（最高速度）・制限なし（最大加速度）
+  $('maxSpeedInput').addEventListener('change', () => {
+    const v = Number($('maxSpeedInput').value);
+    design.maxSpeed = $('maxSpeedInput').value === '' || !(v > 0) ? null : Math.max(1, v);
+    onPhysicsEdit();
+  });
+  $('maxAccelInput').addEventListener('change', () => {
+    const v = Number($('maxAccelInput').value);
+    design.maxAccel = $('maxAccelInput').value === '' || !(v > 0) ? null : v;
+    onPhysicsEdit();
+  });
   $('maxAngInput').addEventListener('change', () => { design.maxAngularSpeed = Math.max(0.05, numFromInput($('maxAngInput'), 1)) * Math.PI / 180; onPhysicsEdit(); });
   $('inertiaInput').addEventListener('change', () => { design.inertiaFactor = clamp(numFromInput($('inertiaInput'), design.inertiaFactor), 0.001, 2); onPhysicsEdit(); });
   $('mainThrustInput').addEventListener('change', () => {
@@ -1156,7 +1168,11 @@
   function autoThrust(kind) {
     const p = THRUST_PRESETS[kind];
     if (!p) return;
-    const accel = design.maxSpeed / p.accelTime; // [m/s²]
+    // v85: 最高速度が無制限なら、最大加速度（無ければ艦種の目安の最高速度）を基準にする
+    const vRef = design.maxSpeed > 0 ? design.maxSpeed
+      : design.maxAccel > 0 ? design.maxAccel * p.accelTime
+        : shipDesignAutoSpec(design.baseClass, design.hull.size).maxSpeed;
+    const accel = vRef / p.accelTime; // [m/s²]
     distributeMainThrust(design.mass * accel);
     design.retro.thrust = design.mass * accel * 0.35;
     // 姿勢スラスター: 90°（π/2）を加速→減速で turnTime 秒で回る角加速度 α = 4θ/T²

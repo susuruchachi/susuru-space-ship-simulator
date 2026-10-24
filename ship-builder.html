@@ -800,9 +800,15 @@
       </div>
       <div class="field-row">
         <label for="maxSpeedInput">最高速度</label>
-        <input type="number" id="maxSpeedInput" class="num-input" min="1" step="any">
+        <input type="number" id="maxSpeedInput" class="num-input" min="1" step="any" placeholder="無制限">
         <span class="unit">m/s</span>
       </div>
+      <div class="field-row">
+        <label for="maxAccelInput">最大加速度</label>
+        <input type="number" id="maxAccelInput" class="num-input" min="0" step="any" placeholder="推力のまま">
+        <span class="unit">m/s²</span>
+      </div>
+      <p class="hint">最高速度を空欄にすると速度は無制限になり、スロットルは「推力の割合」になります（離しても慣性で進み続けます）。最大加速度を入れると、推力が強くてもその加速度を超えないように出力を抑えます。</p>
       <div class="field-row">
         <label for="maxAngInput">最大角速度</label>
         <input type="number" id="maxAngInput" class="num-input" min="0.1" step="any">
