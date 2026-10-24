@@ -119,6 +119,7 @@
     color: #dfefff;
     border: 1px solid rgba(255,255,255,0.2);
   }
+  .btn.dim { opacity: 0.5; } /* v86: 押せるが、まだログインできない状態 */
   /* v80: 艦のデータの同期 */
   .sync-box { padding: 12px 14px; border-radius: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.12); }
   .sync-box h3 { font-size: 13px; margin: 14px 0 8px; color: #dfefff; }
@@ -602,7 +603,8 @@ function refreshGoogleUi() {
   const ready = GoogleSync.isReady();
   const user = GoogleSync.user();
   $('gsyncSignInBtn').style.display = user ? 'none' : '';
-  $('gsyncSignInBtn').disabled = !avail || !ready;
+  // v86: 押せない状態にはせず、押したときに理由を出す（Android アプリで、押しても何も起きないように見えていた）
+  $('gsyncSignInBtn').classList.toggle('dim', !avail || !ready);
   $('gsyncNowBtn').style.display = user ? '' : 'none';
   $('gsyncSignOutBtn').style.display = user ? '' : 'none';
   let text;
@@ -631,6 +633,15 @@ function initGoogleSync() {
 
   // ログイン用の画面（ポップアップ）は、押したその場で開く必要がある
   $('gsyncSignInBtn').addEventListener('click', () => {
+    if (!GoogleSync.isAvailable()) {
+      $('gsyncSetup').open = true;
+      setSyncStatus('この端末（このブラウザ・アプリ）には、まだ Firebase の設定がありません。下の「最初の準備」の欄に firebaseConfig を貼り付けて保存してください（iPad などで貼り付けた設定は、端末ごとに別です）。', true);
+      return;
+    }
+    if (!GoogleSync.isReady()) {
+      setSyncStatus('Googleログインの準備中です。少し待ってからもう一度押してください。', true);
+      return;
+    }
     setSyncStatus('ログイン中…');
     GoogleSync.signIn().then((u) => {
       setSyncStatus(`${u.email || 'Googleアカウント'} でログインしました。同期します…`);
