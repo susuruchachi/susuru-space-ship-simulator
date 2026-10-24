@@ -189,6 +189,9 @@ function shipDesignInterspace(d) {
 
 // 重力場機関の艦が、境界面の向きを変えて90°向きを変えるのにかかる時間の目安 [s]
 const SHIP_BOUNDARY_TURN_TIME = 4;
+// v87: 重力場機関の艦が、境界面を傾けて滑ることで出せる並進の加速度 [m/s²]（前後・左右・上下とも。噴射なし）。
+// 主エンジン・逆噴射・姿勢スラスターの推力が0でも、これで動ける（自動入港の位置合わせもできる）
+const SHIP_BOUNDARY_ACCEL = 3;
 
 // v85: 機関の種類（27-engine-plumes.js が無い画面でも壊れないよう、ここでも確かめる）
 function shipEngineType(t) {
@@ -406,6 +409,15 @@ function buildShipSpecFromDesign(design) {
       thrusters.push({
         id: `boundary_${ax}${v > 0 ? 'p' : 'n'}`, position: { x: 0, y: 0, z: 0 }, direction: { x: 0, y: 0, z: 0 },
         torqueAxis: axis, maxThrust: inertiaTensor[ax] * alpha, kind: 'gyro', boundary: true,
+      });
+    }
+    // v87: 並進も境界面で（重心に、前後・左右・上下それぞれの向きの力。噴射の見た目は無し）
+    for (const [ax, v] of [['x', 1], ['x', -1], ['y', 1], ['y', -1], ['z', 1], ['z', -1]]) {
+      const dir = { x: 0, y: 0, z: 0 };
+      dir[ax] = -v; // direction は噴射の向き（艦は逆向きに押される）
+      thrusters.push({
+        id: `boundaryF_${ax}${v > 0 ? 'p' : 'n'}`, position: { x: 0, y: 0, z: 0 }, direction: dir,
+        maxThrust: m * SHIP_BOUNDARY_ACCEL, kind: 'field', boundary: true,
       });
     }
   }

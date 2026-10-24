@@ -220,8 +220,13 @@ const GravityDrive = {
   // v85: 船の向きと進む向きのずれ（横・上下の速度）を打ち消す時間 [s]（竜骨のように）
   KEEL_TIME: 1.5,
 
+  // v87: 自動入港中も境界面は付いたまま（_docking: 境界面は艦の向き・位置に付いていき、
+  // 復元・横揺れ・浮力・竜骨はしない。入港の細かな位置・姿勢合わせを妨げないように）
   _active(ship) {
-    return ship.gravityDrive && !ship.autoDockingEnabled;
+    return !!ship.gravityDrive;
+  },
+  _docking(ship) {
+    return !!ship.autoDockingEnabled;
   },
 
   // 艦の姿勢 → 境界面の姿勢への回転（艦のローカル軸の回転ベクトル [rad]）
@@ -241,7 +246,8 @@ const GravityDrive = {
       ship.boundaryPoint = null;
       return input;
     }
-    if (!ship.boundaryQuat) ship.boundaryQuat = { ...ship.quaternion };
+    if (!ship.boundaryQuat || this._docking(ship)) ship.boundaryQuat = { ...ship.quaternion };
+    if (this._docking(ship)) return input;
     const dz = this.INPUT_DEADZONE;
     // v85: 周回中の姿勢合わせ（自動）は、境界面ごと向きを変える（転針扱いだが速度は落とさない）
     const hold = !!input.attitudeHold;
@@ -268,6 +274,11 @@ const GravityDrive = {
   // rotationOnly: ワープ・内空航行中（姿勢だけ。速度には触れない）
   step(ship, input, dt, rotationOnly) {
     if (!this._active(ship) || !ship.boundaryQuat) return;
+    if (this._docking(ship)) {
+      ship.boundaryQuat = { ...ship.quaternion };
+      ship.boundaryPoint = { ...ship.position };
+      return;
+    }
     const w = ship.angularVelocity;
     if (ship._gdHold) {
       // 周回中の自動の姿勢合わせ: 境界面ごと艦の向き（腹を天体へ）に合わせる
@@ -302,7 +313,10 @@ const GravityDrive = {
 
     // 浮力: 境界面の高さからのずれ（面の法線の向き）を強く押し戻す
     const n = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.boundaryQuat);
-    if (!ship.boundaryPoint || ship._gdTurning) ship.boundaryPoint = { ...ship.position };
+    // v87: 横・上下へ動かしている間は、境界面ごと動かす（浮力で押し戻さない。離したらその高さに浮く）
+    const strafing = Math.abs(input.thrustStrafeX || 0) > this.INPUT_DEADZONE || Math.abs(input.thrustStrafeY || 0) > this.INPUT_DEADZONE;
+    if (!ship.boundaryPoint || ship._gdTurning || strafing) ship.boundaryPoint = { ...ship.position };
+    if (strafing) { ship.boundaryDepth = 0; return; }
     const bp = ship.boundaryPoint;
     const dn = (ship.position.x - bp.x) * n.x + (ship.position.y - bp.y) * n.y + (ship.position.z - bp.z) * n.z;
     const vn = vecDot(ship.velocity, n);
@@ -311,7 +325,7 @@ const GravityDrive = {
     ship.velocity.x += n.x * an * dt; ship.velocity.y += n.y * an * dt; ship.velocity.z += n.z * an * dt;
     ship.boundaryDepth = dn;
 
-    // 竜骨: 船の向き以外へ進む速度（横滑り・上下）を数秒で打ち消す
+    // 竜骨: 船の向き以外へ進む速度（横滑り・上下）を数秒で打ち消す（横・上下へ動かしている間はしない）
     const f = rotateVecByQuat({ x: 0, y: 0, z: -1 }, ship.quaternion);
     const vf = vecDot(ship.velocity, f);
     const kk = 1 - Math.exp(-dt / this.KEEL_TIME);
@@ -322,7 +336,7 @@ const GravityDrive = {
   // v86: 艦の向きが境界面から MAX_TILT より大きくずれたら、MAX_TILT のところで止める
   // （ずれが広がる向きの回転も止める）。姿勢を積分したあとに呼ぶ
   limit(ship) {
-    if (!this._active(ship) || !ship.boundaryQuat) return;
+    if (!this._active(ship) || !ship.boundaryQuat || this._docking(ship)) return;
     const e = this._error(ship); // 艦 → 境界面への回転（艦のローカル軸）
     const ang = Math.hypot(e.x, e.y, e.z);
     if (!(ang > this.MAX_TILT)) return;

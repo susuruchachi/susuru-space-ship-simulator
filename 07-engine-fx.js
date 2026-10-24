@@ -273,7 +273,7 @@ const EngineFx = {
     for (const t of ship.thrusters) {
       // v85: soft-glow で速度が頭打ちのときは見た目だけの出力（04-flight-physics.js _softGlowFx）
       const ratio = (ship.fxOutputRatios || ship.thrusterOutputRatios)[t.id] ?? 0;
-      if (ratio <= 0.01 || t.kind === 'gyro') continue;
+      if (ratio <= 0.01 || t.kind === 'gyro' || t.kind === 'field') continue; // v87: 境界面の並進（field）も噴射なし
       // v85: 炎の形（27-engine-plumes.js）で描くエンジンは粒子を出さない
       if (this._plumes.has(t.id)) continue;
 
