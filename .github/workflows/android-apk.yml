@@ -1,0 +1,60 @@
+# v86: Android アプリ（APK）を作る
+# push のたび（と手動実行）に、Web 版と同じファイルを Capacitor で包んだ APK を作り、
+# このワークフローの実行結果の「Artifacts」から ダウンロードできるようにする。
+# デバッグ署名の APK なので、端末で「提供元不明のアプリ」を許可してインストールする。
+name: Android APK
+
+on:
+  push:
+    branches: [main, claude/space-sim-updates]
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Capacitor
+        working-directory: app
+        run: npm ci
+
+      - name: Copy the game files and sync
+        working-directory: app
+        run: |
+          node copy-web.mjs
+          npx cap sync android
+
+      - name: Build APK
+        working-directory: app/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Rename APK
+        id: apk
+        run: |
+          VER=$(grep versionName app/version.properties | cut -d= -f2)
+          OUT="space-ship-simulator-${VER}-debug.apk"
+          cp app/android/app/build/outputs/apk/debug/app-debug.apk "$OUT"
+          echo "file=$OUT" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: ${{ steps.apk.outputs.file }}
+          retention-days: 30

@@ -8,6 +8,23 @@ v50以降、変更のたびにここへ追記していく想定です（それ�
 
 ## v86（0.086.000.000〜） - 2026-10-24
 
+### 追加: Android アプリ（APK）（0.086.000.002）
+
+- **要望**: 「APK化」。
+- Web 版と同じファイルを Capacitor で包んだ Android アプリを作れるようにした（`app/`）。ゲームのファイルはアプリの中に
+  入っているので、ネットにつながっていなくても動く。全画面（上下のバーを隠す。端からスワイプで一時的に出る）で、
+  操縦中に画面が暗くならない。アプリのアイコンは Web アプリと同じ。バージョンは GAME_VERSION と同じ。
+- GitHub に push するたびに、GitHub Actions（`.github/workflows/android-apk.yml`）が APK を作る。
+  リポジトリの「Actions」→「Android APK」→ 実行結果の「Artifacts」の `android-apk` からダウンロードできる
+  （zip の中の `space-ship-simulator-<バージョン>-debug.apk`）。デバッグ署名なので、端末で「提供元不明のアプリ」の
+  インストールを許可して入れる。
+- 手元で作るとき: `cd app && npm install && npm run build:debug`（Node.js 22・JDK 21・Android SDK が必要）。
+  APK は `app/android/app/build/outputs/apk/debug/app-debug.apk`。
+- Android アプリでは Google でのログイン（Firebase）は使えない（Google の決まりで、アプリ内の画面からのログインを
+  受け付けないため）。押すと理由を表示する。端末間の同期は Web 版で行うか、GitHub での同期を使う。
+- 確認: 手元で APK を作成（26MB、パッケージ名 io.github.susuruchachi.spaceshipsim、ゲームのファイル118個入り）。
+  実機・エミュレーターでの起動はまだ確認していない。
+
 ### 追加: 内空航法（重力場機関の艦）（0.086.000.001）
 
 - **要望**: 「前話した内空航法を実装したい」（RMIS世界 技術設定資料「内空航法・重力場機関・重力波共振機関・速度単位 IKn」）。
