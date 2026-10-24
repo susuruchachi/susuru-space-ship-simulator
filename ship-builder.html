@@ -884,15 +884,6 @@
         <span class="unit">kN</span>
       </div>
       <div class="derived" id="retroAccelLine"></div>
-      <div class="field-row">
-        <label for="retroEngineType">機関</label>
-        <select id="retroEngineType">
-            <option value="rocket">化学ロケット</option>
-            <option value="nuclear">原子力（熱核）ロケット</option>
-            <option value="gravity3">三段圧縮重力場機関</option>
-            <option value="gwave">重力波共振機関</option>
-        </select>
-      </div>
       <div class="pod-list" id="retroList"></div>
       <div class="btn-row">
         <button type="button" id="retroPlaceBtn">＋ 船体をタップして追加</button>
@@ -901,18 +892,29 @@
       <div class="pod-editor retro-editor" id="retroEditor" style="display:none;">
         <div class="pod-editor-title" id="retroEditorTitle"></div>
         <div class="pos-rows" id="retroPosRows"></div>
-        <div class="field-row">
-          <label for="retroDiaInput">ノズルの直径</label>
-          <input type="number" id="retroDiaInput" class="num-input" min="0" step="any" placeholder="自動">
-          <span class="unit">m</span>
-        </div>
-        <div class="derived" id="retroDiaLine"></div>
         <div class="btn-row">
           <button type="button" id="retroSnapBtn">いちばん近い船体表面へ</button>
           <button type="button" id="retroDeleteBtn" class="danger">このノズルを外す</button>
         </div>
       </div>
       <p class="hint">逆噴射は前（艦首の向き）へ噴射して減速します。推力はノズルの数で等分します。ノズルは船体の表面に置け、ビューの紫の▲をタップすると選択でき、矢印（ギズモ）をドラッグすると船体の表面に沿って動かせます。重心をはさまない配置でも、ノズルごとの出力差と姿勢スラスターで回転しないように釣り合いをとります。</p>
+    </details>
+
+    <details class="adjust-section" id="gyroSection">
+      <summary>姿勢制御ジャイロ</summary>
+      <div class="field-row">
+        <label for="gyroTorqueInput">回す力（各軸）</label>
+        <input type="number" id="gyroTorqueInput" class="num-input" min="0" step="any" placeholder="なし">
+        <span class="unit">kN·m</span>
+      </div>
+      <div class="btn-row">
+        <button type="button" data-gyro-time="3">90°を3秒</button>
+        <button type="button" data-gyro-time="6">6秒</button>
+        <button type="button" data-gyro-time="12">12秒</button>
+        <button type="button" data-gyro-time="0" class="danger">外す</button>
+      </div>
+      <div class="derived" id="gyroLine"></div>
+      <p class="hint">噴射せずに艦の向きを変える装置（リアクションホイール）。回転にはまずジャイロを使い、足りない分だけ姿勢スラスターを噴射します。ボタンは、ジャイロだけで90°向きを変えるのにかかる時間から回す力を決めます。</p>
     </details>
 
     <details class="adjust-section" id="cogSection" open>

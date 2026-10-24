@@ -134,6 +134,8 @@ function createShipDesign(baseClass, name) {
     // v84: 逆噴射のノズルは船体の表面の好きな位置に置ける（推力は全ノズルで等分）
     retro: { thrust: auto.retroThrust, nozzles: defaultRetroNozzles(dims, { x: 0, y: 0, z: 0 }), custom: false, engineType: 'rocket' },
     rcs: { thrust: auto.rcsThrust, pods: defaultRcsPodsForBox(dims) },
+    // v85: 姿勢制御ジャイロ（リアクションホイール）。各軸の最大トルク [N·m]（0 なら無し）
+    gyro: { torque: 0 },
     maxSpeed: auto.maxSpeed,       // v85: null なら速度は無制限
     maxAccel: null,                // v85: 最大加速度 [m/s²]（null なら推力のまま）
     maxAngularSpeed: auto.maxAngularSpeed,
@@ -248,6 +250,7 @@ function normalizeShipDesign(d) {
     diameter: Number(n.diameter) > 0 ? Number(n.diameter) : null,
   }));
   out.rcs = { ...base.rcs, ...(d.rcs || {}) };
+  out.gyro = { torque: Math.max(0, Number(d.gyro && d.gyro.torque) || 0) };
   if (!Array.isArray(out.rcs.pods)) out.rcs.pods = [];
   out.cog = { ...base.cog, ...(d.cog || {}) };
   // v85: 最高速度は空欄（null）なら無制限。最大加速度は無ければ制限なし
@@ -315,6 +318,17 @@ function buildShipSpecFromDesign(design) {
       maxThrust: d.retro.thrust / retroNozzles.length, kind: 'rcs', engineType: d.retro.engineType,
       nozzleDiameter: dia, plumeScale: dia / shipDesignAutoNozzleDiameter(d, 'retro'),
     });
+  }
+  // v85: 姿勢制御ジャイロ: 3軸それぞれ±の向きに回す力（噴射しない）
+  if (d.gyro.torque > 0) {
+    for (const [ax, v] of [['x', 1], ['x', -1], ['y', 1], ['y', -1], ['z', 1], ['z', -1]]) {
+      const axis = { x: 0, y: 0, z: 0 };
+      axis[ax] = v;
+      thrusters.push({
+        id: `gyro_${ax}${v > 0 ? 'p' : 'n'}`, position: { x: 0, y: 0, z: 0 }, direction: { x: 0, y: 0, z: 0 },
+        torqueAxis: axis, maxThrust: d.gyro.torque, kind: 'gyro',
+      });
+    }
   }
   // 姿勢スラスター
   for (const pod of d.rcs.pods) {
@@ -456,12 +470,19 @@ const ShipAllocator = {
       colOfThruster[i] = c;
       if (t.kind === 'main' || t.id.startsWith('retro')) cols[c].isEngine = true;
       if (t.kind === 'main') cols[c].isMain = true;
+      if (t.kind === 'gyro') cols[c].isGyro = true;
     });
     const N = cols.length;
     const B = new Float64Array(6 * N); // 列ごとに [Fx Fy Fz Tx Ty Tz]
     ts.forEach((t, i) => {
-      const d = vecNormalize(t.direction);
       const T = getEffectiveMaxThrust(ship, t);
+      if (t.kind === 'gyro') {
+        // v85: 姿勢制御ジャイロは力を出さず、回転の力（トルク）だけを出す
+        const o = colOfThruster[i] * 6;
+        B[o + 3] += t.torqueAxis.x * T; B[o + 4] += t.torqueAxis.y * T; B[o + 5] += t.torqueAxis.z * T;
+        return;
+      }
+      const d = vecNormalize(t.direction);
       const fx = -d.x * T, fy = -d.y * T, fz = -d.z * T;
       const p = t.position;
       const o = colOfThruster[i] * 6;
@@ -491,7 +512,7 @@ const ShipAllocator = {
     }
 
     const a = {
-      thrusters: ts, capRatio, N, B, naivePos, naiveNeg, colOfThruster, lamCol: new Float64Array(N), isMainCol: mainOnly,
+      thrusters: ts, capRatio, N, B, naivePos, naiveNeg, colOfThruster, lamCol: new Float64Array(N), isMainCol: mainOnly, isGyroCol: Uint8Array.from(cols, (c) => (c.isGyro ? 1 : 0)),
       ids: ts.map((t) => t.id),
       r: new Float64Array(N),
       capPos: new Float64Array(6), capNeg: new Float64Array(6), mainFwd,
@@ -565,7 +586,8 @@ const ShipAllocator = {
       colNorm[k] = A[o] * A[o] + A[o + 1] * A[o + 1] + A[o + 2] * A[o + 2]
         + A[o + 3] * A[o + 3] + A[o + 4] * A[o + 4] + A[o + 5] * A[o + 5];
       if ((mask && !mask[k]) || colNorm[k] <= 0) { r[k] = 0; st[k] = 2; continue; }
-      lamCol[k] = this.L2_REG * (a.isMainCol[k] ? 1 : this.RCS_REG_FACTOR);
+      // 主エンジンとジャイロは使っても損が小さい（ジャイロで足りる回転は姿勢スラスターを使わない）
+      lamCol[k] = this.L2_REG * (a.isMainCol[k] || a.isGyroCol[k] ? 1 : this.RCS_REG_FACTOR);
       let v = r[k];
       if (!(v > 1e-12)) { r[k] = 0; st[k] = -1; } else if (v >= 1 - 1e-12) { r[k] = 1; st[k] = 1; } else st[k] = 0;
     }

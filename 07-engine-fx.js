@@ -78,7 +78,7 @@ const EngineFx = {
     let mainCount = 0;
     for (const t of ship.thrusters) if (t.kind === 'main') mainCount++;
     for (const t of ship.thrusters) {
-      if (t.kind !== 'main' && !(t.nozzleDiameter > 0)) continue;
+      if (t.kind !== 'main') continue; // v85: 逆噴射は姿勢スラスターと同じ噴射で描く
       const plume = EnginePlumes.create(t.engineType);
       // ノズルの直径（艦種プリセットは自作の艦の自動の直径と同じ決め方）
       const dia = t.nozzleDiameter > 0 ? t.nozzleDiameter : 0.9 * Math.pow(fx, 0.85) / Math.sqrt(Math.max(1, mainCount));
@@ -228,14 +228,15 @@ const EngineFx = {
     for (const t of ship.thrusters) {
       // v85: soft-glow で速度が頭打ちのときは見た目だけの出力（04-flight-physics.js _softGlowFx）
       const ratio = (ship.fxOutputRatios || ship.thrusterOutputRatios)[t.id] ?? 0;
-      if (ratio <= 0.01) continue;
+      if (ratio <= 0.01 || t.kind === 'gyro') continue;
       // v85: 炎の形（27-engine-plumes.js）で描くエンジンは粒子を出さない
       if (this._plumes.has(t.id)) continue;
 
       const isMain = t.kind === 'main';
       // v84: ノズルの直径を持つもの（自作の艦の主エンジン・逆噴射）は、エンジンの噴射
       // として描き、太さ・長さを直径から決める
-      const dia = t.nozzleDiameter > 0 ? t.nozzleDiameter : 0;
+      // v85: 逆噴射は姿勢スラスターと同じ見た目（ノズルの直径は使わない）
+      const dia = isMain && t.nozzleDiameter > 0 ? t.nozzleDiameter : 0;
       const isEngine = isMain || dia > 0;
       const isRetroEngine = !isMain && dia > 0;
       const pool = isEngine ? this._mainPool : this._rcsPool;

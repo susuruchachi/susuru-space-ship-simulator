@@ -229,9 +229,6 @@
       g.add(hit);
       g.position.set(n.position.x, n.position.y, n.position.z);
       markers.add(g);
-      if (design.retro.thrust > 0) {
-        markers.add(nozzleMouth(n.position, { x: 0, y: 0, z: -1 }, { ...shipDesignPlumeEstimate(design, n, 'retro'), engineType: design.retro.engineType }, MAT.retroMouth, MAT.retroPlume));
-      }
     }
 
     // 姿勢スラスター: 小さな箱＋5つの噴射口
@@ -802,8 +799,16 @@
     cogPos.sync(1.3);
     $('cogGizmoBtn').classList.toggle('active', !!(active && active.kind === 'cog'));
     renderPodList();
-    $('retroEngineType').value = design.retro.engineType || 'rocket';
     renderRetroList();
+    if (document.activeElement !== $('gyroTorqueInput')) $('gyroTorqueInput').value = design.gyro.torque > 0 ? inputValue(design.gyro.torque / 1000) : '';
+    {
+      const I = buildShipSpecFromDesign(design).inertiaTensor;
+      const tau = design.gyro.torque;
+      const t90 = (Iax) => (tau > 0 ? fmtTime(Math.sqrt((4 * (Math.PI / 2) * Iax) / tau)) : '—');
+      $('gyroLine').textContent = tau > 0
+        ? `ジャイロだけで90°向きを変える時間（最大角速度の制限なし）: ピッチ ${t90(I.x)}・ヨー ${t90(I.y)}・ロール ${t90(I.z)}`
+        : 'ジャイロなし（向きを変えるのは姿勢スラスターだけ）';
+    }
     schedulePerf();
   }
 
@@ -857,7 +862,7 @@
       const chip = document.createElement('button');
       chip.type = 'button';
       chip.className = `pod-chip retro-chip${n.id === selectedRetroId ? ' selected' : ''}`;
-      chip.textContent = `${i + 1}. ${retroSideLabel(n)}・Ø${fmtLen(shipDesignNozzleDiameter(design, n, 'retro'))}`;
+      chip.textContent = `${i + 1}. ${retroSideLabel(n)}`;
       chip.addEventListener('click', () => setActive(n.id === selectedRetroId ? null : 'retro', n.id));
       list.appendChild(chip);
     });
@@ -866,7 +871,6 @@
     if (n) {
       const i = design.retro.nozzles.indexOf(n);
       $('retroEditorTitle').textContent = `${i + 1}つ目（${retroSideLabel(n)}）`;
-      syncDiameterField($('retroDiaInput'), $('retroDiaLine'), n, 'retro');
       retroPos.sync(1.6);
     }
   }
@@ -999,8 +1003,8 @@
         `減速（逆噴射）: ${fmtNum(back)} m/s²・横/上下への移動: ${fmtNum(lat)} m/s²`,
         `90°向きを変える時間: ピッチ ${turn(3, I.x)}・ヨー ${turn(4, I.y)}・ロール ${turn(5, I.z)}`,
         `主エンジン全開時: ${balance}`,
-        `噴射口: 主エンジン${nMain}・逆噴射${design.retro.thrust > 0 ? design.retro.nozzles.length : 0}・姿勢スラスター${pods}基（各5方向）`,
-        pods === 0 ? '<span class="warn">姿勢スラスターが無いと向きを変えられません。</span>' : '',
+        `噴射口: 主エンジン${nMain}・逆噴射${design.retro.thrust > 0 ? design.retro.nozzles.length : 0}・姿勢スラスター${pods}基（各5方向）${design.gyro.torque > 0 ? '・姿勢制御ジャイロ' : ''}`,
+        pods === 0 && !(design.gyro.torque > 0) ? '<span class="warn">姿勢スラスターかジャイロが無いと向きを変えられません。</span>' : '',
       ].filter(Boolean).join('<br>');
     } catch (e) {
       console.warn(e);
@@ -1295,16 +1299,24 @@
     onPhysicsEdit();
     core.setStatus(`主エンジン${design.mains.length}基を「${ENGINE_TYPES[e.engineType].label}」にしました。`);
   });
-  $('retroEngineType').addEventListener('change', () => {
-    design.retro.engineType = shipEngineType($('retroEngineType').value);
+  // v85: 姿勢制御ジャイロ
+  $('gyroTorqueInput').addEventListener('change', () => {
+    const v = Number($('gyroTorqueInput').value);
+    design.gyro.torque = $('gyroTorqueInput').value === '' || !(v > 0) ? 0 : v * 1000;
     onPhysicsEdit();
   });
-  $('retroDiaInput').addEventListener('change', () => {
-    const n = selectedRetro();
-    if (!n) return;
-    n.diameter = diameterFromInput($('retroDiaInput'));
+  // ジャイロだけで90°を T 秒で回れる回す力（いちばん回りにくい軸に合わせる）: τ = I·4θ/T²
+  document.querySelectorAll('[data-gyro-time]').forEach((b) => b.addEventListener('click', () => {
+    const T = Number(b.dataset.gyroTime);
+    if (!(T > 0)) { design.gyro.torque = 0; onPhysicsEdit(); return; }
+    const I = buildShipSpecFromDesign(design).inertiaTensor;
+    design.gyro.torque = Math.max(I.x, I.y, I.z) * (4 * (Math.PI / 2)) / (T * T);
+    const wNeed = Math.PI / T;
+    if (design.maxAngularSpeed < wNeed) design.maxAngularSpeed = wNeed;
     onPhysicsEdit();
-  });
+    core.setStatus(`姿勢制御ジャイロ: 各軸 ${fmtNum(design.gyro.torque / 1000)} kN·m（ジャイロだけで90°を約${T}秒）`);
+  }));
+
   $('retroAutoBtn').addEventListener('click', () => {
     autoPlaceRetro();
     onPhysicsEdit();

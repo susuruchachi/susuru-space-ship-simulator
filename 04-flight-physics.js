@@ -73,7 +73,7 @@ const FlightPhysics = {
     const f = { x: 0, y: 0, z: 0 };
     for (const t of ship.thrusters) {
       const r = ratios[t.id] ?? 0;
-      if (r <= 0) continue;
+      if (r <= 0 || t.kind === 'gyro') continue;
       const d = vecNormalize(t.direction);
       const T = getEffectiveMaxThrust(ship, t) * r;
       f.x -= d.x * T; f.y -= d.y * T; f.z -= d.z * T;
@@ -131,6 +131,11 @@ const FlightPhysics = {
     for (const t of ship.thrusters) {
       const ratio = ratios[t.id] ?? 0;
       if (ratio <= 0) continue;
+      // v85: 姿勢制御ジャイロは回転の力だけ
+      if (t.kind === 'gyro') {
+        totalTorqueLocal = vecAdd(totalTorqueLocal, vecScale(t.torqueAxis, t.maxThrust * ratio));
+        continue;
+      }
 
       const dirNorm = vecNormalize(t.direction);
       const reaction = vecScale(dirNorm, -1); // 反作用方向
