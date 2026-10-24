@@ -871,7 +871,8 @@ const ThrusterSolver = {
     const rotationInputMagnitude =
       Math.abs(input.rotatePitch) + Math.abs(input.rotateYaw) + Math.abs(input.rotateRoll);
 
-    const hasNoRotationInput = rotationInputMagnitude < this.ROTATION_INPUT_DEADZONE;
+    // v85: 周回中の姿勢合わせ（16-navigation.js）は、ごく小さな回り方でも入力として扱う
+    const hasNoRotationInput = rotationInputMagnitude < this.ROTATION_INPUT_DEADZONE && !input.attitudeHold;
 
     // v83: 回転入力は「目標の角速度」（入力 × 最大角速度）として扱い、今の角速度との
     // 差に応じたトルクを要求する。従来は入力のぶんのトルクを要求し続けていたため、

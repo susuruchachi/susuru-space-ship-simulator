@@ -781,8 +781,9 @@ const Navigation = {
         orbitNote = `高度 ${Math.round((r - b.rM) / 1000).toLocaleString()} km の円軌道に乗りました（秒速 ${(vc / 1000).toFixed(2)} km）`;
       }
       const label = `${this.targetLabel()}に到着しました`;
-      this.arrivalHold = b ? { kind: 'body', bodyId: b.id, label } : null;
-      this.warp.status = b ? `${label}${orbitNote ? '。' + orbitNote : '（姿勢を整えています）'}` : label;
+      // v85: 軌道に乗ったら、下を天体へ・機首を進む向きへ向けて周回する
+      this.arrivalHold = b ? { kind: orbitNote ? 'orbit' : 'body', bodyId: b.id, label: orbitNote ? `${label}。${orbitNote}` : label } : null;
+      this.warp.status = b ? `${label}${orbitNote ? '。' + orbitNote + '（姿勢を軌道に合わせています）' : '（姿勢を整えています）'}` : label;
     }
   },
 
@@ -793,6 +794,7 @@ const Navigation = {
     if (h.kind === 'home') {
       return this._lookQuat(ship, { x: 0, y: 0, z: 0 }, null);
     }
+    if (h.kind === 'orbit') return this._orbitAttitude(ship, h.bodyId);
     const b = SolarSystem.byId[h.bodyId];
     if (!b) return null;
     const l = this.universeToLocal(b.pos);
@@ -804,6 +806,34 @@ const Navigation = {
     // 天体が画面の中央付近に見えるようにする
     const pitchUp = axisAngleQuat({ x: 1, y: 0, z: 0 }, (11 * Math.PI) / 180);
     return normalizeQuat(multiplyQuat(q, pitchUp));
+  },
+
+  // v85: 周回軌道での姿勢: 艦の下（-Y）を天体の中心へ、機首（-Z）を軌道の進む向きへ
+  _orbitAttitude(ship, bodyId) {
+    const b = SolarSystem.byId[bodyId];
+    if (!b) return null;
+    const c = this.universeToLocal(b.pos);
+    const up = vecNormalize({ x: ship.position.x - c.x, y: ship.position.y - c.y, z: ship.position.z - c.z });
+    // 進む向き: 天体に対する速度（このフレームは天体と一緒に動くので、艦の速度そのもの）を水平に
+    const v = ship.velocity;
+    let f = { x: v.x - up.x * vecDot(v, up), y: v.y - up.y * vecDot(v, up), z: v.z - up.z * vecDot(v, up) };
+    if (vecLength(f) < 1e-3) return null;
+    f = vecNormalize(f);
+    const p = { x: ship.position.x + f.x, y: ship.position.y + f.y, z: ship.position.z + f.z };
+    return this._lookQuat(ship, p, up);
+  },
+
+  // 周回の角速度（艦のローカル軸）: 姿勢を軌道に合わせ続けるための回り方
+  _orbitRate(ship, bodyId) {
+    const b = SolarSystem.byId[bodyId];
+    if (!b) return { x: 0, y: 0, z: 0 };
+    const c = this.universeToLocal(b.pos);
+    const r = { x: ship.position.x - c.x, y: ship.position.y - c.y, z: ship.position.z - c.z };
+    const r2 = vecDot(r, r);
+    if (!(r2 > 0)) return { x: 0, y: 0, z: 0 };
+    const h = vecCross(r, ship.velocity); // 角運動量の向き（周回の回転軸）
+    const wFrame = { x: h.x / r2, y: h.y / r2, z: h.z / r2 };
+    return rotateVecByQuat(wFrame, conjugateQuat(ship.quaternion));
   },
 
   // 到着後の姿勢合わせ（ShipController.update から毎フレーム呼ぶ）。
@@ -827,6 +857,21 @@ const Navigation = {
     const angle = 2 * Math.atan2(s, qe.w);
     const w = ship.angularVelocity;
     const wMag = Math.hypot(w.x, w.y, w.z);
+    const maxW0 = Math.max(1e-6, ship.maxAngularSpeed);
+    if (h.kind === 'orbit') {
+      // v85: 周回中はずっと合わせ続ける（周回で向きが回っていくので、その回り方も足す）。
+      // 操縦者が操作するまで続ける
+      const wo = this._orbitRate(ship, h.bodyId);
+      const k0 = s > 1e-9 ? Math.min(this.ARRIVAL_TURN_RATE, angle * 0.6) / s : 0;
+      if (angle < 0.02 && !h.aligned) { h.aligned = true; this.warp.status = h.label; }
+      return {
+        ...input,
+        attitudeHold: true,
+        rotatePitch: clamp((wo.x + qe.x * k0) / maxW0, -1, 1),
+        rotateYaw: clamp((wo.y + qe.y * k0) / maxW0, -1, 1),
+        rotateRoll: clamp((wo.z + qe.z * k0) / maxW0, -1, 1),
+      };
+    }
     // 0.6°以内に入ったら終わり（残った角速度は自動の姿勢制動で止まる）
     if (angle < 0.01) {
       this.arrivalHold = null;

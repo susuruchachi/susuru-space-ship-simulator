@@ -162,8 +162,11 @@ const GravityDrive = {
     }
     if (!ship.boundaryQuat) ship.boundaryQuat = { ...ship.quaternion };
     const dz = this.INPUT_DEADZONE;
-    const turning = Math.abs(input.rotatePitch || 0) > dz || Math.abs(input.rotateYaw || 0) > dz;
-    const rolling = Math.abs(input.rotateRoll || 0) > dz;
+    // v85: 周回中の姿勢合わせ（自動）は、境界面ごと向きを変える（転針扱いだが速度は落とさない）
+    const hold = !!input.attitudeHold;
+    const turning = hold || Math.abs(input.rotatePitch || 0) > dz || Math.abs(input.rotateYaw || 0) > dz;
+    const rolling = hold || Math.abs(input.rotateRoll || 0) > dz;
+    ship._gdHold = hold;
     const e = this._error(ship);
     const maxW = Math.max(1e-6, ship.maxAngularSpeed);
     const cmd = (v) => clamp((v * this.RESTORE_RATE) / maxW, -this.RESTORE_MAX, this.RESTORE_MAX);
@@ -185,8 +188,8 @@ const GravityDrive = {
       const fwd = rotateVecByQuat({ x: 0, y: 0, z: -1 }, ship.quaternion);
       const bUp = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.boundaryQuat);
       ship.boundaryQuat = this._quatFromForwardUp(fwd, bUp) || ship.boundaryQuat;
-      // 面の向きを変えたぶん、それまでの速度が一気に落ちる
-      const turnRate = Math.hypot(w.x, w.y);
+      // 面の向きを変えたぶん、それまでの速度が一気に落ちる（周回中の自動の姿勢合わせを除く）
+      const turnRate = ship._gdHold ? 0 : Math.hypot(w.x, w.y);
       const k = Math.exp(-this.TURN_SPEED_LOSS * turnRate * dt);
       ship.velocity.x *= k; ship.velocity.y *= k; ship.velocity.z *= k;
     }
@@ -203,6 +206,9 @@ const GravityDrive = {
       const Wn = this.ROLL_OMEGA;
       w.z += (Wn * Wn * (heel + e.z) - 2 * this.ROLL_DAMPING * Wn * w.z) * dt;
     }
+
+    // 周回中の自動の姿勢合わせの間は、浮力・竜骨の働きで軌道の速度を変えない
+    if (ship._gdHold) { ship.boundaryPoint = { ...ship.position }; return; }
 
     // 浮力: 境界面の高さからのずれ（面の法線の向き）を強く押し戻す
     const n = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.boundaryQuat);
