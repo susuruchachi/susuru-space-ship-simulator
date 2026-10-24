@@ -357,8 +357,10 @@
     return box;
   }
 
-  // モデルを設計の大きさに合わせ、中心を原点に置き直す
-  function refitHullToModel() {
+  // モデルを設計の大きさに合わせ、中心を原点に置き直す。
+  //   opts.native: 設計の大きさに合わせず、モデルの寸法（1単位 = 1m）のまま使う
+  //     （5m〜5000m に収まらないときだけ、その範囲に収まるよう拡大・縮小する）
+  function refitHullToModel(opts) {
     const root = core.getModelRoot();
     if (!root || !design) return;
     const a = core.adjust;
@@ -374,6 +376,8 @@
     if (pendingLegacyScale) {
       design.hull.size = clamp(max0 * pendingLegacyScale, SHIP_DESIGN_SIZE_MIN, SHIP_DESIGN_SIZE_MAX);
       pendingLegacyScale = null;
+    } else if (opts && opts.native) {
+      design.hull.size = clamp(max0, SHIP_DESIGN_SIZE_MIN, SHIP_DESIGN_SIZE_MAX);
     }
     const k = design.hull.size / max0;
     a.scale = k;
@@ -458,16 +462,7 @@
     for (const pod of design.rcs.pods) pod.position = sc(pod.position);
     const df = core.getDockingFace();
     if (df) core.setDockingFace({ ...df, offsetU: df.offsetU * k, offsetV: df.offsetV * k });
-    if ($('sizeScalesSpec').checked) {
-      // 質量は体積に比例、推力は質量に比例（加速度を保つ）、角速度は控えめに
-      const k3 = k * k * k;
-      design.mass *= k3;
-      for (const e of design.mains) e.thrust *= k3;
-      design.retro.thrust *= k3;
-      design.rcs.thrust *= k3;
-      for (const pod of design.rcs.pods) if (pod.thrust > 0) pod.thrust *= k3;
-      design.maxAngularSpeed = clamp(design.maxAngularSpeed / Math.sqrt(k), 0.002, 6);
-    }
+    if ($('sizeScalesSpec').checked) scaleSpecBySize(k);
     if (core.getModelRoot()) {
       const a = core.adjust;
       a.scale *= k;
@@ -478,6 +473,27 @@
     }
     hullVersion++;
     afterShapeChange(true);
+  }
+
+  // 大きさが k 倍になったときの性能: 質量は体積に比例、推力は質量に比例
+  // （加速度を保つ）、角速度は控えめに
+  function scaleSpecBySize(k) {
+    const k3 = k * k * k;
+    design.mass *= k3;
+    for (const e of design.mains) e.thrust *= k3;
+    design.retro.thrust *= k3;
+    design.rcs.thrust *= k3;
+    for (const pod of design.rcs.pods) if (pod.thrust > 0) pod.thrust *= k3;
+    design.maxAngularSpeed = clamp(design.maxAngularSpeed / Math.sqrt(k), 0.002, 6);
+  }
+
+  // 補正前（倍率1）のモデルの最大寸法（読み込み時の大きさの判定用）
+  function preciseModelBoxMax() {
+    const root = core.getModelRoot();
+    if (!root) return design.hull.size;
+    const a = core.adjust;
+    const s = a.scale;
+    return design.hull.size / Math.max(s, 1e-12);
   }
 
   function setBoxRatio(axis, percent) {
@@ -945,6 +961,49 @@
     core.setStatus(`主エンジンを外しました（${design.mains.length}基）。`);
   });
 
+  // v83: 質量と最高速度から推力を決める（きびきび・ふつう・ゆったり）
+  const THRUST_PRESETS = {
+    quick: { accelTime: 10, turnTime: 3, label: 'きびきび' },
+    normal: { accelTime: 30, turnTime: 6, label: 'ふつう' },
+    gentle: { accelTime: 90, turnTime: 12, label: 'ゆったり' },
+  };
+  function autoThrust(kind) {
+    const p = THRUST_PRESETS[kind];
+    if (!p) return;
+    const accel = design.maxSpeed / p.accelTime; // [m/s²]
+    distributeMainThrust(design.mass * accel);
+    design.retro.thrust = design.mass * accel * 0.35;
+    // 姿勢スラスター: 90°（π/2）を加速→減速で turnTime 秒で回る角加速度 α = 4θ/T²
+    // になるよう、今の配置のまま推力を一律に拡大・縮小する
+    const need = (4 * (Math.PI / 2)) / (p.turnTime * p.turnTime);
+    let turnNote = '';
+    if (design.rcs.pods.length) {
+      const spec = buildShipSpecFromDesign(design);
+      const a = ShipAllocator.prepare({ ...spec, allocation: 'balanced', thrusterOutputRatios: {} });
+      const I = spec.inertiaTensor;
+      const alphas = [[3, I.x], [4, I.y], [5, I.z]]
+        .map(([row, Iax]) => Math.min(a.capPos[row], a.capNeg[row]) / Iax)
+        .filter((v) => v > 0);
+      if (alphas.length) {
+        const f = need / Math.min(...alphas);
+        design.rcs.thrust *= f;
+        for (const pod of design.rcs.pods) if (pod.thrust > 0) pod.thrust *= f;
+      }
+      // その時間で回れるよう、最大角速度が足りなければ上げる（加速→減速の頂点 π/T）
+      const wNeed = Math.PI / p.turnTime;
+      if (design.maxAngularSpeed < wNeed) {
+        design.maxAngularSpeed = wNeed;
+        turnNote = `（最大角速度も ${fmtNum(wNeed * 180 / Math.PI)}°/s に上げました）`;
+      }
+    } else {
+      turnNote = '（姿勢スラスターが無いので、向きを変える推力は決めていません）';
+    }
+    onPhysicsEdit();
+    const g = accel / 9.80665;
+    core.setStatus(`「${p.label}」: 主エンジン合計 ${fmtForce(design.mass * accel)}（加速度 ${fmtNum(accel)} m/s²・${fmtNum(g, 2)} G、最高速度まで約${p.accelTime}秒）、逆噴射 ${fmtForce(design.retro.thrust)}、姿勢スラスター 1噴射口 ${fmtForce(design.rcs.thrust)}（90°を約${p.turnTime}秒）${turnNote}`);
+  }
+  document.querySelectorAll('[data-auto-thrust]').forEach((b) => b.addEventListener('click', () => autoThrust(b.dataset.autoThrust)));
+
   $('mainToSternBtn').addEventListener('click', () => {
     const e = selectedMain();
     if (!e) return;
@@ -1388,25 +1447,46 @@
       // 主エンジンは船体の外形（箱）の中での相対的な位置を保つ
       // （艦尾にあったものは、向きを変えたあとの船体の艦尾へ）
       const old = { ...design.hull.dims };
+      // v83: 重心がモデルの原点にあれば、向きを変えたあとも原点に合わせる
+      // （原点はモデルを置いている補正ノードの位置 = adjust.offset）
+      const o0 = core.adjust.offset;
+      const cogAtOrigin = Math.hypot(design.cog.x - o0.x, design.cog.y - o0.y, design.cog.z - o0.z) < design.hull.size * 1e-3;
       refitHullToModel();
+      if (cogAtOrigin) design.cog = { ...core.adjust.offset };
       remapMainsToDims(old, false);
       resnapPods();
       afterShapeChange(false);
     },
     onModelLoaded: (fromUser) => {
       if (!design) return;
-      const old = { ...design.hull.dims };
-      refitHullToModel();
-      if (fromUser) {
-        // 新しいモデル: 主エンジンは新しい船体の艦尾の表面へ（並びは船体の幅に
-        // 合わせて広げ・縮め）、スラスターは新しい船体の表面へ
-        design.hull.modelFileName = core.getModelFileName() || design.hull.modelFileName;
-        design.hull.hasModel = true;
-        remapMainsToDims(old, true);
-        resnapPods();
-        modelDirty = true;
-        core.setStatus('モデルを読み込みました。設計の大きさに合わせて拡大・縮小しています。向きが違う場合は「モデルの向き」で直してください。');
+      if (!fromUser) {
+        refitHullToModel();
+        afterShapeChange(true);
+        return;
       }
+      // v83: 新しいモデルは、モデルの寸法のまま（1単位 = 1m）使い、重心をモデルの
+      // 原点に置く。エンジン・スラスターなどの位置は大きさの比で移し、主エンジンは
+      // 新しい船体の艦尾の表面へ、スラスターは新しい船体の表面へ寄せる。
+      const oldSize = design.hull.size;
+      const old = { ...design.hull.dims };
+      refitHullToModel({ native: true });
+      const k = design.hull.size / Math.max(oldSize, 1e-9);
+      if (Math.abs(k - 1) > 1e-9) {
+        const sc = (p) => ({ x: p.x * k, y: p.y * k, z: p.z * k });
+        for (const e of design.mains) e.position = sc(e.position);
+        for (const pod of design.rcs.pods) pod.position = sc(pod.position);
+        const df = core.getDockingFace();
+        if (df) core.setDockingFace({ ...df, offsetU: df.offsetU * k, offsetV: df.offsetV * k });
+        if ($('sizeScalesSpec').checked) scaleSpecBySize(k);
+      }
+      design.cog = { ...core.adjust.offset };
+      design.hull.modelFileName = core.getModelFileName() || design.hull.modelFileName;
+      design.hull.hasModel = true;
+      remapMainsToDims({ x: old.x * k, y: old.y * k, z: old.z * k }, true);
+      resnapPods();
+      modelDirty = true;
+      const clamped = Math.abs(design.hull.size - preciseModelBoxMax()) > design.hull.size * 1e-6;
+      core.setStatus(`モデルを読み込みました（${clamped ? `大きすぎる・小さすぎるので ${fmtLen(design.hull.size)} に合わせました` : `モデルの大きさのまま: 全長 ${fmtLen(design.hull.dims.z)}`}）。重心はモデルの原点に置きました。向きが違う場合は「モデルの向き」で直してください。`);
       afterShapeChange(true);
     },
   });

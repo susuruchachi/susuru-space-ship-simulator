@@ -118,6 +118,15 @@
     font-size: 10px;
     white-space: nowrap;
   }
+  .look-select {
+    height: 26px;
+    padding: 0 6px;
+    border-radius: 6px;
+    background: rgba(10,20,34,0.75);
+    border: 1px solid rgba(159,216,255,0.45);
+    color: #dfefff;
+    font-size: 11px;
+  }
   .debug-btn.active {
     background: rgba(255,180,60,0.35);
     border-color: rgba(255,210,120,0.9);
@@ -614,6 +623,12 @@
     </div>
 
     <div class="debug-panel">
+      <select class="look-select" id="modelLookSelect" title="モデルの見え方（黒いパーツが見えにくいとき）">
+        <option value="normal">見え方: そのまま</option>
+        <option value="bright">見え方: 明るく</option>
+        <option value="clay">見え方: 単色（グレー）</option>
+        <option value="brightBg">見え方: 明るく＋明るい背景</option>
+      </select>
       <button class="debug-btn" id="collisionDebugBtn" title="ゲーム中の衝突判定に使う形（船体を立方体の格子で近似した直方体の集まり）を表示">当たり判定を表示</button>
     </div>
 
@@ -776,6 +791,13 @@
       </div>
       <p class="hint">回転のしにくさ（慣性モーメント）の係数。1 は質量が船体全体に一様に詰まっている状態で、小さいほど質量が重心の近くに集まっていて向きを変えやすくなります。初期値はひな形の艦種と同じ回りやすさになる値です。</p>
       <button type="button" class="small-btn" id="autoSpecBtn">大きさから自動で決める（質量・推力・角速度・慣性）</button>
+      <h3>推力を自動で調整（質量と最高速度から）</h3>
+      <div class="btn-row">
+        <button type="button" data-auto-thrust="quick">きびきび</button>
+        <button type="button" data-auto-thrust="normal">ふつう</button>
+        <button type="button" data-auto-thrust="gentle">ゆったり</button>
+      </div>
+      <p class="hint">主エンジン（合計）は最高速度まで 10秒・30秒・90秒で届く推力、逆噴射はその35%、姿勢スラスターは今の配置で90°向きを変えるのに 3秒・6秒・12秒かかる推力にします。エンジンごとの推力の比は保ちます。</p>
     </details>
 
     <details class="adjust-section" id="mainSection" open>

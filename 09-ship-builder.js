@@ -229,6 +229,7 @@
   // Three.js プレビューシーン
   // -----------------------------------------------------------
   let renderer, scene, camera, orthoCamera;
+  let headlight = null;      // v83: 視点の方向から照らすライト
   let modelRoot = null;      // 読み込んだモデルそのもの（原点はモデル依存）
   let correctionGroup = null; // rotation/scale/offset補正を適用する中間ノード
   let gridHelper = null;
@@ -283,6 +284,10 @@
     const rim = new THREE.DirectionalLight(0x6cc3ff, 0.5);
     rim.position.set(-5, -2, -4);
     scene.add(rim);
+    // v83: 視点の方向から照らすライト（見え方「明るく」のとき）
+    headlight = new THREE.DirectionalLight(0xffffff, 0);
+    scene.add(headlight);
+    scene.add(headlight.target);
 
     gridHelper = new THREE.GridHelper(20, 20, 0x2a5578, 0x16283a);
     scene.add(gridHelper);
@@ -386,7 +391,77 @@
   function animate() {
     requestAnimationFrame(animate);
     updateCameraFromOrbit();
-    renderer.render(scene, getActiveCamera());
+    const cam = getActiveCamera();
+    if (headlight && headlight.intensity > 0) {
+      headlight.position.copy(cam.position);
+      headlight.target.position.copy(orbitState.target);
+    }
+    renderer.render(scene, cam);
+  }
+
+  // -----------------------------------------------------------
+  // v83: モデルの見え方。黒いパーツが暗い背景に沈んで見えにくい、という要望への対策。
+  //   'normal' そのまま / 'bright' 明るく（暗い色・テクスチャを発光で持ち上げ、
+  //   視点の方向からも照らす）/ 'clay' 単色（明るいグレー）/ 'brightBg' 明るく＋明るい背景
+  // 黒い色は照明を強くしても黒いままなので、材質の発光（emissive）で持ち上げる。
+  // 見た目だけの変更で、保存するモデルのデータやゲーム中の見た目は変わらない。
+  // -----------------------------------------------------------
+  const LOOK_STORAGE_KEY = 'spaceSimBuilderModelLook';
+  let modelLook = 'bright';
+  try { modelLook = localStorage.getItem(LOOK_STORAGE_KEY) || 'bright'; } catch (e) { /* ignore */ }
+
+  function lookMaterialFrom(m) {
+    if (modelLook === 'clay') {
+      return new THREE.MeshStandardMaterial({
+        color: 0xc9d1da, metalness: 0.05, roughness: 0.75,
+        side: m.side, transparent: m.transparent, opacity: m.opacity,
+      });
+    }
+    const c = m.clone();
+    if (c.emissive) {
+      if (c.map) {
+        // テクスチャそのものを発光としても足す（暗いテクスチャほど明るく見える）
+        c.emissiveMap = c.map;
+        c.emissive.setRGB(0.45, 0.45, 0.45);
+      } else {
+        const col = c.color ? c.color.clone() : new THREE.Color(0x888888);
+        c.emissive.copy(col).multiplyScalar(0.35).add(new THREE.Color(0.11, 0.12, 0.14));
+      }
+      c.needsUpdate = true;
+    }
+    return c;
+  }
+
+  function disposeLookMaterial(mat) {
+    for (const m of Array.isArray(mat) ? mat : [mat]) if (m && m.dispose) m.dispose();
+  }
+
+  function applyModelLook() {
+    const bright = modelLook === 'bright' || modelLook === 'brightBg';
+    if (headlight) headlight.intensity = bright || modelLook === 'clay' ? 0.7 : 0;
+    if (scene) scene.background = new THREE.Color(modelLook === 'brightBg' ? 0x7d8794 : 0x0a0e16);
+    const sel = document.getElementById('modelLookSelect');
+    if (sel) sel.value = modelLook;
+    if (!modelRoot) return;
+    modelRoot.traverse((o) => {
+      if (!o.isMesh || !o.material) return;
+      if (!o.userData.origMaterial) o.userData.origMaterial = o.material;
+      if (o.userData.lookMaterial) {
+        disposeLookMaterial(o.userData.lookMaterial);
+        o.userData.lookMaterial = null;
+      }
+      const orig = o.userData.origMaterial;
+      if (modelLook === 'normal') { o.material = orig; return; }
+      const mat = Array.isArray(orig) ? orig.map(lookMaterialFrom) : lookMaterialFrom(orig);
+      o.material = mat;
+      o.userData.lookMaterial = mat;
+    });
+  }
+
+  function setModelLook(look) {
+    modelLook = ['normal', 'bright', 'clay', 'brightBg'].includes(look) ? look : 'bright';
+    try { localStorage.setItem(LOOK_STORAGE_KEY, modelLook); } catch (e) { /* ignore */ }
+    applyModelLook();
   }
 
   // ---- ポインタ操作: ドラッグで回転、ホイール/ピンチでズーム ----
@@ -830,6 +905,7 @@
     modelRoot = root;
     correctionGroup.add(modelRoot);
     applyAdjustToGroup();
+    applyModelLook();
     emptyState.classList.add('hidden');
     // v78: 中心合わせ・大きさ合わせ・カメラの向けなおしは設計側が行う
     if (typeof onModelLoadedHook === 'function') onModelLoadedHook(!!fromUser);
@@ -845,7 +921,8 @@
       } else {
         await loadObjFromFiles(pendingObjFile, pendingMtlFile, pendingTexFiles);
       }
-      setStatus('読み込み完了。設計の大きさに合わせて拡大・縮小しました。艦首の向きが違う場合は「モデルの向き」で直してください。', false);
+      // v83: 読み込み後の案内（大きさ・重心）は設計側（onModelLoadedHook）が出す
+      if (typeof onModelLoadedHook !== 'function') setStatus('読み込み完了。艦首の向きが違う場合は「モデルの向き」で直してください。', false);
     } catch (e) {
       console.error(e);
       setStatus(`読み込みに失敗しました: ${e.message || e}`, true);
@@ -1170,6 +1247,11 @@
   // 起動
   // -----------------------------------------------------------
   initScene();
+  applyModelLook();
+  {
+    const sel = document.getElementById('modelLookSelect');
+    if (sel) sel.addEventListener('change', () => setModelLook(sel.value));
+  }
   // v83: Safari のページ全体の拡大を止める（3Dビューのピンチズームを優先）
   if (typeof preventPageGestureZoom === 'function') preventPageGestureZoom();
   syncRotUiFromState();
