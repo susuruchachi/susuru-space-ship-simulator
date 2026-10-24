@@ -357,6 +357,11 @@ const ShipAllocator = {
     return [f, f, f, I.x * aa, I.y * aa, I.z * aa];
   },
   L2_REG: 2e-4,  // 出力比の2乗和の小さな正則化（解を一意にする）
+  // v84: 姿勢スラスター・逆噴射の正則化の重みは主エンジンの何倍か。主エンジンで
+  // 足りる力を姿勢スラスターで分担しない（「まっすぐ吹かすだけで姿勢スラスターが
+  // 噴射する」の修正）。大きすぎると、姿勢スラスターしか効かない向きで出力が
+  // 指示より弱くなり、自動ドッキングで止まり切れなくなる。
+  RCS_REG_FACTOR: 10,
 
   // 艦ごとの前計算（スラスター構成が変わったときだけやり直す）
   prepare(ship) {
@@ -375,10 +380,11 @@ const ShipAllocator = {
       if (c === undefined) {
         c = cols.length;
         colByKey.set(key, c);
-        cols.push({ isEngine: false });
+        cols.push({ isEngine: false, isMain: false });
       }
       colOfThruster[i] = c;
       if (t.kind === 'main' || t.id.startsWith('retro')) cols[c].isEngine = true;
+      if (t.kind === 'main') cols[c].isMain = true;
     });
     const N = cols.length;
     const B = new Float64Array(6 * N); // 列ごとに [Fx Fy Fz Tx Ty Tz]
@@ -403,11 +409,21 @@ const ShipAllocator = {
     }
     const rcsOnly = new Uint8Array(N);
     for (let k = 0; k < N; k++) rcsOnly[k] = cols[k].isEngine ? 0 : 1;
+    // v84: 主エンジンだけの前進（-Z）推力。手動のスロットルではこれを上限にする
+    // （姿勢スラスターまで足した最大値を上限にすると、全開で加速するたびに
+    // 姿勢スラスターも前進に使ってしまう）
+    const mainOnly = new Uint8Array(N);
+    let mainFwd = 0;
+    for (let k = 0; k < N; k++) {
+      mainOnly[k] = cols[k].isMain ? 1 : 0;
+      if (cols[k].isMain && B[k * 6 + 2] < 0) mainFwd -= B[k * 6 + 2];
+    }
+
     const a = {
-      thrusters: ts, capRatio, N, B, naivePos, naiveNeg, colOfThruster,
+      thrusters: ts, capRatio, N, B, naivePos, naiveNeg, colOfThruster, lamCol: new Float64Array(N), isMainCol: mainOnly,
       ids: ts.map((t) => t.id),
       r: new Float64Array(N),
-      capPos: new Float64Array(6), capNeg: new Float64Array(6),
+      capPos: new Float64Array(6), capNeg: new Float64Array(6), mainFwd,
       // v83: 姿勢スラスターだけで出せる並進の力（力の誤差の物差しに使う）
       rcsCapPos: new Float64Array(3), rcsCapNeg: new Float64Array(3),
       _A: new Float64Array(6 * N), _colNorm: new Float64Array(N), _res: new Float64Array(6),
@@ -464,7 +480,7 @@ const ShipAllocator = {
     const A = a._A;
     const res = a._res;
     const colNorm = a._colNorm;
-    const lam = this.L2_REG;
+    const lamCol = a.lamCol;
     const rhs = [0, 0, 0, 0, 0, 0];
     for (let row = 0; row < 6; row++) {
       const c = weight[row] * scale[row];
@@ -478,6 +494,7 @@ const ShipAllocator = {
       colNorm[k] = A[o] * A[o] + A[o + 1] * A[o + 1] + A[o + 2] * A[o + 2]
         + A[o + 3] * A[o + 3] + A[o + 4] * A[o + 4] + A[o + 5] * A[o + 5];
       if ((mask && !mask[k]) || colNorm[k] <= 0) { r[k] = 0; st[k] = 2; continue; }
+      lamCol[k] = this.L2_REG * (a.isMainCol[k] ? 1 : this.RCS_REG_FACTOR);
       let v = r[k];
       if (!(v > 1e-12)) { r[k] = 0; st[k] = -1; } else if (v >= 1 - 1e-12) { r[k] = 1; st[k] = 1; } else st[k] = 0;
     }
@@ -487,17 +504,19 @@ const ShipAllocator = {
     const rs = a._rs || (a._rs = new Float64Array(N));
     const maxIter = Math.max(20, 4 * N + 20);
     for (let iter = 0; iter < maxIter; iter++) {
-      // 自由な列だけの最適解: r_F = A_Fᵀ (A_F A_Fᵀ + λI)⁻¹ (右辺 − 1に固定した列の寄与)
+      // 自由な列だけの最適解（列ごとの正則化 λ_k）:
+      //   r_F = Λ⁻¹ A_Fᵀ (I + A_F Λ⁻¹ A_Fᵀ)⁻¹ (右辺 − 1に固定した列の寄与)
       for (let i = 0; i < 6; i++) bp[i] = rhs[i];
       G.fill(0);
-      for (let i = 0; i < 6; i++) G[i * 7] = lam;
+      for (let i = 0; i < 6; i++) G[i * 7] = 1;
       for (let k = 0; k < N; k++) {
         const o = k * 6;
         if (st[k] === 1) {
           for (let i = 0; i < 6; i++) bp[i] -= A[o + i];
         } else if (st[k] === 0) {
+          const il = 1 / lamCol[k];
           for (let i = 0; i < 6; i++) {
-            const ai = A[o + i];
+            const ai = A[o + i] * il;
             if (ai === 0) continue;
             for (let j = i; j < 6; j++) G[i * 6 + j] += ai * A[o + j];
           }
@@ -510,7 +529,7 @@ const ShipAllocator = {
       for (let k = 0; k < N; k++) {
         if (st[k] !== 0) continue;
         const o = k * 6;
-        const v = A[o] * z[0] + A[o + 1] * z[1] + A[o + 2] * z[2] + A[o + 3] * z[3] + A[o + 4] * z[4] + A[o + 5] * z[5];
+        const v = (A[o] * z[0] + A[o + 1] * z[1] + A[o + 2] * z[2] + A[o + 3] * z[3] + A[o + 4] * z[4] + A[o + 5] * z[5]) / lamCol[k];
         rs[k] = v;
         if (v < 0) {
           const t = r[k] / (r[k] - v);
@@ -539,7 +558,7 @@ const ShipAllocator = {
         if (st[k] !== -1 && st[k] !== 1) continue;
         const o = k * 6;
         const g = A[o] * res[0] + A[o + 1] * res[1] + A[o + 2] * res[2]
-          + A[o + 3] * res[3] + A[o + 4] * res[4] + A[o + 5] * res[5] + lam * r[k];
+          + A[o + 3] * res[3] + A[o + 4] * res[4] + A[o + 5] * res[5] + lamCol[k] * r[k];
         const viol = st[k] === -1 ? -g : g;
         if (viol > worstV) { worstV = viol; worst = k; }
       }
@@ -578,7 +597,8 @@ const ShipAllocator = {
   },
 
   // 欲しい力・トルク（各成分 -1..1）→ 各スラスターの出力比
-  solve(ship, desiredForce, desiredTorque) {
+  // opts.manualThrottle: 手動のスロットルによる前進は主エンジンの推力までにする
+  solve(ship, desiredForce, desiredTorque, opts) {
     const a = this.prepare(ship);
     const lim = this._dockingLimits(ship);
     const comps = [desiredForce.x, desiredForce.y, desiredForce.z, desiredTorque.x, desiredTorque.y, desiredTorque.z];
@@ -587,6 +607,7 @@ const ShipAllocator = {
       const v = clamp(comps[row] || 0, -1, 1);
       let cap = v >= 0 ? a.capPos[row] : a.capNeg[row];
       if (lim) cap = Math.min(cap, lim[row]);
+      if (row === 2 && v < 0 && opts && opts.manualThrottle && a.mainFwd > 0) cap = Math.min(cap, a.mainFwd);
       target[row] = v * cap;
       if (row < 3) {
         // 力の誤差の物差し: 要求した力か、姿勢スラスターだけで出せる力の大きい方

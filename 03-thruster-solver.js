@@ -109,11 +109,11 @@ const ThrusterSolver = {
   // 両方の呼び出しで正の比率を得ることはまず無く（roll専用スラス
   // ターはforce/pitchYawのarmを持たない設計）、単純な加算で安全に
   // 合成できる。念のため合算後は1.0でクランプする。
-  solve(ship, desiredForce, desiredTorque) {
+  solve(ship, desiredForce, desiredTorque, opts) {
     // v78: 自作の艦は、重心まわりの力・トルクの釣り合いを解く配分方式
     // （21-ship-design.js ShipAllocator）を使う。艦種プリセットは従来どおり。
     if (ship && ship.allocation === 'balanced' && typeof ShipAllocator !== 'undefined') {
-      return ShipAllocator.solve(ship, desiredForce, desiredTorque);
+      return ShipAllocator.solve(ship, desiredForce, desiredTorque, opts);
     }
     const pitchYawTorque = { x: desiredTorque.x, y: desiredTorque.y, z: 0 };
     const rollTorque = { x: 0, y: 0, z: desiredTorque.z };
@@ -907,7 +907,8 @@ const ThrusterSolver = {
       }
     }
 
-    return { desiredForce, desiredTorque };
+    // v84: 手動操縦の前進は主エンジンだけで出す（ShipAllocator.solve の opts）
+    return { desiredForce, desiredTorque, manualThrottle: true };
   },
 
   // =============================================================

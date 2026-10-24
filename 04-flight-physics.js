@@ -34,7 +34,7 @@ const FlightPhysics = {
     // 維持する）とdockedケースのswitch分岐（フォース・トルク0）で
     // 既に賄われているため、ここでのショートカットは不要かつ有害。
     // 常に通常のソルバー/積分処理を通す。
-    const { desiredForce, desiredTorque } = ThrusterSolver.buildDesiredFromInput(input, ship, dt);
+    const { desiredForce, desiredTorque, manualThrottle } = ThrusterSolver.buildDesiredFromInput(input, ship, dt);
 
     // 最高速到達中は「最高速方向への加速」だけを遮断する。
     // 以前はワールド空間の合力に対して行っていたが、スラスター
@@ -44,7 +44,7 @@ const FlightPhysics = {
     const adjustedForce = this._clampDesiredForceAtMaxSpeed(ship, desiredForce);
 
     // スラスター出力比を解いて艦の状態に保存（06-hud.js / 07-engine-fx.js が参照）
-    const ratios = ThrusterSolver.solve(ship, adjustedForce, desiredTorque);
+    const ratios = ThrusterSolver.solve(ship, adjustedForce, desiredTorque, { manualThrottle: !!manualThrottle });
     ship.thrusterOutputRatios = ratios;
 
     this._applyThrusters(ship, ratios, dt);
