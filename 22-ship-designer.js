@@ -1564,8 +1564,9 @@
       core.setStatus(`「${design.name}」を保存しました。`);
       await refreshDesignList();
       // v80: 自動同期がオンなら、この設計を同期先へ送る（失敗しても保存自体は済んでいる）
+      // v82: Googleアカウント・GitHub のうち、自動同期がオンのもの
       if (typeof ShipSync !== 'undefined' && ShipSync.isAutoSync()) {
-        ShipSync.syncAll((msg) => core.setStatus(`「${design.name}」を保存しました。${msg}`))
+        ShipSync.syncAll((msg) => core.setStatus(`「${design.name}」を保存しました。${msg}`), { autoOnly: true })
           .catch((e) => core.setStatus(`「${design.name}」を保存しました（同期に失敗: ${e.message || e}）`, true));
       }
       return true;
@@ -1631,6 +1632,12 @@
   window.addEventListener('beforeunload', (e) => {
     if (dirty) { e.preventDefault(); e.returnValue = ''; }
   });
+
+  // v82: Googleアカウントで同期している端末なら、保存したときに自動で送れるよう
+  // ログイン状態を確かめておく（ログインは設定画面で行う）
+  if (typeof GoogleSync !== 'undefined' && GoogleSync.isAvailable()) {
+    GoogleSync.init().catch((e) => console.warn('Googleアカウントでの同期の準備に失敗しました。', e));
+  }
 
   // ひな形の選択肢
   for (const [key, preset] of Object.entries(ShipClassPresets)) {

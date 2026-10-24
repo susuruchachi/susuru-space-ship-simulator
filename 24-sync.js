@@ -21,6 +21,10 @@
 //    削除も記録して伝える（21-ship-design.js の削除の記録）。
 //
 // トークンはこの端末のブラウザ（localStorage）にだけ保存し、GitHub 以外には送らない。
+//
+// v82: Googleアカウントでの同期（25-google-sync.js の GoogleSync）を追加し、
+// GitHub は「別の方法」にした。ここの ShipSync は、ファイルの書き出し・読み込みと
+// 同期の窓口（使える状態の同期先すべてと順に同期する）。GitHub での同期は GitHubSync。
 // =============================================================
 
 const SHIP_SYNC_CONFIG_KEY = 'spaceSimSyncConfig';
@@ -28,51 +32,63 @@ const SHIP_SYNC_FILE_FORMAT = 'susuru-space-ships';
 
 const ShipSync = {
   // -----------------------------------------------------------
-  // 設定（同期先のリポジトリ・トークン・自動同期）
+  // 同期の窓口: Googleアカウント・GitHub のうち使える状態のものと順に同期する。
+  //   opts.autoOnly: 「自動で同期する」がオンのものだけ（艦の保存時・設定画面を開いたとき）
   // -----------------------------------------------------------
-  config() {
-    try {
-      const c = JSON.parse(localStorage.getItem(SHIP_SYNC_CONFIG_KEY) || '{}') || {};
-      return { repo: c.repo || '', token: c.token || '', auto: c.auto !== false, lastSyncAt: c.lastSyncAt || 0 };
-    } catch (e) {
-      return { repo: '', token: '', auto: true, lastSyncAt: 0 };
-    }
-  },
-
-  saveConfig(partial) {
-    const c = { ...this.config(), ...partial };
-    try { localStorage.setItem(SHIP_SYNC_CONFIG_KEY, JSON.stringify(c)); } catch (e) {}
-    return c;
-  },
-
-  isConfigured() {
-    const c = this.config();
-    return /^[\w.-]+\/[\w.-]+$/.test(c.repo) && c.token.length > 10;
+  providers(opts) {
+    const autoOnly = !!(opts && opts.autoOnly);
+    const list = [];
+    if (typeof GoogleSync !== 'undefined' && GoogleSync.isSignedIn() && (!autoOnly || GoogleSync.config().auto)) list.push(GoogleSync);
+    if (GitHubSync.isConfigured() && (!autoOnly || GitHubSync.config().auto)) list.push(GitHubSync);
+    return list;
   },
 
   isAutoSync() {
-    return this.isConfigured() && this.config().auto;
+    return this.providers({ autoOnly: true }).length > 0;
+  },
+
+  async syncAll(progress, opts) {
+    const list = this.providers(opts);
+    if (!list.length) throw new Error('同期先が設定されていません');
+    const p = progress || (() => {});
+    const many = list.length > 1;
+    const msgs = [];
+    let failed = false;
+    for (const prov of list) {
+      try {
+        const r = await prov.syncAll((m) => p(many ? `${prov.label}: ${m}` : m));
+        msgs.push(many ? `${prov.label}: ${r.msg}` : r.msg);
+      } catch (e) {
+        if (!many) throw e;
+        failed = true;
+        msgs.push(`${prov.label}: 失敗（${e.message || e}）`);
+      }
+    }
+    const msg = msgs.join(' / ');
+    if (failed) throw new Error(msg);
+    p(msg);
+    return { msg };
   },
 
   // -----------------------------------------------------------
   // 文字列・バイト列の変換
   // -----------------------------------------------------------
   _utf8ToBase64(str) {
-    const bytes = new TextEncoder().encode(str);
-    let bin = '';
-    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-    return btoa(bin);
+    return this._bytesToBase64(new TextEncoder().encode(str));
   },
   _base64ToUtf8(b64) {
-    const bin = atob(b64.replace(/\s/g, ''));
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return new TextDecoder().decode(bytes);
+    return new TextDecoder().decode(this._base64ToBytes(b64));
   },
   _bytesToBase64(bytes) {
     let bin = '';
     for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
     return btoa(bin);
+  },
+  _base64ToBytes(b64) {
+    const bin = atob(b64.replace(/\s/g, ''));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
   },
 
   // -----------------------------------------------------------
@@ -123,10 +139,41 @@ const ShipSync = {
     }
     return { added, updated, skipped };
   },
+};
+
+// =============================================================
+// 2) GitHub で同期
+// =============================================================
+const GitHubSync = {
+  label: 'GitHub',
 
   // -----------------------------------------------------------
-  // 2) GitHub で同期
+  // 設定（同期先のリポジトリ・トークン・自動同期）
   // -----------------------------------------------------------
+  config() {
+    try {
+      const c = JSON.parse(localStorage.getItem(SHIP_SYNC_CONFIG_KEY) || '{}') || {};
+      return { repo: c.repo || '', token: c.token || '', auto: c.auto !== false, lastSyncAt: c.lastSyncAt || 0 };
+    } catch (e) {
+      return { repo: '', token: '', auto: true, lastSyncAt: 0 };
+    }
+  },
+
+  saveConfig(partial) {
+    const c = { ...this.config(), ...partial };
+    try { localStorage.setItem(SHIP_SYNC_CONFIG_KEY, JSON.stringify(c)); } catch (e) {}
+    return c;
+  },
+
+  isConfigured() {
+    const c = this.config();
+    return /^[\w.-]+\/[\w.-]+$/.test(c.repo) && c.token.length > 10;
+  },
+
+  isAutoSync() {
+    return this.isConfigured() && this.config().auto;
+  },
+
   async _api(method, path, body, accept) {
     const c = this.config();
     const res = await fetch(`https://api.github.com/repos/${c.repo}/contents/${path}`, {
@@ -159,7 +206,7 @@ const ShipSync = {
     const r = await this._api('GET', path);
     if (!r) return null;
     let text;
-    if (r.content && r.encoding === 'base64') text = this._base64ToUtf8(r.content);
+    if (r.content && r.encoding === 'base64') text = ShipSync._base64ToUtf8(r.content);
     else {
       const raw = await this._api('GET', path, null, 'application/vnd.github.raw');
       text = await raw.text();
@@ -226,7 +273,7 @@ const ShipSync = {
       // GLB はバイナリのままリポジトリに置く（data URL の中身がそのまま base64）
       b64 = model.glbDataUrl.slice(model.glbDataUrl.indexOf(',') + 1);
     } else {
-      b64 = this._utf8ToBase64(JSON.stringify(model));
+      b64 = ShipSync._utf8ToBase64(JSON.stringify(model));
     }
     const mb = (b64.length * 0.75) / 1e6;
     if (mb > 70) throw new Error(`船体モデルが大きすぎて同期できません（${mb.toFixed(0)}MB、目安70MBまで）`);
@@ -243,7 +290,7 @@ const ShipSync = {
       return {
         format: 'glb',
         fileName: entry.modelFileName || 'model.glb',
-        glbDataUrl: `data:model/gltf-binary;base64,${this._bytesToBase64(buf)}`,
+        glbDataUrl: `data:model/gltf-binary;base64,${ShipSync._bytesToBase64(buf)}`,
         objText: null, mtlText: null, textures: null,
       };
     }
@@ -279,7 +326,7 @@ const ShipSync = {
         // この端末の方が新しい → 送る
         progress(`送信中: ${L.name}`);
         const entry = { ...(R || {}) };
-        entry.designSha = await this._put(`ships/${id}.json`, this._utf8ToBase64(JSON.stringify(L)), R && !R.deleted ? R.designSha : null, `設計: ${L.name}`);
+        entry.designSha = await this._put(`ships/${id}.json`, ShipSync._utf8ToBase64(JSON.stringify(L)), R && !R.deleted ? R.designSha : null, `設計: ${L.name}`);
         if (L.hull.hasModel) {
           if (!R || R.modelRev !== L.hull.modelRev || !R.modelPath) {
             const model = await loadShipDesignModel(id);
@@ -337,7 +384,7 @@ const ShipSync = {
     if (changed || !idxFile) {
       index.updatedAt = Date.now();
       try {
-        await this._put('ships/index.json', this._utf8ToBase64(JSON.stringify(index, null, 1)), idxFile ? idxFile.sha : null, '艦の設計の一覧を更新', true);
+        await this._put('ships/index.json', ShipSync._utf8ToBase64(JSON.stringify(index, null, 1)), idxFile ? idxFile.sha : null, '艦の設計の一覧を更新', true);
       } catch (e) {
         // 一覧をほかの端末が同時に書き換えた: 一覧を読み直して、もう一度だけ最初から突き合わせる
         if ((e.status === 409 || e.status === 422) && !attempt) return this._syncAll(progress, 1);

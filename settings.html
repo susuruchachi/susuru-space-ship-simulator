@@ -51,6 +51,7 @@
     border-color: #6cc3ff;
     background: rgba(108,195,255,0.1);
   }
+  a.option-card { color: inherit; text-decoration: none; }
   .option-card .title { font-size: 14px; font-weight: 600; }
   .option-card .desc { font-size: 12px; color: #9fb3c8; margin-top: 4px; line-height: 1.5; }
 
@@ -142,6 +143,38 @@
   .sync-help { font-size: 12px; color: #c9d8e8; margin-top: 10px; line-height: 1.7; }
   .sync-help summary { cursor: pointer; color: #9fd8ff; }
   .sync-help code { background: rgba(255,255,255,0.08); padding: 1px 4px; border-radius: 4px; }
+  /* v82: Googleアカウントでの同期 */
+  .sync-box h3.first { margin-top: 0; }
+  .sync-field textarea {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    margin-top: 4px;
+    padding: 9px 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.2);
+    background: rgba(0,0,0,0.3);
+    color: #dfefff;
+    font-size: 12px;
+    font-family: ui-monospace, Menlo, monospace;
+    resize: vertical;
+  }
+  .sync-account { font-size: 13px; color: #dfefff; margin: 8px 0 2px; word-break: break-all; }
+  .sync-rules {
+    font-size: 11px;
+    line-height: 1.5;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(0,0,0,0.35);
+    border: 1px solid rgba(255,255,255,0.12);
+    overflow-x: auto;
+    white-space: pre;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  .sync-help ol { padding-left: 20px; }
+  .sync-help a { color: #9fd8ff; }
+  .sync-divider { border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 14px 0 0; }
 </style>
 </head>
 <body>
@@ -171,29 +204,69 @@
   <section>
     <h2>艦のデータ（端末間の同期・バックアップ）</h2>
     <div class="sync-box">
+      <h3 class="first">Googleアカウントで自動同期</h3>
+      <p class="sync-hint">同じGoogleアカウントでログインした端末どうしで、自作の艦（3Dモデル込み）が自動で同期されます。ログインは端末ごとに1回だけです。</p>
+      <div class="sync-account" id="gsyncAccount"></div>
+      <div class="sync-row">
+        <button type="button" id="gsyncSignInBtn" class="primary">Googleでログイン</button>
+        <button type="button" id="gsyncNowBtn">今すぐ同期</button>
+        <button type="button" id="gsyncSignOutBtn">ログアウト</button>
+      </div>
+      <label class="sync-check"><input type="checkbox" id="gsyncAuto" checked> 艦を保存したとき・この画面を開いたときに自動で同期する</label>
+      <div class="sync-status" id="syncStatus"></div>
+      <details class="sync-help" id="gsyncSetup">
+        <summary>最初の準備（サイトの持ち主が1回だけ・無料）</summary>
+        <p id="gsyncSiteNote" style="display:none;">このサイトには Firebase の設定が書き込まれています（<code>firebase-config.js</code>）。各端末では「Googleでログイン」を押すだけで使えます。</p>
+        <div id="gsyncConfigBlock">
+          <p>このゲームにはサーバーが無いので、Google の無料サービス「Firebase」に艦のデータの置き場所を1つ作ります。パソコンかiPadのブラウザで、次のとおりに進めてください。</p>
+          <ol>
+            <li><a href="https://console.firebase.google.com/" target="_blank" rel="noopener">Firebase コンソール</a>をGoogleアカウントで開き、「プロジェクトを作成」（名前は自由。例: <code>space-ships</code>。Google アナリティクスはオフで大丈夫です）。</li>
+            <li>プロジェクトの画面で「ウェブ」（<code>&lt;/&gt;</code> のマーク）を押してアプリを追加します（ニックネームは自由。Firebase Hosting は不要）。表示される <code>firebaseConfig</code> の内容をコピーします。</li>
+            <li>左のメニューの「構築」→「Authentication」→「始める」→「ログイン方法」で「Google」を選び、有効にして保存します。</li>
+            <li>Authentication の「設定」→「承認済みドメイン」→「ドメインを追加」で <code id="gsyncDomain"></code> を追加します。</li>
+            <li>「構築」→「Firestore Database」→「データベースを作成」。場所は <code>asia-northeast1（東京）</code> など近いところ、「本番環境モード」で作成します。</li>
+            <li>Firestore の「ルール」タブの中身を下のルールに置き換えて「公開」します（自分のデータは自分だけが読み書きできるようになります）。</li>
+            <li>2.でコピーした firebaseConfig を下の欄に貼り付けて「設定を保存」し、「Googleでログイン」を押します。</li>
+          </ol>
+          <pre class="sync-rules" id="gsyncRules"></pre>
+          <div class="sync-row"><button type="button" id="gsyncCopyRulesBtn">ルールをコピー</button></div>
+          <label class="sync-field">Firebase の設定（firebaseConfig）
+            <textarea id="gsyncConfigInput" rows="7" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="const firebaseConfig = {&#10;  apiKey: &quot;…&quot;,&#10;  authDomain: &quot;….firebaseapp.com&quot;,&#10;  projectId: &quot;…&quot;,&#10;  …&#10;};"></textarea>
+          </label>
+          <div class="sync-row">
+            <button type="button" id="gsyncConfigSaveBtn" class="primary">設定を保存</button>
+            <button type="button" id="gsyncConfigClearBtn">この端末の設定を消す</button>
+          </div>
+          <p>貼り付けた設定はこの端末にだけ保存されます。リポジトリの <code>firebase-config.js</code> に書いておくと、どの端末でも貼り付けずに「Googleでログイン」だけで使えます。この設定は秘密の情報ではありません（データは上のルールで本人だけに守られます）。</p>
+        </div>
+        <p>無料プラン（Spark）のままで使えます（保存できるのは合計1GBまで。船体モデルは1つ200MBまで）。同期は「更新日時の新しい方が勝つ」方式です。2台で同じ艦を同時に編集した場合は、後で保存した方が残ります。</p>
+      </details>
+
+      <hr class="sync-divider">
+      <h3>ファイルで受け渡し（設定不要）</h3>
       <div class="sync-row">
         <button type="button" id="exportShipsBtn">ファイルに書き出す</button>
         <button type="button" id="importShipsBtn">ファイルから読み込む</button>
         <input type="file" id="importShipsInput" accept=".json,application/json" style="display:none;">
       </div>
       <p class="sync-hint">自作の艦すべて（3Dモデル込み）を1つのファイルにします。別の端末でこの画面から読み込むと、同じ艦が使えます（同じ艦は更新日時の新しい方を残します）。iCloud Drive などで受け渡しできます。</p>
+      <div class="sync-status" id="fileStatus"></div>
 
-      <h3>GitHubで自動同期</h3>
-      <label class="sync-field">同期先のリポジトリ（非公開のもの）
-        <input type="text" id="syncRepo" placeholder="ユーザー名/リポジトリ名" autocapitalize="off" autocomplete="off" spellcheck="false">
-      </label>
-      <label class="sync-field">アクセストークン
-        <input type="password" id="syncToken" placeholder="github_pat_…" autocapitalize="off" autocomplete="off" spellcheck="false">
-      </label>
-      <label class="sync-check"><input type="checkbox" id="syncAuto" checked> 艦を保存したとき・この画面を開いたときに自動で同期する</label>
-      <div class="sync-row">
-        <button type="button" id="syncSaveBtn" class="primary">保存して接続を確認</button>
-        <button type="button" id="syncNowBtn">今すぐ同期</button>
-        <button type="button" id="syncClearBtn">この端末の設定を消す</button>
-      </div>
-      <div class="sync-status" id="syncStatus"></div>
-      <details class="sync-help">
-        <summary>設定のしかた</summary>
+      <details class="sync-help" id="githubSyncSection">
+        <summary>GitHubで同期（別の方法）</summary>
+        <label class="sync-field">同期先のリポジトリ（非公開のもの）
+          <input type="text" id="syncRepo" placeholder="ユーザー名/リポジトリ名" autocapitalize="off" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="sync-field">アクセストークン
+          <input type="password" id="syncToken" placeholder="github_pat_…" autocapitalize="off" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="sync-check"><input type="checkbox" id="syncAuto" checked> 艦を保存したとき・この画面を開いたときに自動で同期する</label>
+        <div class="sync-row">
+          <button type="button" id="syncSaveBtn" class="primary">保存して接続を確認</button>
+          <button type="button" id="syncNowBtn">今すぐ同期</button>
+          <button type="button" id="syncClearBtn">この端末の設定を消す</button>
+        </div>
+        <div class="sync-status" id="ghStatus"></div>
         <ol>
           <li>GitHubで、艦のデータ専用の<b>非公開（Private）</b>リポジトリを作ります（例: <code>space-ship-data</code>。中身は空のままで大丈夫です）。</li>
           <li>GitHubの Settings → Developer settings → Personal access tokens → <b>Fine-grained tokens</b> → Generate new token。
@@ -203,7 +276,7 @@
         </ol>
         <p>トークンはこの端末のブラウザの中にだけ保存され、GitHub以外には送られません。艦のデータは非公開のリポジトリに入るので公開されません。
           なお、同じ <code>github.io</code> のアドレスで動いているほかのページからもブラウザに保存したトークンは読めるため、トークンの権限は必ず上のように「このリポジトリの中身の読み書きだけ」にしてください。</p>
-        <p>同期は「更新日時の新しい方が勝つ」方式です。2台で同じ艦を同時に編集した場合は、後で保存した方が残ります。船体モデルは1つ70MBくらいまで同期できます。</p>
+        <p>同期は「更新日時の新しい方が勝つ」方式です。船体モデルは1つ70MBくらいまで同期できます。Googleアカウントでの同期と両方を設定した場合は、両方と同期します。</p>
       </details>
     </div>
   </section>
@@ -258,6 +331,8 @@
 <script src="01-state-and-config.js"></script>
 <script src="21-ship-design.js"></script>
 <script src="24-sync.js"></script>
+<script src="firebase-config.js"></script>
+<script src="25-google-sync.js"></script>
 <script>
 // =============================================================
 // settings.html 用スクリプト
@@ -442,36 +517,148 @@ function initApplyButton() {
 
 // -------------------------------------------------------------
 // v80: 艦のデータの同期・バックアップ（24-sync.js）
+// v82: Googleアカウントでの同期（25-google-sync.js）を主な方法に。GitHub は「別の方法」
 // -------------------------------------------------------------
-function setSyncStatus(msg, isError) {
-  const el = document.getElementById('syncStatus');
+function setStatusEl(id, msg, isError) {
+  const el = document.getElementById(id);
   el.textContent = msg || '';
   el.classList.toggle('error', !!isError);
 }
+const setSyncStatus = (msg, isError) => setStatusEl('syncStatus', msg, isError); // Googleアカウント
+const setFileStatus = (msg, isError) => setStatusEl('fileStatus', msg, isError);
+const setGhStatus = (msg, isError) => setStatusEl('ghStatus', msg, isError);
 
-async function runSync() {
+async function runProviderSync(provider, setStatus) {
   try {
-    await ShipSync.syncAll((m) => setSyncStatus(m));
-    await renderShipDesignOptions();
+    await provider.syncAll((m) => setStatus(m));
   } catch (e) {
-    setSyncStatus(`同期に失敗しました: ${e.message || e}`, true);
+    setStatus(`同期に失敗しました: ${e.message || e}`, true);
   }
+  // 一部だけ同期できた場合も一覧は新しくする
+  await renderShipDesignOptions();
+}
+
+// 画面を開いたとき・ファイルを読み込んだあと: 自動同期がオンの同期先すべてと
+async function runAutoSync() {
+  if (GoogleSync.isAutoSync()) await runProviderSync(GoogleSync, setSyncStatus);
+  if (GitHubSync.isAutoSync()) await runProviderSync(GitHubSync, setGhStatus);
+}
+
+function refreshGoogleUi() {
+  const $ = (id) => document.getElementById(id);
+  const avail = GoogleSync.isAvailable();
+  const ready = GoogleSync.isReady();
+  const user = GoogleSync.user();
+  $('gsyncSignInBtn').style.display = user ? 'none' : '';
+  $('gsyncSignInBtn').disabled = !avail || !ready;
+  $('gsyncNowBtn').style.display = user ? '' : 'none';
+  $('gsyncSignOutBtn').style.display = user ? '' : 'none';
+  let text;
+  if (!avail) text = 'まだ使えません。下の「最初の準備」をしてください。';
+  else if (!ready) text = 'Googleログインの準備中…';
+  else if (user) text = `ログイン中: ${user.displayName ? `${user.displayName}（${user.email || ''}）` : user.email || 'Googleアカウント'}`;
+  else text = 'この端末はまだログインしていません。';
+  $('gsyncAccount').textContent = text;
+  const site = !!GoogleSync.siteFirebaseConfig();
+  $('gsyncSiteNote').style.display = site ? '' : 'none';
+  $('gsyncConfigBlock').style.display = site ? 'none' : '';
+}
+
+function initGoogleSync() {
+  const $ = (id) => document.getElementById(id);
+  $('gsyncDomain').textContent = location.hostname || 'このサイトのドメイン';
+  $('gsyncRules').textContent = GoogleSync.RULES;
+  $('gsyncAuto').checked = GoogleSync.config().auto;
+  const pasted = GoogleSync.config().firebase;
+  if (pasted) $('gsyncConfigInput').value = JSON.stringify(pasted, null, 2);
+  if (!GoogleSync.isAvailable()) $('gsyncSetup').open = true;
+  GoogleSync.onChange(() => refreshGoogleUi());
+  refreshGoogleUi();
+  const lastSync = GoogleSync.config().lastSyncAt;
+  if (lastSync) setSyncStatus(`前回の同期: ${new Date(lastSync).toLocaleString('ja-JP')}`);
+
+  // ログイン用の画面（ポップアップ）は、押したその場で開く必要がある
+  $('gsyncSignInBtn').addEventListener('click', () => {
+    setSyncStatus('ログイン中…');
+    GoogleSync.signIn().then((u) => {
+      setSyncStatus(`${u.email || 'Googleアカウント'} でログインしました。同期します…`);
+      return runProviderSync(GoogleSync, setSyncStatus);
+    }).catch((e) => setSyncStatus(e.message || String(e), true));
+  });
+  $('gsyncNowBtn').addEventListener('click', () => runProviderSync(GoogleSync, setSyncStatus));
+  $('gsyncSignOutBtn').addEventListener('click', async () => {
+    if (!confirm('この端末でGoogleアカウントからログアウトしますか？（この端末の艦のデータは消えません）')) return;
+    await GoogleSync.signOut();
+    setSyncStatus('ログアウトしました。');
+  });
+  $('gsyncAuto').addEventListener('change', () => GoogleSync.saveConfig({ auto: $('gsyncAuto').checked }));
+  $('gsyncCopyRulesBtn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(GoogleSync.RULES);
+      setSyncStatus('ルールをコピーしました。Firestore の「ルール」タブに貼り付けて「公開」してください。');
+    } catch (e) {
+      const range = document.createRange();
+      range.selectNodeContents($('gsyncRules'));
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      setSyncStatus('自動でコピーできなかったので、ルールを選択しました。「コピー」を押してください。', true);
+    }
+  });
+  $('gsyncConfigSaveBtn').addEventListener('click', async () => {
+    let cfg;
+    try {
+      cfg = GoogleSync.parseFirebaseConfig($('gsyncConfigInput').value);
+    } catch (e) {
+      setSyncStatus(e.message, true);
+      return;
+    }
+    GoogleSync.saveConfig({ firebase: cfg });
+    $('gsyncConfigInput').value = JSON.stringify(cfg, null, 2);
+    setSyncStatus(`Firebase の設定を保存しました（プロジェクト: ${cfg.projectId}）。準備しています…`);
+    try {
+      await GoogleSync.reset();
+      await GoogleSync.init();
+      setSyncStatus(GoogleSync.isSignedIn() ? '準備ができました。' : '準備ができました。「Googleでログイン」を押してください。');
+    } catch (e) {
+      setSyncStatus(`Googleログインの準備に失敗しました: ${e.message || e}`, true);
+    }
+    refreshGoogleUi();
+  });
+  $('gsyncConfigClearBtn').addEventListener('click', async () => {
+    if (!confirm('この端末に貼り付けた Firebase の設定を消しますか？（ログアウトします。艦のデータは消えません）')) return;
+    try { await GoogleSync.signOut(); } catch (e) { /* ignore */ }
+    await GoogleSync.reset();
+    GoogleSync.saveConfig({ firebase: null, lastSyncAt: 0 });
+    $('gsyncConfigInput').value = '';
+    refreshGoogleUi();
+    setSyncStatus('Firebase の設定を消しました。');
+  });
+
+  if (!GoogleSync.isAvailable()) return Promise.resolve();
+  return GoogleSync.init().then(() => refreshGoogleUi()).catch((e) => {
+    refreshGoogleUi();
+    setSyncStatus(`Googleログインの準備に失敗しました: ${e.message || e}`, true);
+  });
 }
 
 function initSyncUi() {
-  const c = ShipSync.config();
+  const c = GitHubSync.config();
   document.getElementById('syncRepo').value = c.repo;
   document.getElementById('syncToken').value = c.token;
   document.getElementById('syncAuto').checked = c.auto;
-  if (c.lastSyncAt) setSyncStatus(`前回の同期: ${new Date(c.lastSyncAt).toLocaleString('ja-JP')}`);
+  if (GitHubSync.isConfigured()) {
+    document.getElementById('githubSyncSection').open = true;
+    if (c.lastSyncAt) setGhStatus(`前回の同期: ${new Date(c.lastSyncAt).toLocaleString('ja-JP')}`);
+  }
 
   document.getElementById('exportShipsBtn').addEventListener('click', async () => {
     try {
-      setSyncStatus('書き出し中…');
+      setFileStatus('書き出し中…');
       const r = await ShipSync.exportAll();
-      setSyncStatus(`${r.count}隻を「${r.name}」に書き出しました（${(r.bytes / 1e6).toFixed(1)}MB）。`);
+      setFileStatus(`${r.count}隻を「${r.name}」に書き出しました（${(r.bytes / 1e6).toFixed(1)}MB）。`);
     } catch (e) {
-      setSyncStatus(`書き出しに失敗しました: ${e.message || e}`, true);
+      setFileStatus(`書き出しに失敗しました: ${e.message || e}`, true);
     }
   });
   const input = document.getElementById('importShipsInput');
@@ -481,49 +668,50 @@ function initSyncUi() {
     input.value = '';
     if (!f) return;
     try {
-      setSyncStatus('読み込み中…');
+      setFileStatus('読み込み中…');
       const r = await ShipSync.importFile(f);
       await renderShipDesignOptions();
-      setSyncStatus(`読み込みました（新しく追加${r.added}隻・更新${r.updated}隻・この端末の方が新しいので変更なし${r.skipped}隻）。`);
-      if (ShipSync.isAutoSync()) runSync();
+      setFileStatus(`読み込みました（新しく追加${r.added}隻・更新${r.updated}隻・この端末の方が新しいので変更なし${r.skipped}隻）。`);
+      runAutoSync();
     } catch (e) {
-      setSyncStatus(`読み込みに失敗しました: ${e.message || e}`, true);
+      setFileStatus(`読み込みに失敗しました: ${e.message || e}`, true);
     }
   });
 
   document.getElementById('syncSaveBtn').addEventListener('click', async () => {
-    ShipSync.saveConfig({
+    GitHubSync.saveConfig({
       repo: document.getElementById('syncRepo').value.trim().replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, ''),
       token: document.getElementById('syncToken').value.trim(),
       auto: document.getElementById('syncAuto').checked,
     });
-    document.getElementById('syncRepo').value = ShipSync.config().repo;
-    if (!ShipSync.isConfigured()) { setSyncStatus('リポジトリ名（ユーザー名/リポジトリ名）とトークンを入れてください。', true); return; }
+    document.getElementById('syncRepo').value = GitHubSync.config().repo;
+    if (!GitHubSync.isConfigured()) { setGhStatus('リポジトリ名（ユーザー名/リポジトリ名）とトークンを入れてください。', true); return; }
     try {
-      setSyncStatus('接続を確認中…');
-      const r = await ShipSync.testConnection();
-      setSyncStatus(`接続できました（${r.name}${r.private ? '・非公開' : '・公開リポジトリです！非公開にすることをおすすめします'}）。同期します…`, !r.private);
-      await runSync();
+      setGhStatus('接続を確認中…');
+      const r = await GitHubSync.testConnection();
+      setGhStatus(`接続できました（${r.name}${r.private ? '・非公開' : '・公開リポジトリです！非公開にすることをおすすめします'}）。同期します…`, !r.private);
+      await runProviderSync(GitHubSync, setGhStatus);
     } catch (e) {
-      setSyncStatus(`接続できませんでした: ${e.message || e}`, true);
+      setGhStatus(`接続できませんでした: ${e.message || e}`, true);
     }
   });
   document.getElementById('syncAuto').addEventListener('change', () => {
-    ShipSync.saveConfig({ auto: document.getElementById('syncAuto').checked });
+    GitHubSync.saveConfig({ auto: document.getElementById('syncAuto').checked });
   });
   document.getElementById('syncNowBtn').addEventListener('click', () => {
-    if (!ShipSync.isConfigured()) { setSyncStatus('先にリポジトリとトークンを設定してください。', true); return; }
-    runSync();
+    if (!GitHubSync.isConfigured()) { setGhStatus('先にリポジトリとトークンを設定してください。', true); return; }
+    runProviderSync(GitHubSync, setGhStatus);
   });
   document.getElementById('syncClearBtn').addEventListener('click', () => {
     if (!confirm('この端末に保存した同期の設定（リポジトリ名・トークン）を消しますか？（艦のデータは消えません）')) return;
-    ShipSync.saveConfig({ repo: '', token: '', lastSyncAt: 0 });
+    GitHubSync.saveConfig({ repo: '', token: '', lastSyncAt: 0 });
     document.getElementById('syncRepo').value = '';
     document.getElementById('syncToken').value = '';
-    setSyncStatus('同期の設定を消しました。');
+    setGhStatus('同期の設定を消しました。');
   });
 
-  if (ShipSync.isAutoSync()) runSync();
+  // Googleのログイン状態がわかってから、自動同期がオンの同期先と同期する
+  initGoogleSync().then(() => runAutoSync());
 }
 
 renderShipClassOptions();
