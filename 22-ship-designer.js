@@ -1024,12 +1024,19 @@
     $('saveAndFlyBtn').disabled = true;
     core.setStatus('保存中…');
     try {
+      // v80: モデルを変えたら版を更新（端末間の同期で、モデルを送り直すかの判断に使う）
+      if (modelDirty) design.hull.modelRev = modelData ? generateShipDesignId() : null;
       await saveShipDesign(design);
       if (modelDirty) await saveShipDesignModel(design.id, modelData);
       dirty = false;
       modelDirty = false;
       core.setStatus(`「${design.name}」を保存しました。`);
       await refreshDesignList();
+      // v80: 自動同期がオンなら、この設計を同期先へ送る（失敗しても保存自体は済んでいる）
+      if (typeof ShipSync !== 'undefined' && ShipSync.isAutoSync()) {
+        ShipSync.syncAll((msg) => core.setStatus(`「${design.name}」を保存しました。${msg}`))
+          .catch((e) => core.setStatus(`「${design.name}」を保存しました（同期に失敗: ${e.message || e}）`, true));
+      }
       return true;
     } catch (e) {
       console.error(e);

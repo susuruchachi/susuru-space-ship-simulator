@@ -108,6 +108,40 @@
     color: #dfefff;
     border: 1px solid rgba(255,255,255,0.2);
   }
+  /* v80: 艦のデータの同期 */
+  .sync-box { padding: 12px 14px; border-radius: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.12); }
+  .sync-box h3 { font-size: 13px; margin: 14px 0 8px; color: #dfefff; }
+  .sync-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+  .sync-row button {
+    flex: 1 1 auto;
+    padding: 10px 8px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.2);
+    background: rgba(255,255,255,0.06);
+    color: #dfefff;
+    font-size: 12px;
+  }
+  .sync-row button.primary { background: #3a8fd6; border-color: #3a8fd6; color: #fff; }
+  .sync-field { display: block; font-size: 12px; color: #9fb3c8; margin: 8px 0; }
+  .sync-field input {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    margin-top: 4px;
+    padding: 9px 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.2);
+    background: rgba(0,0,0,0.3);
+    color: #dfefff;
+    font-size: 14px;
+  }
+  .sync-check { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #9fb3c8; margin: 8px 0; }
+  .sync-hint { font-size: 11px; color: rgba(159,179,200,0.8); line-height: 1.6; margin: 4px 0; }
+  .sync-status { font-size: 12px; color: #9fd8ff; min-height: 16px; margin-top: 6px; line-height: 1.5; }
+  .sync-status.error { color: #ff9d9d; }
+  .sync-help { font-size: 12px; color: #c9d8e8; margin-top: 10px; line-height: 1.7; }
+  .sync-help summary { cursor: pointer; color: #9fd8ff; }
+  .sync-help code { background: rgba(255,255,255,0.08); padding: 1px 4px; border-radius: 4px; }
 </style>
 </head>
 <body>
@@ -132,6 +166,46 @@
       <div class="title">ドッキングポート設定</div>
       <div class="desc">入港先（ドッキングポート）の位置・向きを複数保存しておき、使うポートを選んで自動操船の目的地に設定します。</div>
     </a>
+  </section>
+
+  <section>
+    <h2>艦のデータ（端末間の同期・バックアップ）</h2>
+    <div class="sync-box">
+      <div class="sync-row">
+        <button type="button" id="exportShipsBtn">ファイルに書き出す</button>
+        <button type="button" id="importShipsBtn">ファイルから読み込む</button>
+        <input type="file" id="importShipsInput" accept=".json,application/json" style="display:none;">
+      </div>
+      <p class="sync-hint">自作の艦すべて（3Dモデル込み）を1つのファイルにします。別の端末でこの画面から読み込むと、同じ艦が使えます（同じ艦は更新日時の新しい方を残します）。iCloud Drive などで受け渡しできます。</p>
+
+      <h3>GitHubで自動同期</h3>
+      <label class="sync-field">同期先のリポジトリ（非公開のもの）
+        <input type="text" id="syncRepo" placeholder="ユーザー名/リポジトリ名" autocapitalize="off" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="sync-field">アクセストークン
+        <input type="password" id="syncToken" placeholder="github_pat_…" autocapitalize="off" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="sync-check"><input type="checkbox" id="syncAuto" checked> 艦を保存したとき・この画面を開いたときに自動で同期する</label>
+      <div class="sync-row">
+        <button type="button" id="syncSaveBtn" class="primary">保存して接続を確認</button>
+        <button type="button" id="syncNowBtn">今すぐ同期</button>
+        <button type="button" id="syncClearBtn">この端末の設定を消す</button>
+      </div>
+      <div class="sync-status" id="syncStatus"></div>
+      <details class="sync-help">
+        <summary>設定のしかた</summary>
+        <ol>
+          <li>GitHubで、艦のデータ専用の<b>非公開（Private）</b>リポジトリを作ります（例: <code>space-ship-data</code>。中身は空のままで大丈夫です）。</li>
+          <li>GitHubの Settings → Developer settings → Personal access tokens → <b>Fine-grained tokens</b> → Generate new token。
+            「Repository access」は <b>Only select repositories</b> で、1.のリポジトリだけを選びます。
+            「Permissions」の Repository permissions で <b>Contents</b> を <b>Read and write</b> にします。有効期限も選べます。</li>
+          <li>作成されたトークン（<code>github_pat_</code> で始まる文字列）を、同期したい端末ごとにこの画面に貼り付け、リポジトリ名（例: <code>ユーザー名/space-ship-data</code>）を入れて「保存して接続を確認」を押します。</li>
+        </ol>
+        <p>トークンはこの端末のブラウザの中にだけ保存され、GitHub以外には送られません。艦のデータは非公開のリポジトリに入るので公開されません。
+          なお、同じ <code>github.io</code> のアドレスで動いているほかのページからもブラウザに保存したトークンは読めるため、トークンの権限は必ず上のように「このリポジトリの中身の読み書きだけ」にしてください。</p>
+        <p>同期は「更新日時の新しい方が勝つ」方式です。2台で同じ艦を同時に編集した場合は、後で保存した方が残ります。船体モデルは1つ70MBくらいまで同期できます。</p>
+      </details>
+    </div>
   </section>
 
   <section>
@@ -183,6 +257,7 @@
 
 <script src="01-state-and-config.js"></script>
 <script src="21-ship-design.js"></script>
+<script src="24-sync.js"></script>
 <script>
 // =============================================================
 // settings.html 用スクリプト
@@ -365,9 +440,96 @@ function initApplyButton() {
   });
 }
 
+// -------------------------------------------------------------
+// v80: 艦のデータの同期・バックアップ（24-sync.js）
+// -------------------------------------------------------------
+function setSyncStatus(msg, isError) {
+  const el = document.getElementById('syncStatus');
+  el.textContent = msg || '';
+  el.classList.toggle('error', !!isError);
+}
+
+async function runSync() {
+  try {
+    await ShipSync.syncAll((m) => setSyncStatus(m));
+    await renderShipDesignOptions();
+  } catch (e) {
+    setSyncStatus(`同期に失敗しました: ${e.message || e}`, true);
+  }
+}
+
+function initSyncUi() {
+  const c = ShipSync.config();
+  document.getElementById('syncRepo').value = c.repo;
+  document.getElementById('syncToken').value = c.token;
+  document.getElementById('syncAuto').checked = c.auto;
+  if (c.lastSyncAt) setSyncStatus(`前回の同期: ${new Date(c.lastSyncAt).toLocaleString('ja-JP')}`);
+
+  document.getElementById('exportShipsBtn').addEventListener('click', async () => {
+    try {
+      setSyncStatus('書き出し中…');
+      const r = await ShipSync.exportAll();
+      setSyncStatus(`${r.count}隻を「${r.name}」に書き出しました（${(r.bytes / 1e6).toFixed(1)}MB）。`);
+    } catch (e) {
+      setSyncStatus(`書き出しに失敗しました: ${e.message || e}`, true);
+    }
+  });
+  const input = document.getElementById('importShipsInput');
+  document.getElementById('importShipsBtn').addEventListener('click', () => input.click());
+  input.addEventListener('change', async () => {
+    const f = input.files[0];
+    input.value = '';
+    if (!f) return;
+    try {
+      setSyncStatus('読み込み中…');
+      const r = await ShipSync.importFile(f);
+      await renderShipDesignOptions();
+      setSyncStatus(`読み込みました（新しく追加${r.added}隻・更新${r.updated}隻・この端末の方が新しいので変更なし${r.skipped}隻）。`);
+      if (ShipSync.isAutoSync()) runSync();
+    } catch (e) {
+      setSyncStatus(`読み込みに失敗しました: ${e.message || e}`, true);
+    }
+  });
+
+  document.getElementById('syncSaveBtn').addEventListener('click', async () => {
+    ShipSync.saveConfig({
+      repo: document.getElementById('syncRepo').value.trim().replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, ''),
+      token: document.getElementById('syncToken').value.trim(),
+      auto: document.getElementById('syncAuto').checked,
+    });
+    document.getElementById('syncRepo').value = ShipSync.config().repo;
+    if (!ShipSync.isConfigured()) { setSyncStatus('リポジトリ名（ユーザー名/リポジトリ名）とトークンを入れてください。', true); return; }
+    try {
+      setSyncStatus('接続を確認中…');
+      const r = await ShipSync.testConnection();
+      setSyncStatus(`接続できました（${r.name}${r.private ? '・非公開' : '・公開リポジトリです！非公開にすることをおすすめします'}）。同期します…`, !r.private);
+      await runSync();
+    } catch (e) {
+      setSyncStatus(`接続できませんでした: ${e.message || e}`, true);
+    }
+  });
+  document.getElementById('syncAuto').addEventListener('change', () => {
+    ShipSync.saveConfig({ auto: document.getElementById('syncAuto').checked });
+  });
+  document.getElementById('syncNowBtn').addEventListener('click', () => {
+    if (!ShipSync.isConfigured()) { setSyncStatus('先にリポジトリとトークンを設定してください。', true); return; }
+    runSync();
+  });
+  document.getElementById('syncClearBtn').addEventListener('click', () => {
+    if (!confirm('この端末に保存した同期の設定（リポジトリ名・トークン）を消しますか？（艦のデータは消えません）')) return;
+    ShipSync.saveConfig({ repo: '', token: '', lastSyncAt: 0 });
+    document.getElementById('syncRepo').value = '';
+    document.getElementById('syncToken').value = '';
+    setSyncStatus('同期の設定を消しました。');
+  });
+
+  if (ShipSync.isAutoSync()) runSync();
+}
+
 renderShipClassOptions();
 renderShipDesignOptions();
 updateShipBuilderLink();
+initSyncUi();
 initCapModeOptions();
 initDebugToggle();
 initRcsCapSlider();

@@ -576,9 +576,11 @@ async function loadShipDesign(id) {
   }
 }
 
-async function saveShipDesign(design) {
-  design.updatedAt = Date.now();
+// opts.keepTimestamp: 更新日時を書き換えない（同期で他の端末の設計を取り込むとき）
+async function saveShipDesign(design, opts) {
+  if (!(opts && opts.keepTimestamp)) design.updatedAt = Date.now();
   await _shipDesignTx('designs', 'readwrite', (s) => s.put(JSON.parse(JSON.stringify(design))));
+  forgetShipDesignTombstone(design.id);
 }
 
 async function loadShipDesignModel(id) {
@@ -594,7 +596,33 @@ async function saveShipDesignModel(id, model) {
   await _shipDesignTx('models', 'readwrite', (s) => (model ? s.put(model, id) : s.delete(id)));
 }
 
-async function deleteShipDesign(id) {
+// opts.noTombstone: 削除の記録を残さない（同期で他の端末の削除を反映するとき）
+async function deleteShipDesign(id, opts) {
   await _shipDesignTx('designs', 'readwrite', (s) => s.delete(id));
   await _shipDesignTx('models', 'readwrite', (s) => s.delete(id));
+  if (!(opts && opts.noTombstone)) recordShipDesignTombstone(id);
+}
+
+// -------------------------------------------------------------
+// v80: 削除の記録（端末間の同期用）。消した設計が、まだ消していない別の端末から
+// 同期で戻ってこないよう、「いつ消したか」を残しておく。
+// -------------------------------------------------------------
+const SHIP_DESIGN_TOMBSTONE_KEY = 'spaceSimDesignTombstones';
+function loadShipDesignTombstones() {
+  try {
+    return JSON.parse(localStorage.getItem(SHIP_DESIGN_TOMBSTONE_KEY) || '{}') || {};
+  } catch (e) {
+    return {};
+  }
+}
+function recordShipDesignTombstone(id) {
+  const t = loadShipDesignTombstones();
+  t[id] = Date.now();
+  try { localStorage.setItem(SHIP_DESIGN_TOMBSTONE_KEY, JSON.stringify(t)); } catch (e) {}
+}
+function forgetShipDesignTombstone(id) {
+  const t = loadShipDesignTombstones();
+  if (!(id in t)) return;
+  delete t[id];
+  try { localStorage.setItem(SHIP_DESIGN_TOMBSTONE_KEY, JSON.stringify(t)); } catch (e) {}
 }
