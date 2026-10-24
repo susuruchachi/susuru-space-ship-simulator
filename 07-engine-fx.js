@@ -27,7 +27,7 @@ const EngineFx = {
   // v81: 主エンジンを複数持てる自作の艦のため、主エンジン用は多めに確保
   // （1基あたりの量は _spawnThrustFx で基数に応じて減らす）
   MAX_MAIN_PARTICLES: 1800,
-  MAX_RCS_PARTICLES: 400,
+  MAX_RCS_PARTICLES: 1200,
 
   _mainPool: null, // { points, geometry, particles: [...] }
   _rcsPool: null,
@@ -53,6 +53,42 @@ const EngineFx = {
 
     scene.add(this._mainPool.points);
     scene.add(this._rcsPool.points);
+
+    // v85: 主エンジン・逆噴射の炎（27-engine-plumes.js。機関の種類ごとの形）
+    this._plumeRoot = new THREE.Group();
+    scene.add(this._plumeRoot);
+  },
+
+  _plumeRoot: null,
+  _plumes: new Map(),   // スラスターID → { plume, thruster }
+  _plumeThrusters: null,
+  _time: 0,
+
+  // 艦のスラスター構成が変わったら炎を作り直す
+  _syncPlumes(ship) {
+    if (this._plumeThrusters === ship.thrusters) return;
+    this._plumeThrusters = ship.thrusters;
+    for (const { plume } of this._plumes.values()) {
+      this._plumeRoot.remove(plume.object);
+      plume.dispose();
+    }
+    this._plumes.clear();
+    if (typeof EnginePlumes === 'undefined') return;
+    const fx = ship.fxScale || 1;
+    let mainCount = 0;
+    for (const t of ship.thrusters) if (t.kind === 'main') mainCount++;
+    for (const t of ship.thrusters) {
+      if (t.kind !== 'main' && !(t.nozzleDiameter > 0)) continue;
+      const plume = EnginePlumes.create(t.engineType);
+      // ノズルの直径（艦種プリセットは自作の艦の自動の直径と同じ決め方）
+      const dia = t.nozzleDiameter > 0 ? t.nozzleDiameter : 0.9 * Math.pow(fx, 0.85) / Math.sqrt(Math.max(1, mainCount));
+      const dir = vecNormalize(t.direction);
+      plume.object.position.set(t.position.x, t.position.y, t.position.z);
+      plume.object.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(dir.x, dir.y, dir.z));
+      plume.object.scale.setScalar(dia);
+      this._plumeRoot.add(plume.object);
+      this._plumes.set(t.id, { plume, thruster: t });
+    }
   },
 
   _createPool(maxCount, { color, baseSize }) {
@@ -148,6 +184,13 @@ const EngineFx = {
       pool.points.quaternion.set(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w);
     }
 
+    this._time += dt;
+    this._syncPlumes(ship);
+    this._plumeRoot.position.set(ship.position.x, ship.position.y, ship.position.z);
+    this._plumeRoot.quaternion.set(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w);
+    const ratios = ship.fxOutputRatios || ship.thrusterOutputRatios;
+    for (const [id, { plume }] of this._plumes) plume.update(ratios[id] ?? 0, this._time);
+
     this._spawnThrustFx(ship, dt);
 
     this._stepPool(this._mainPool, dt);
@@ -186,6 +229,8 @@ const EngineFx = {
       // v85: soft-glow で速度が頭打ちのときは見た目だけの出力（04-flight-physics.js _softGlowFx）
       const ratio = (ship.fxOutputRatios || ship.thrusterOutputRatios)[t.id] ?? 0;
       if (ratio <= 0.01) continue;
+      // v85: 炎の形（27-engine-plumes.js）で描くエンジンは粒子を出さない
+      if (this._plumes.has(t.id)) continue;
 
       const isMain = t.kind === 'main';
       // v84: ノズルの直径を持つもの（自作の艦の主エンジン・逆噴射）は、エンジンの噴射
@@ -207,9 +252,12 @@ const EngineFx = {
       }
 
       // 出力比に応じてスポーン数を可変（多いほど濃い噴射に見える）
+      // v85: 姿勢スラスターは、1フレームに進む距離が粒の大きさより長くても粒が
+      // とぎれとぎれ（点の列）に見えないよう、間が空かない数だけ出す
+      const rcsGapFill = Math.min(16, Math.ceil((8 * fx * dt) / Math.max(1e-3, 0.5 * rcsSizeFx * L)));
       const spawnCount = isMain
         ? Math.round(ratio * 14 * mainDensity)
-        : isRetroEngine ? Math.round(ratio * 10 * retroDensity) : Math.round(ratio * 6);
+        : isRetroEngine ? Math.round(ratio * 10 * retroDensity) : Math.max(Math.round(ratio * 6), Math.round(rcsGapFill * Math.min(1, ratio * 3)));
 
       for (let i = 0; i < spawnCount; i++) {
         const p = this._acquireParticle(pool);

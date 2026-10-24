@@ -129,9 +129,10 @@ function createShipDesign(baseClass, name) {
     cog: { x: 0, y: 0, z: 0 },
     // v81: 主エンジンは複数持てる（初期は艦尾の中央に1基）
     // v84: diameter はノズルの直径 [m]（null なら大きさから自動で決める。噴射の太さ・長さに使う）
-    mains: [{ id: 'm1', position: { x: 0, y: 0, z: dims.z / 2 }, thrust: auto.mainThrust, diameter: null }],
+    // v85: engineType は機関の種類（27-engine-plumes.js ENGINE_TYPES。噴射の見た目）
+    mains: [{ id: 'm1', position: { x: 0, y: 0, z: dims.z / 2 }, thrust: auto.mainThrust, diameter: null, engineType: 'rocket' }],
     // v84: 逆噴射のノズルは船体の表面の好きな位置に置ける（推力は全ノズルで等分）
-    retro: { thrust: auto.retroThrust, nozzles: defaultRetroNozzles(dims, { x: 0, y: 0, z: 0 }), custom: false },
+    retro: { thrust: auto.retroThrust, nozzles: defaultRetroNozzles(dims, { x: 0, y: 0, z: 0 }), custom: false, engineType: 'rocket' },
     rcs: { thrust: auto.rcsThrust, pods: defaultRcsPodsForBox(dims) },
     maxSpeed: auto.maxSpeed,       // v85: null なら速度は無制限
     maxAccel: null,                // v85: 最大加速度 [m/s²]（null なら推力のまま）
@@ -154,6 +155,11 @@ function defaultRcsPodsForBox(dims) {
     pods.push({ position: { x: -hx, y: 0, z }, normal: { x: -1, y: 0, z: 0 } });
   }
   return pods.map((p, i) => ({ id: `p${i + 1}`, ...p }));
+}
+
+// v85: 機関の種類（27-engine-plumes.js が無い画面でも壊れないよう、ここでも確かめる）
+function shipEngineType(t) {
+  return ['rocket', 'nuclear', 'gravity3', 'gwave'].includes(t) ? t : 'rocket';
 }
 
 // v84: 逆噴射ノズルの初期配置（v83までの固定位置と同じ）: 艦首の面の、重心をはさんだ左右対称の2か所
@@ -180,13 +186,18 @@ function shipDesignNozzleDiameter(d, part, kind) {
   return part && part.diameter > 0 ? part.diameter : shipDesignAutoNozzleDiameter(d, kind);
 }
 // v84: 全開のときの噴射のおよその太さ・長さ [m]（設定画面の表示用）。
-// 07-engine-fx.js の粒子の大きさ（直径の約1.3倍）・速さ・寿命・減衰から見積もった値
+// v85: 機関の種類ごとの炎の形（27-engine-plumes.js）の大きさ
+const SHIP_ENGINE_PLUME_SHAPE = {
+  rocket: { length: 7, width: 3.2 },
+  nuclear: { length: 8, width: 2.3 },
+  gravity3: { length: 6, width: 1 },
+  gwave: { length: 16, width: 1.3 },
+};
 function shipDesignPlumeEstimate(d, part, kind) {
   const dia = shipDesignNozzleDiameter(d, part, kind);
-  const size = Math.max(d.hull.dims.x, d.hull.dims.y, d.hull.dims.z);
-  const lenFx = Math.max(1, size / 8) * dia / shipDesignAutoNozzleDiameter(d, kind);
-  const length = 8.8 * lenFx * (kind === 'retro' ? 0.6 : 1);
-  return { diameter: dia, width: dia * 1.3, length, endWidth: dia * 1.3 + length * 0.1 };
+  const type = shipEngineType(kind === 'retro' ? d.retro && d.retro.engineType : part && part.engineType);
+  const sh = SHIP_ENGINE_PLUME_SHAPE[type];
+  return { diameter: dia, width: dia * sh.width, length: dia * sh.length, engineType: type };
 }
 
 // 主エンジンの推力の合計と、推力の中心（推力で重み付けした噴射口の平均位置）。
@@ -219,6 +230,7 @@ function normalizeShipDesign(d) {
     position: { x: Number(e.position.x) || 0, y: Number(e.position.y) || 0, z: Number(e.position.z) || 0 },
     thrust: Math.max(0, Number(e.thrust) || 0),
     diameter: Number(e.diameter) > 0 ? Number(e.diameter) : null,
+    engineType: shipEngineType(e.engineType),
   }));
   out.mains = mains.length ? mains : base.mains;
   delete out.main;
@@ -228,6 +240,7 @@ function normalizeShipDesign(d) {
     out.retro.nozzles = defaultRetroNozzles(out.hull.dims, { ...base.cog, ...(d.cog || {}) });
     out.retro.custom = false;
   }
+  out.retro.engineType = shipEngineType(out.retro.engineType);
   out.retro.nozzles = out.retro.nozzles.filter((n) => n && n.position).map((n, i) => ({
     id: n.id || `r${i + 1}`,
     position: { x: Number(n.position.x) || 0, y: Number(n.position.y) || 0, z: Number(n.position.z) || 0 },
@@ -287,7 +300,7 @@ function buildShipSpecFromDesign(design) {
     const dia = shipDesignNozzleDiameter(d, e, 'main');
     thrusters.push({
       id: `main_${e.id}`, position: P(e.position), direction: { x: 0, y: 0, z: 1 },
-      maxThrust: Math.max(0, e.thrust), kind: 'main',
+      maxThrust: Math.max(0, e.thrust), kind: 'main', engineType: e.engineType,
       nozzleDiameter: dia, plumeScale: dia / shipDesignAutoNozzleDiameter(d, 'main'),
     });
   }
@@ -299,7 +312,7 @@ function buildShipSpecFromDesign(design) {
     const dia = shipDesignNozzleDiameter(d, n, 'retro');
     thrusters.push({
       id: `retro_${n.id}`, position: P(n.position), direction: { x: 0, y: 0, z: -1 },
-      maxThrust: d.retro.thrust / retroNozzles.length, kind: 'rcs',
+      maxThrust: d.retro.thrust / retroNozzles.length, kind: 'rcs', engineType: d.retro.engineType,
       nozzleDiameter: dia, plumeScale: dia / shipDesignAutoNozzleDiameter(d, 'retro'),
     });
   }

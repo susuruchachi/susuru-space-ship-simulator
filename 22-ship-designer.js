@@ -157,13 +157,12 @@
     mouth.add(disc, ring);
     mouth.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(dir.x, dir.y, dir.z).normalize());
     g.add(mouth);
-    const L = plume.length;
-    const geo = new THREE.CylinderGeometry(plume.width / 2, plume.endWidth / 2, L, 24, 1, true);
-    const flame = new THREE.Mesh(geo, plumeMat);
-    flame.position.set(dir.x * L / 2, dir.y * L / 2, dir.z * L / 2);
-    flame.quaternion.setFromUnitVectors(new THREE.Vector3(0, -1, 0), new THREE.Vector3(dir.x, dir.y, dir.z).normalize());
-    flame.renderOrder = 8;
-    g.add(flame);
+    // v85: 全開のときの炎（機関の種類ごとの形。27-engine-plumes.js）
+    const fl = EnginePlumes.create(plume.engineType);
+    fl.update(1, 0.4);
+    fl.object.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(dir.x, dir.y, dir.z).normalize());
+    fl.object.scale.setScalar(plume.diameter);
+    g.add(fl.object);
     g.position.set(pos.x, pos.y, pos.z);
     return g;
   }
@@ -206,7 +205,7 @@
       g.add(hit);
       g.position.set(e.position.x, e.position.y, e.position.z);
       markers.add(g);
-      markers.add(nozzleMouth(e.position, { x: 0, y: 0, z: 1 }, shipDesignPlumeEstimate(design, e, 'main'), MAT.mainMouth, MAT.mainPlume));
+      markers.add(nozzleMouth(e.position, { x: 0, y: 0, z: 1 }, { ...shipDesignPlumeEstimate(design, e, 'main'), engineType: e.engineType }, MAT.mainMouth, MAT.mainPlume));
     }
     const tc = shipDesignThrustCenter(design);
     markers.add(lineMesh([
@@ -231,7 +230,7 @@
       g.position.set(n.position.x, n.position.y, n.position.z);
       markers.add(g);
       if (design.retro.thrust > 0) {
-        markers.add(nozzleMouth(n.position, { x: 0, y: 0, z: -1 }, shipDesignPlumeEstimate(design, n, 'retro'), MAT.retroMouth, MAT.retroPlume));
+        markers.add(nozzleMouth(n.position, { x: 0, y: 0, z: -1 }, { ...shipDesignPlumeEstimate(design, n, 'retro'), engineType: design.retro.engineType }, MAT.retroMouth, MAT.retroPlume));
       }
     }
 
@@ -803,6 +802,7 @@
     cogPos.sync(1.3);
     $('cogGizmoBtn').classList.toggle('active', !!(active && active.kind === 'cog'));
     renderPodList();
+    $('retroEngineType').value = design.retro.engineType || 'rocket';
     renderRetroList();
     schedulePerf();
   }
@@ -831,6 +831,7 @@
       const i = design.mains.indexOf(sel);
       $('mainEditorTitle').textContent = design.mains.length > 1 ? `${i + 1}基目（${mainSideLabel(sel)}）` : '主エンジン（1基）';
       syncDiameterField($('mainDiaInput'), $('mainDiaLine'), sel, 'main');
+      $('mainEngineType').value = sel.engineType || 'rocket';
       mainPos.sync(1.5);
     }
   }
@@ -841,7 +842,7 @@
     input.placeholder = `自動（${inputValue(auto)}）`;
     if (document.activeElement !== input) input.value = part.diameter > 0 ? inputValue(part.diameter) : '';
     const p = shipDesignPlumeEstimate(design, part, kind);
-    line.textContent = `ノズルの口 Ø${fmtLen(p.diameter)}${part.diameter > 0 ? '' : '（自動）'}・全開の噴射は太さ 約${fmtLen(p.width)}、長さ 約${fmtLen(p.length)}（ビューの半透明の炎）`;
+    line.textContent = `ノズルの口 Ø${fmtLen(p.diameter)}${part.diameter > 0 ? '' : '（自動）'}・全開の噴射は太さ 約${fmtLen(p.width)}、長さ 約${fmtLen(p.length)}（ビューの炎）`;
   }
   function diameterFromInput(input) {
     const v = Number(input.value);
@@ -1143,6 +1144,7 @@
       position: { x, y, z: base.z },
       thrust: src ? src.thrust : shipDesignAutoSpec(design.baseClass, design.hull.size).mainThrust,
       diameter: src ? src.diameter : null,
+      engineType: src ? src.engineType : 'rocket',
     };
     design.mains.push(e);
     setActive('main', e.id);
@@ -1277,6 +1279,24 @@
     const e = selectedMain();
     if (!e) return;
     e.diameter = diameterFromInput($('mainDiaInput'));
+    onPhysicsEdit();
+  });
+  // v85: 機関の種類
+  $('mainEngineType').addEventListener('change', () => {
+    const e = selectedMain();
+    if (!e) return;
+    e.engineType = shipEngineType($('mainEngineType').value);
+    onPhysicsEdit();
+  });
+  $('mainTypeAllBtn').addEventListener('click', () => {
+    const e = selectedMain();
+    if (!e) return;
+    for (const m of design.mains) m.engineType = e.engineType;
+    onPhysicsEdit();
+    core.setStatus(`主エンジン${design.mains.length}基を「${ENGINE_TYPES[e.engineType].label}」にしました。`);
+  });
+  $('retroEngineType').addEventListener('change', () => {
+    design.retro.engineType = shipEngineType($('retroEngineType').value);
     onPhysicsEdit();
   });
   $('retroDiaInput').addEventListener('change', () => {

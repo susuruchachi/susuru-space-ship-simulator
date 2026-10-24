@@ -846,6 +846,18 @@
           <span class="unit">kN</span>
         </div>
         <div class="field-row">
+          <label for="mainEngineType">機関</label>
+          <select id="mainEngineType">
+            <option value="rocket">化学ロケット</option>
+            <option value="nuclear">原子力（熱核）ロケット</option>
+            <option value="gravity3">三段圧縮重力場機関</option>
+            <option value="gwave">重力波共振機関</option>
+          </select>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="mainTypeAllBtn">この機関を全部の主エンジンに</button>
+        </div>
+        <div class="field-row">
           <label for="mainDiaInput">ノズルの直径</label>
           <input type="number" id="mainDiaInput" class="num-input" min="0" step="any" placeholder="自動">
           <span class="unit">m</span>
@@ -872,6 +884,15 @@
         <span class="unit">kN</span>
       </div>
       <div class="derived" id="retroAccelLine"></div>
+      <div class="field-row">
+        <label for="retroEngineType">機関</label>
+        <select id="retroEngineType">
+            <option value="rocket">化学ロケット</option>
+            <option value="nuclear">原子力（熱核）ロケット</option>
+            <option value="gravity3">三段圧縮重力場機関</option>
+            <option value="gwave">重力波共振機関</option>
+        </select>
+      </div>
       <div class="pod-list" id="retroList"></div>
       <div class="btn-row">
         <button type="button" id="retroPlaceBtn">＋ 船体をタップして追加</button>
@@ -996,6 +1017,7 @@
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/MTLLoader.js"></script>
 <script src="01-state-and-config.js"></script>
 <script src="21-ship-design.js"></script>
+<script src="27-engine-plumes.js"></script>
 <script src="24-sync.js"></script>
 <script src="firebase-config.js"></script>
 <script src="25-google-sync.js"></script>
