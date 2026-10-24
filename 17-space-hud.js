@@ -183,6 +183,11 @@ const SpaceHud = {
       Navigation.disengageWarp('自動航行を中止しました');
       return;
     }
+    // v87: 通常航行での進入中は、その速さのまま手動に切り替える
+    if (Navigation.isApproaching()) {
+      Navigation.cancelApproach('自動航行を中止しました（その速さのまま手動の操縦に切り替えました）');
+      return;
+    }
     if (!Navigation.target) {
       Navigation.warp.status = '先に目的地を選んでください';
       this._els.select.focus();
@@ -402,8 +407,9 @@ const SpaceHud = {
       ? '内空航行（重力場機関）。航路を圧縮して進む。スロットルで速さ、操縦桿で向き (J)'
       : '手動ワープ。スロットルで速度、操縦桿で向き (J)';
     this._els.warpBtn.classList.toggle('is-on', w.active && !w.autopilot);
-    this._els.autoBtn.innerHTML = w.active && w.autopilot ? '🎯<span class="snb-text"> 自動航行を中止</span>' : '🎯<span class="snb-text"> 自動航行</span>';
-    this._els.autoBtn.classList.toggle('is-on', w.active && w.autopilot);
+    const autoOn = (w.active && w.autopilot) || Navigation.isApproaching();
+    this._els.autoBtn.innerHTML = autoOn ? '🎯<span class="snb-text"> 自動航行を中止</span>' : '🎯<span class="snb-text"> 自動航行</span>';
+    this._els.autoBtn.classList.toggle('is-on', autoOn);
     this._els.orbitAttBtn.classList.toggle('is-on', Navigation.isOrbitAttitude());
     this._els.labelBtn.classList.toggle('is-off', !this.showLabels);
     this._els.orbitBtn.classList.toggle('is-off', !Universe.settings.showOrbits);

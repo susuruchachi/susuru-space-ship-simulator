@@ -40,6 +40,11 @@ const Navigation = {
   // 到着後に天体のほうへ向き直るときの最大角速度 [rad/s]（ゆっくり回す）
   ARRIVAL_TURN_RATE: 0.12,
   arrivalHold: null, // 到着後の姿勢合わせ { kind: 'body', bodyId } | { kind: 'home' }
+  // v87: 自動航行の終わり。実効の速さが通常航行の最高速まで落ちたらワープ・内空航行を抜け、
+  // 通常航行で到着点まで減速して進む（stepApproach）。{ target, rel?, lagrange?, label }
+  approach: null,
+  APPROACH_BRAKE_MARGIN: 0.7, // 減速に使う加速度 = 艦が出せる減速 × この値（余裕）
+  APPROACH_MAX_DROP_DIST: 2e6, // 通常航行で減速する距離の上限 [m]（2000 km。弱い艦は、ここから最高速より遅く入る）
 
   frame: null,      // { bodyId, offset, rot(3x3 local→universe), rotT, quat(THREE), isHome }
   homeFrame: null,
@@ -467,12 +472,12 @@ const Navigation = {
     this.switchFrame(this._makeFrame(body.id, offset, [1, 0, 0, 0, 1, 0, 0, 0, 1], false), carry);
   },
 
-  goHomeFrameIfNear() {
+  goHomeFrameIfNear(carry) {
     // 母港の近く（100km以内）に戻ってきたら母港フレームへ
     const u = this.shipUniverse();
     const o = this.frameOrigin(this.homeFrame);
     if (Math.hypot(u.x - o.x, u.y - o.y, u.z - o.z) < 100e3) {
-      this.switchFrame(this._cloneFrame(this.homeFrame));
+      this.switchFrame(this._cloneFrame(this.homeFrame), carry);
       return true;
     }
     return false;
@@ -586,6 +591,7 @@ const Navigation = {
     if (this.isInterspace()) this.warp.speed = Math.max(1, this.warp.shipSpeed);
     ship.autoDockingEnabled = false;
     this.arrivalHold = null;
+    this.approach = null;
     // 母港フレームから出る（ポートの座標系を壊さないため、艦の位置に新しい原点を置く）
     this._rebaseToDominantBody(false);
     ship.velocity = { x: 0, y: 0, z: 0 };
@@ -593,19 +599,181 @@ const Navigation = {
     return true;
   },
 
+  // v87: ワープ・内空航行を抜けても、その速さのまま機首の向きへ進み続ける（以前は止まっていた）。
+  // 内空航行は圧縮が解けて船速に、ワープはその速さに。どちらも通常航行の最高速（無制限なら光速）まで
   disengageWarp(reason) {
     const ship = State.ship;
+    const wasActive = this.warp.active;
+    const arrival = wasActive && this.warp.autopilot && this.target ? this.targetArrival() : null;
+    const speed = ship && wasActive ? this._exitSpeed(ship) : 0;
     this.arrivalHold = null;
+    this.approach = null;
+    if (ship) {
+      ship.velocity = wasActive ? this._exitVelocity(ship, speed, arrival) : { x: 0, y: 0, z: 0 };
+      ship.angularVelocity = { x: 0, y: 0, z: 0 };
+    }
     this.warp.active = false;
     this.warp.autopilot = false;
     this.warp.speed = 0;
-    if (ship) {
-      ship.velocity = { x: 0, y: 0, z: 0 };
-      ship.angularVelocity = { x: 0, y: 0, z: 0 };
-    }
-    // 到着した天体（または最寄りの天体）に対して静止するフレームへ
-    if (!this.goHomeFrameIfNear()) this._rebaseToDominantBody(false);
+    // 最寄りの天体（または母港）と一緒に動くフレームへ（速度は宇宙での速度を保って写す）
+    if (!this.goHomeFrameIfNear(true)) this._rebaseToDominantBody(false, true);
     this.warp.status = reason || '';
+  },
+
+  // v87: 通常航行の最高速 [m/s]（無制限なら Infinity）
+  normalMaxSpeed(ship) {
+    return ship && Number.isFinite(ship.maxSpeed) && ship.maxSpeed > 0 ? ship.maxSpeed : Infinity;
+  },
+  // v87: 通常航行で、機首を進む向きに向けたまま減速に使う加速度 [m/s²]（逆噴射・姿勢スラスター）
+  brakeAccel(ship) {
+    let a = typeof ShipAllocator !== 'undefined' ? ShipAllocator.estimateMaxLinearDecel(ship) : 1;
+    if (ship.maxAccel > 0) a = Math.min(a, ship.maxAccel);
+    return Math.max(0.05, a * this.APPROACH_BRAKE_MARGIN);
+  },
+  // ワープ・内空航行を抜けたあとの速さ（通常空間で）
+  _exitSpeed(ship) {
+    const w = this.warp;
+    const v = this.isInterspace() ? Math.min(w.shipSpeed || 0, w.speed) : w.speed;
+    return Math.max(0, Math.min(v, this.normalMaxSpeed(ship), 299792458));
+  },
+  // 今の（ワープの）フレームで、機首の向きへ speed で進む速度。動いている到着点へ向かう
+  // 自動航行なら、その点の動き（ワープ中に乗っていた分）も足す
+  _exitVelocity(ship, speed, arrival) {
+    const fwd = rotateVecByQuat({ x: 0, y: 0, z: -1 }, ship.quaternion);
+    const v = { x: fwd.x * speed, y: fwd.y * speed, z: fwd.z * speed };
+    if (arrival && arrival.velocity) {
+      const fv = this._framePointVelocity(this.frame, ship.position);
+      const d = Astro.mat3MulVec(this.frame.rotT, { x: arrival.velocity.x - fv.x, y: arrival.velocity.y - fv.y, z: arrival.velocity.z - fv.z });
+      v.x += d.x; v.y += d.y; v.z += d.z;
+    }
+    return v;
+  },
+
+  // -----------------------------------------------------------
+  // v87: 自動航行の終わり（通常航行での進入）
+  //   ワープ・内空航行で、通常航行で止まり切れる距離（dropDistance）まで来て、実効の速さが
+  //   通常航行の最高速まで落ちたら、その速さのまま通常航行に戻る（_startApproach）。
+  //   そこからは、機首を到着点へ向けたまま、逆噴射・姿勢スラスターで止まり切れる速さに抑えながら
+  //   進み（stepApproach）、到着点で止まったら、これまでどおり到着する（軌道に乗る・入港など）。
+  //   操縦者が回転・横移動の操作をしたら、その速さのまま手動の操縦に切り替える。
+  //   通常航行の最高速が無制限の艦は、これまでどおりワープのまま到着点まで行く。
+  // -----------------------------------------------------------
+  dropDistance(ship) {
+    const vN = this.normalMaxSpeed(ship);
+    if (!Number.isFinite(vN)) return 0;
+    return Math.min(this.APPROACH_MAX_DROP_DIST, (vN * vN) / (2 * this.brakeAccel(ship)));
+  },
+  isApproaching() {
+    return !!this.approach;
+  },
+  cancelApproach(reason) {
+    if (!this.approach) return;
+    this.approach = null;
+    this.warp.status = reason || '自動航行を中止しました';
+  },
+  _startApproach(arrival) {
+    const ship = State.ship;
+    const tg = this.target;
+    const speed = this._exitSpeed(ship);
+    ship.velocity = this._exitVelocity(ship, speed, arrival);
+    const name = this.driveName();
+    this.warp.active = false;
+    this.warp.autopilot = false;
+    this.warp.speed = 0;
+    const ap = { target: tg, label: this.targetLabel(tg) };
+    if (tg.kind === 'home') {
+      if (!this.goHomeFrameIfNear(true)) this._rebaseToDominantBody(false, true);
+    } else {
+      const b = arrival.body;
+      if (arrival.lagrange) ap.lagrange = arrival.lagrange;
+      else ap.rel = { x: arrival.point.x - b.pos.x, y: arrival.point.y - b.pos.y, z: arrival.point.z - b.pos.z };
+      this._rebaseToBody(b, true);
+    }
+    this.approach = ap;
+    this.warp.status = `${name}を終え、通常航行で${ap.label}の到着点へ向かっています`;
+  },
+  // 到着点の今の位置（今のフレームのローカル座標）と、その点の速度（今のフレームに対して）
+  _approachTarget(ship) {
+    const ap = this.approach;
+    const tg = ap.target;
+    this._shipU = this.shipUniverse();
+    let pointU, velU = null;
+    if (tg.kind === 'home') {
+      if (!this.frame.isHome) this.goHomeFrameIfNear(true);
+      const a = this.targetArrival(tg);
+      pointU = a.point; velU = a.velocity;
+    } else if (ap.lagrange) {
+      pointU = this._lagrangePoint(ap.lagrange, false);
+      velU = this._lagrangePoint(ap.lagrange, true);
+    } else {
+      const b = SolarSystem.byId[tg.id];
+      if (!b) return null;
+      pointU = { x: b.pos.x + ap.rel.x, y: b.pos.y + ap.rel.y, z: b.pos.z + ap.rel.z };
+      velU = this.bodyVelocity(b.id);
+    }
+    const p = this.universeToLocal(pointU);
+    const fv = this._framePointVelocity(this.frame, p);
+    const v = velU ? Astro.mat3MulVec(this.frame.rotT, { x: velU.x - fv.x, y: velU.y - fv.y, z: velU.z - fv.z }) : { x: 0, y: 0, z: 0 };
+    return { pointU, p, v };
+  },
+  // 物理に渡す入力（ShipController.update から毎フレーム）: 機首を到着点へ向ける
+  approachInput(ship, input) {
+    if (!this.approach || this.warp.active) return input;
+    const user = Math.abs(input.rotatePitch) + Math.abs(input.rotateYaw) + Math.abs(input.rotateRoll)
+      + Math.abs(input.thrustStrafeX) + Math.abs(input.thrustStrafeY);
+    if (user > 0.05 || ship.autoDockingEnabled) {
+      this.cancelApproach('自動航行を中止しました（その速さのまま手動の操縦に切り替えました）');
+      return input;
+    }
+    const t = this._approachTarget(ship);
+    if (!t) { this.approach = null; return input; }
+    const out = { ...input, thrustForward: 0, boost: false, rotateRoll: 0, steerHold: true };
+    const d = Math.hypot(t.p.x - ship.position.x, t.p.y - ship.position.y, t.p.z - ship.position.z);
+    if (d > 30) {
+      const steer = this._steerToward(ship, t.pointU);
+      out.rotatePitch = steer.pitch;
+      out.rotateYaw = steer.yaw;
+    } else {
+      out.rotatePitch = 0; out.rotateYaw = 0;
+    }
+    return out;
+  },
+  // 物理の1刻みごと（重力を加えたあと）: 到着点で止まり切れる速さへ速度を合わせる
+  stepApproach(ship, dt) {
+    if (!this.approach || this.warp.active) return;
+    const t = this._approachTarget(ship);
+    if (!t) { this.approach = null; return; }
+    const r = { x: t.p.x - ship.position.x, y: t.p.y - ship.position.y, z: t.p.z - ship.position.z };
+    const d = Math.hypot(r.x, r.y, r.z);
+    const vr = { x: ship.velocity.x - t.v.x, y: ship.velocity.y - t.v.y, z: ship.velocity.z - t.v.z };
+    const a = this.brakeAccel(ship);
+    // 到着点に着いて止まったら、これまでどおり到着する（軌道に乗る・入港・L点に止まる）
+    if (d < 50 && vecLength(vr) < this.ARRIVAL_SPEED) {
+      const ap = this.approach;
+      this.approach = null;
+      ship.velocity = { x: t.v.x, y: t.v.y, z: t.v.z };
+      this._arrive({ body: ap.target.kind === 'home' ? SolarSystem.byId.earth : SolarSystem.byId[ap.target.id], lagrange: ap.lagrange });
+      return;
+    }
+    // 目標の速度: 到着点へ向かい、残りの距離で止まり切れる速さ（通常航行の最高速まで）
+    const vDes = Math.min(this.normalMaxSpeed(ship), Math.sqrt(2 * a * Math.max(0, d - 5)));
+    const k = d > 1e-6 ? vDes / d : 0;
+    let dv = { x: r.x * k - vr.x, y: r.y * k - vr.y, z: r.z * k - vr.z };
+    // 1刻みで変えられる速さ: 艦が出せる減速（余裕を見ない値）まで
+    const dvMax = (a / this.APPROACH_BRAKE_MARGIN) * dt;
+    const dl = vecLength(dv);
+    if (dl > dvMax) dv = vecScale(dv, dvMax / dl);
+    ship.velocity.x += dv.x; ship.velocity.y += dv.y; ship.velocity.z += dv.z;
+    // 噴射の見た目: 減速は逆噴射、加速は主エンジン
+    const fwd = rotateVecByQuat({ x: 0, y: 0, z: -1 }, ship.quaternion);
+    const along = vecDot(dv, fwd) / Math.max(1e-9, dvMax);
+    const fx = { ...(ship.fxOutputRatios || ship.thrusterOutputRatios || {}) };
+    const lvl = clamp(Math.abs(along), 0, 1);
+    for (const th of ship.thrusters) {
+      const isRetro = th.id.startsWith('retro');
+      if ((along < 0 && isRetro) || (along > 0 && th.kind === 'main')) fx[th.id] = Math.max(fx[th.id] || 0, lvl);
+    }
+    ship.fxOutputRatios = fx;
   },
 
   // ワープ中の1フレーム。回転は通常の物理（RCS）、並進はワープで動かす。
@@ -666,7 +834,12 @@ const Navigation = {
       const dx = arrival.point.x - shipU.x, dy = arrival.point.y - shipU.y, dz = arrival.point.z - shipU.z;
       const distA = Math.hypot(dx, dy, dz);
       w.targetDistance = distA;
-      vTarget = Math.min(vLimit, distA * this.WARP_K_TARGET);
+      // v87: 通常航行の最高速が決まっている艦は、通常航行で止まり切れる距離（dropDistance）の手前で
+      // 通常航行の最高速まで落とし、そこで通常航行に戻る
+      const dDrop = this.dropDistance(ship);
+      // 通常航行に戻る速さ: 通常航行の最高速（減速する距離が上限で抑えられた弱い艦は、その距離で止まり切れる速さ）
+      const vN = dDrop > 0 ? Math.min(this.normalMaxSpeed(ship), Math.sqrt(2 * this.brakeAccel(ship) * dDrop)) : Infinity;
+      vTarget = Math.min(vLimit, dDrop > 0 ? Math.max(0, distA - dDrop) * this.WARP_K_TARGET + vN * 0.9 : distA * this.WARP_K_TARGET);
       // 機首が目的地を向くまでは加速しない
       const alignFactor = Math.max(0, (alignCos - 0.9) / 0.1);
       // v83: 到着点の手前では、ゆっくり（最後は数十 m/s まで）減速してから到着する。
@@ -678,6 +851,10 @@ const Navigation = {
       // 追いつかない。数km まで近づいたら、その点に合わせて到着する
       if (distA < Math.max(arrival.lagrange ? 5000 : this.ARRIVAL_DISTANCE, w.speed * dt * 1.5)) {
         this._arrive(arrival);
+        return;
+      }
+      if (dDrop > 0 && w.speed <= vN && alignCos > 0.98 && Math.max(0, distA - dDrop) * this.WARP_K_TARGET <= vN) {
+        this._startApproach(arrival);
         return;
       }
     } else {
@@ -800,6 +977,7 @@ const Navigation = {
   // 急停止には見えない。角速度はそのまま残して、自然に回し続ける）
   _arrive(arrival) {
     const ship = State.ship;
+    this.approach = null;
     this.warp.active = false;
     this.warp.autopilot = false;
     this.warp.speed = 0;

@@ -36,9 +36,11 @@ const ShipController = {
 
     InputSystem.update();
     // v83: ワープで到着した直後は、姿勢スラスターでゆっくり天体（母港）のほうへ向き直る
-    const input = typeof Navigation !== 'undefined' && Navigation.stepArrivalHold
+    let input = typeof Navigation !== 'undefined' && Navigation.stepArrivalHold
       ? Navigation.stepArrivalHold(ship, State.input)
       : State.input;
+    // v87: 自動航行の終わりの、通常航行での進入（機首を到着点へ向ける）
+    if (typeof Navigation !== 'undefined' && Navigation.approach) input = Navigation.approachInput(ship, input);
     // v77: ワープ中は並進をワープ航法（16-navigation.js）が受け持ち、
     // 回転だけ通常の物理（RCSによる姿勢制御）で動かす。
     if (typeof Navigation !== 'undefined' && Navigation.isWarping()) {
@@ -60,7 +62,13 @@ const ShipController = {
             ship.gravityAccel = g;
           }
         }
-        if (ship.gravityDrive) GravityDrive.step(ship, input, h);
+        // v87: 自動航行の通常航行での進入（到着点で止まり切れる速さへ合わせる）
+        if (typeof Navigation !== 'undefined' && Navigation.approach) {
+          Navigation.stepApproach(ship, h);
+          if (Navigation.isWarping()) break; // （起こらないが念のため）
+        }
+        // （進入中は速度を進入が受け持つので、境界面は姿勢だけ。竜骨が動いている到着点への速度を消さないように）
+        if (ship.gravityDrive) GravityDrive.step(ship, input, h, typeof Navigation !== 'undefined' && !!Navigation.approach);
         const prev = { x: ship.position.x, y: ship.position.y, z: ship.position.z };
         this._integratePose(ship, h);
         if (ship.gravityDrive) GravityDrive.limit(ship);
@@ -98,7 +106,7 @@ const ShipController = {
     let steps = 0;
     while (remaining > 1e-9 && steps < this.FAST_MAX_SUBSTEPS) {
       // 刻み: いちばん強い重力の天体を回る軌道の周期の約1/1000（遠いほど長く）
-      let h = remaining;
+      let h = nav && nav.approach ? Math.min(remaining, 0.1) : remaining;
       const g = nav ? nav.gravityAccel(ship) : null;
       if (g) {
         const a = Math.hypot(g.x, g.y, g.z);
@@ -109,6 +117,8 @@ const ShipController = {
       if (left <= 1) h = remaining;
       else h = Math.max(h, remaining / left);
       if (g) { ship.velocity.x += g.x * h; ship.velocity.y += g.y * h; ship.velocity.z += g.z * h; }
+      // v87: 自動航行の通常航行での進入中は、早送り中も到着点へ減速しながら進む
+      if (nav && nav.approach) nav.stepApproach(ship, h);
       ship.position.x += ship.velocity.x * h;
       ship.position.y += ship.velocity.y * h;
       ship.position.z += ship.velocity.z * h;
