@@ -14,6 +14,13 @@
 //   固定容量のプールを確保し、CPU側で寿命管理、
 //   GPU属性（position/size/opacity相当の色アルファ）を
 //   毎フレーム一括転送する。
+//
+// v83: 粒子を「艦に固定した座標」（重心が原点、艦のローカル軸）で扱い、
+// 粒子の描画オブジェクトを毎フレーム艦の位置・姿勢に合わせて置くようにした。
+// 以前は宇宙空間の座標で扱い、艦の速度を足して動かしていたため、艦がその
+// フレームで進んだあとにさらに1フレーム分先へ進んだ位置に出て、速く飛んで
+// いるときや、旋回・横滑りで進む向きと艦首の向きが違うときに、噴射が
+// ノズルからずれて見えた（「旋回したりするとノズルの位置がずれる」）。
 // =============================================================
 
 const EngineFx = {
@@ -118,6 +125,12 @@ const EngineFx = {
     const ship = State.ship;
     if (!ship) return;
 
+    // 粒子は艦のローカル座標なので、描画オブジェクトを艦の位置・姿勢に置く
+    for (const pool of [this._mainPool, this._rcsPool]) {
+      pool.points.position.set(ship.position.x, ship.position.y, ship.position.z);
+      pool.points.quaternion.set(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w);
+    }
+
     this._spawnThrustFx(ship, dt);
 
     this._stepPool(this._mainPool, dt);
@@ -142,6 +155,11 @@ const EngineFx = {
     let mainCount = 0;
     for (const t of ship.thrusters) if (t.kind === 'main') mainCount++;
     const mainDensity = Math.min(1, 3 / Math.max(1, mainCount));
+    // v83: 粒子の大きさ（噴射の太さ）。大きな艦では艦の大きさほどには太くせず、
+    // 主エンジンが複数あるときは1基あたりを細くする（ロケット級1基は従来どおり）
+    const sizeFx = Math.pow(fx, 0.85);
+    const mainSizeFx = sizeFx / Math.sqrt(Math.max(1, mainCount));
+    const rcsSizeFx = fx > 1 ? sizeFx * 0.7 : 1;
     for (const t of ship.thrusters) {
       const ratio = ship.thrusterOutputRatios[t.id] ?? 0;
       if (ratio <= 0.01) continue;
@@ -149,8 +167,9 @@ const EngineFx = {
       const isMain = t.kind === 'main';
       const pool = isMain ? this._mainPool : this._rcsPool;
 
-      const nozzleWorld = this._localToWorld(ship, t.position);
-      const dirWorld = rotateVecByQuat(vecNormalize(t.direction), ship.quaternion);
+      // v83: 艦のローカル座標（ノズルの位置・噴射の向きをそのまま使う）
+      const nozzle = t.position;
+      const dir = vecNormalize(t.direction);
 
       // 出力比に応じてスポーン数を可変（多いほど濃い噴射に見える）
       const spawnCount = isMain
@@ -167,37 +186,34 @@ const EngineFx = {
         const jitterZ = (Math.random() - 0.5) * spread;
 
         p.active = true;
-        p.x = nozzleWorld.x;
-        p.y = nozzleWorld.y;
-        p.z = nozzleWorld.z;
+        p.x = nozzle.x;
+        p.y = nozzle.y;
+        p.z = nozzle.z;
 
         const baseSpeed = (isMain
           ? 12 + Math.random() * 8 + ratio * 10
           : 6 + Math.random() * 4) * fx;
 
-        p.vx = dirWorld.x * baseSpeed + jitterX * baseSpeed * 0.3 + ship.velocity.x;
-        p.vy = dirWorld.y * baseSpeed + jitterY * baseSpeed * 0.3 + ship.velocity.y;
-        p.vz = dirWorld.z * baseSpeed + jitterZ * baseSpeed * 0.3 + ship.velocity.z;
+        p.vx = dir.x * baseSpeed + jitterX * baseSpeed * 0.3;
+        p.vy = dir.y * baseSpeed + jitterY * baseSpeed * 0.3;
+        p.vz = dir.z * baseSpeed + jitterZ * baseSpeed * 0.3;
 
         p.maxLife = isMain
           ? 0.5 + Math.random() * 0.4
           : 0.2 + Math.random() * 0.15;
         p.life = p.maxLife;
-        p.size = (isMain
-          ? (2.2 + ratio * 2.4) * (0.7 + Math.random() * 0.6)
-          : 1.0 + Math.random() * 0.6) * fx;
+        // v83: このフレームの間（0〜dt）に均等に出たことにする。直後の _stepPool で
+        // dt 進むので、ノズルから「出てからの時間 × 速度」の位置に並び、
+        // フレームレートが低いときや大きな艦（噴射が速い）でも粒のかたまりに分かれない
+        const back = dt * (1 - Math.random());
+        p.x -= p.vx * back;
+        p.y -= p.vy * back;
+        p.z -= p.vz * back;
+        p.size = isMain
+          ? (2.2 + ratio * 2.4) * (0.7 + Math.random() * 0.6) * mainSizeFx
+          : (1.0 + Math.random() * 0.6) * rcsSizeFx;
       }
     }
-  },
-
-  // ローカル座標をワールド座標に変換（艦の位置+姿勢を適用）
-  _localToWorld(ship, local) {
-    const rotated = rotateVecByQuat(local, ship.quaternion);
-    return {
-      x: ship.position.x + rotated.x,
-      y: ship.position.y + rotated.y,
-      z: ship.position.z + rotated.z,
-    };
   },
 
   // -----------------------------------------------------------

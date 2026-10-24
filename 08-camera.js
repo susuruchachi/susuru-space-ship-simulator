@@ -48,7 +48,6 @@ const CameraSystem = {
 
   // ドラッグ感度・制限
   DRAG_SENSITIVITY: 0.006,
-  PINCH_SENSITIVITY: 0.05,
   PAN_SENSITIVITY: 0.0015, // ドラッグ1pxかつdistance=1あたりのワールド移動量。distanceに比例させ、ズーム倍率が変わっても画面上の動きの体感速度を揃える
   MIN_ELEVATION: -1.4, // 真下近くまで（真下=-PI/2=-1.57は特異点なので少し手前で止める）
   MAX_ELEVATION: 1.4,
@@ -59,6 +58,10 @@ const CameraSystem = {
   // 変えられるため、追従カメラの位置・自由視点の距離の範囲をこれで拡大する。
   // ロケット級（約8m）以下は1（従来どおり）。
   _shipScale: 1,
+  // v83: 追従視点のズーム倍率（1 = 従来の距離。ピンチ・ホイールで変える）
+  _chaseZoom: 1,
+  CHASE_ZOOM_MIN: 0.3,
+  CHASE_ZOOM_MAX: 8,
 
   setShipSize(sizeM) {
     const k = Math.max(1, (sizeM || 8) / 8);
@@ -76,6 +79,7 @@ const CameraSystem = {
   // -----------------------------------------------------------
   init(canvasEl) {
     this._bindDrag(canvasEl);
+    if (typeof preventPageGestureZoom === 'function') preventPageGestureZoom();
   },
 
   // -----------------------------------------------------------
@@ -129,8 +133,19 @@ const CameraSystem = {
       y: (touches[0].clientY + touches[1].clientY) / 2,
     });
 
+    // v83: ズームは掛け算（指の間隔が2倍になれば距離が半分）。以前は指の移動
+    // ピクセル数 × 0.05m を距離に足していたため、大きな艦（距離の範囲が数km）では
+    // いくらピンチしてもほとんど変わらなかった。追従視点でもズームできるようにした。
+    const zoomBy = (factor) => {
+      if (!(factor > 0) || !Number.isFinite(factor)) return;
+      if (State.settings.cameraMode === 'orbit') {
+        this._orbit.distance = clamp(this._orbit.distance * factor, this.MIN_DISTANCE, this.MAX_DISTANCE);
+      } else {
+        this._chaseZoom = clamp(this._chaseZoom * factor, this.CHASE_ZOOM_MIN, this.CHASE_ZOOM_MAX);
+      }
+    };
+
     const onPinchMove = (touches) => {
-      if (State.settings.cameraMode !== 'orbit') return;
       const dist = pinchDistance(touches);
       const mid = pinchMidpoint(touches);
       if (!this._pinchState.active) {
@@ -140,14 +155,9 @@ const CameraSystem = {
         this._pinchState.lastMidY = mid.y;
         return;
       }
-      const delta = dist - this._pinchState.lastDist;
-      this._pinchState.lastDist = dist;
       // 指を広げる(dist増)→ズームイン(distance減)
-      this._orbit.distance = clamp(
-        this._orbit.distance - delta * this.PINCH_SENSITIVITY,
-        this.MIN_DISTANCE,
-        this.MAX_DISTANCE
-      );
+      zoomBy(this._pinchState.lastDist / Math.max(1, dist));
+      this._pinchState.lastDist = dist;
       // v72: 二本指スワイプ（2本の指の中点の移動）でパンできるように。
       // ピンチ（指の間隔の変化）とスワイプ（中点の移動）は同時に
       // 発生しうる一般的なジェスチャーなので、両方を同フレームで処理する。
@@ -155,7 +165,7 @@ const CameraSystem = {
       const midDy = mid.y - this._pinchState.lastMidY;
       this._pinchState.lastMidX = mid.x;
       this._pinchState.lastMidY = mid.y;
-      this._applyScreenPan(midDx, midDy);
+      if (State.settings.cameraMode === 'orbit') this._applyScreenPan(midDx, midDy);
     };
 
     const onPinchEnd = () => {
@@ -175,17 +185,21 @@ const CameraSystem = {
     // 1本指=回転ドラッグ、2本指=ピンチズームとして両方自前で処理する
     // （touch-action:noneでブラウザ標準ピンチも無効化されているため、
     //   ズームは自前実装しないと一切効かなくなる）。
+    // v83: 指の数は、この画面（canvas）に触れた指だけで数える（targetTouches）。
+    // 以前は画面全体の指（touches）で数えていたため、操縦スティックに指を置いたまま
+    // 別の指で画面に触れるとピンチ扱いになっていた。
     canvasEl.addEventListener('touchstart', (e) => {
       e.preventDefault();
-      if (e.touches.length === 1) {
+      const tt = e.targetTouches;
+      if (tt.length === 1) {
         this._pinchState.active = false;
-        const t = e.touches[0];
+        const t = tt[0];
         onDragStart(t.clientX, t.clientY);
-      } else if (e.touches.length === 2) {
+      } else if (tt.length === 2) {
         this._dragState.active = false; // ピンチ開始時はドラッグ回転を止める
         this._pinchState.active = true;
-        this._pinchState.lastDist = pinchDistance(e.touches);
-        const mid = pinchMidpoint(e.touches);
+        this._pinchState.lastDist = pinchDistance(tt);
+        const mid = pinchMidpoint(tt);
         this._pinchState.lastMidX = mid.x;
         this._pinchState.lastMidY = mid.y;
       }
@@ -193,11 +207,12 @@ const CameraSystem = {
 
     canvasEl.addEventListener('touchmove', (e) => {
       e.preventDefault();
-      if (e.touches.length === 1 && !this._pinchState.active) {
-        const t = e.touches[0];
+      const tt = e.targetTouches;
+      if (tt.length === 1 && !this._pinchState.active) {
+        const t = tt[0];
         onDragMove(t.clientX, t.clientY);
-      } else if (e.touches.length === 2) {
-        onPinchMove(e.touches);
+      } else if (tt.length === 2) {
+        onPinchMove(tt);
       }
     }, { passive: false });
 
@@ -205,8 +220,8 @@ const CameraSystem = {
       onDragEnd();
       onPinchEnd();
       // 2本→1本に減った場合、残った指でドラッグ再開できるようにする
-      if (e.touches.length === 1) {
-        const t = e.touches[0];
+      if (e.targetTouches.length === 1) {
+        const t = e.targetTouches[0];
         onDragStart(t.clientX, t.clientY);
       }
     });
@@ -217,13 +232,8 @@ const CameraSystem = {
 
     // ホイールでズーム（distance調整）。PC環境向け。スマホは2本指ピンチで対応。
     canvasEl.addEventListener('wheel', (e) => {
-      if (State.settings.cameraMode !== 'orbit') return;
       e.preventDefault();
-      this._orbit.distance = clamp(
-        this._orbit.distance + e.deltaY * 0.05,
-        this.MIN_DISTANCE,
-        this.MAX_DISTANCE
-      );
+      zoomBy(Math.exp(clamp(e.deltaY, -200, 200) * 0.0015));
     }, { passive: false });
   },
 
@@ -340,6 +350,7 @@ const CameraSystem = {
     this._orbit.elevation = 0.2;
     this._orbit.distance = 30 * this._shipScale;
     this._panOffsetLocal = { x: 0, y: 0, z: 0 };
+    this._chaseZoom = 1;
   },
 
   // -----------------------------------------------------------
@@ -372,7 +383,7 @@ const CameraSystem = {
   // （バグ報告：「視点が船のロールに追従しない」）。
   // -----------------------------------------------------------
   _updateChase(camera, ship) {
-    const k = this._shipScale;
+    const k = this._shipScale * this._chaseZoom;
     const camOffset = rotateVecByQuat({ x: 0, y: 6 * k, z: 24 * k }, ship.quaternion);
     camera.position.set(
       ship.position.x + camOffset.x,

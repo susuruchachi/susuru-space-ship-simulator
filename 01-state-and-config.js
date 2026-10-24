@@ -8,7 +8,24 @@
 // v77: 表記を「0.000.000.000」形式に変更（CHANGELOG.md「バージョン番号の
 // 付け方」参照）。左から メジャー.機能バージョン.修正番号.ビルド番号。
 // 機能バージョンは従来の vNN の番号（v77 → 077）。
-const GAME_VERSION = '0.083.000.000';
+const GAME_VERSION = '0.083.000.001';
+
+// v83: iPad・iPhone の Safari は viewport の user-scalable=no を無視し、2本指の
+// ジェスチャーでページ全体を拡大・縮小してしまう（3Dビューのピンチズームと
+// 取り合いになり「ズームがうまくいかない」）。3Dビューのある画面で呼んで止める。
+function preventPageGestureZoom() {
+  if (typeof document === 'undefined') return;
+  for (const type of ['gesturestart', 'gesturechange', 'gestureend']) {
+    document.addEventListener(type, (e) => e.preventDefault(), { passive: false });
+  }
+  // ダブルタップでの拡大も止める
+  let lastTouchEnd = 0;
+  document.addEventListener('touchend', (e) => {
+    const now = Date.now();
+    if (now - lastTouchEnd < 320 && e.target && e.target.tagName === 'CANVAS') e.preventDefault();
+    lastTouchEnd = now;
+  }, { passive: false });
+}
 
 // -------------------------------------------------------------
 // 速度制限モード

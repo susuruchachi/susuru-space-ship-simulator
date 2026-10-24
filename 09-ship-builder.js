@@ -1170,6 +1170,8 @@
   // 起動
   // -----------------------------------------------------------
   initScene();
+  // v83: Safari のページ全体の拡大を止める（3Dビューのピンチズームを優先）
+  if (typeof preventPageGestureZoom === 'function') preventPageGestureZoom();
   syncRotUiFromState();
 
   window.ShipBuilderCore = {
