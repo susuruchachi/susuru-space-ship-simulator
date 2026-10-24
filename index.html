@@ -774,6 +774,7 @@
 <script src="18-galaxy.js"></script>
 <script src="19-star-map.js"></script>
 <script src="20-small-bodies.js"></script>
+<script src="21-ship-design.js"></script>
 
 <script>
 // =============================================================
@@ -854,15 +855,108 @@ function createPlaceholderShipMesh(classKey) {
 // -------------------------------------------------------------
 function createShipVisualRoot(classKey) {
   const root = new THREE.Group();
+  // v78: 自作の艦は重心が船体の中心からずれることがあるため、見た目全体を
+  // 「重心 → 船体の中心」のぶんずらす中間ノードを挟む（艦種プリセットは原点のまま）。
+  const designOffset = new THREE.Group();
+  root.add(designOffset);
+
   const placeholder = createPlaceholderShipMesh(classKey);
-  root.add(placeholder);
+  designOffset.add(placeholder);
 
   const correction = new THREE.Group();
-  root.add(correction);
+  designOffset.add(correction);
 
+  root.userData.designOffset = designOffset;
   root.userData.placeholderMesh = placeholder;
   root.userData.correctionGroup = correction;
   return root;
+}
+
+// v78: 保存されたモデルデータ（GLB/OBJ）からThree.jsのオブジェクトを作る。
+// GLBのdata URLは、iPadで巨大なdata URLをfetchすると失敗する問題（v67）を
+// 避けるため、atobで直接デコードする（dataUrlToArrayBuffer）。
+function parseShipModelData(data) {
+  return new Promise((resolve, reject) => {
+    try {
+      if (data.format === 'glb') {
+        const buf = dataUrlToArrayBuffer(data.glbDataUrl);
+        const manager = new THREE.LoadingManager();
+        const loader = new THREE.GLTFLoader(manager);
+        loader.textureLoader = new THREE.TextureLoader(manager);
+        loader.parse(buf, '', (gltf) => resolve(gltf.scene), reject);
+      } else if (data.format === 'obj') {
+        let materials = null;
+        if (data.mtlText) {
+          const texMap = data.textures || {};
+          const manager = new THREE.LoadingManager();
+          manager.setURLModifier((url) => {
+            const baseName = url.split('/').pop().split('\\').pop();
+            return texMap[baseName] || url;
+          });
+          materials = new THREE.MTLLoader(manager).parse(data.mtlText, '');
+          materials.preload();
+        }
+        const objLoader = new THREE.OBJLoader();
+        if (materials) objLoader.setMaterials(materials);
+        resolve(objLoader.parse(data.objText));
+      } else {
+        reject(new Error(`未対応のモデル形式: ${data.format}`));
+      }
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+// -------------------------------------------------------------
+// v78: 自作の艦（21-ship-design.js）を反映する。物理パラメータは即座に、
+// 見た目（船体モデル）は読み込みが終わりしだい差し替える。
+// -------------------------------------------------------------
+async function applyShipDesignInGame(ship, root, design) {
+  const spec = applyShipDesignToShip(ship, design);
+  const c = spec.cog;
+  root.userData.designOffset.position.set(-c.x, -c.y, -c.z);
+
+  // 接舷面: 船体の中心は重心から -cog のところにある
+  ship.dockingFace = design.dockingFace || null;
+  ship.dockingFaceBoxHalfExtents = { x: spec.dims.x / 2, y: spec.dims.y / 2, z: spec.dims.z / 2 };
+  ship.dockingFaceBoxCenter = { x: -c.x, y: -c.y, z: -c.z };
+
+  // 見た目の大きさに合わせてカメラ・噴射の表現を調整
+  if (typeof CameraSystem !== 'undefined' && CameraSystem.setShipSize) CameraSystem.setShipSize(spec.size);
+  ship.fxScale = Math.max(1, spec.size / 8);
+
+  // 仮の箱を設計の寸法に作り直す（モデルがあれば読み込み後に消す）
+  const old = root.userData.placeholderMesh;
+  if (old) {
+    root.userData.designOffset.remove(old);
+    old.geometry.dispose();
+  }
+  const box = new THREE.Mesh(
+    new THREE.BoxGeometry(spec.dims.x, spec.dims.y, spec.dims.z),
+    new THREE.MeshStandardMaterial({ color: 0x6688aa, metalness: 0.4, roughness: 0.5 })
+  );
+  root.userData.designOffset.add(box);
+  root.userData.placeholderMesh = box;
+
+  if (!design.hull.hasModel) return;
+  const data = await loadShipDesignModel(design.id);
+  if (!data) return;
+  try {
+    const obj = await parseShipModelData(data);
+    const corr = root.userData.correctionGroup;
+    const h = design.hull;
+    const toRad = (d) => (d * Math.PI) / 180;
+    corr.rotation.set(toRad(h.rotationDeg.x), toRad(h.rotationDeg.y), toRad(h.rotationDeg.z));
+    corr.scale.setScalar(h.scale);
+    corr.position.set(h.offset.x, h.offset.y, h.offset.z);
+    corr.add(obj);
+    root.userData.designOffset.remove(box);
+    box.geometry.dispose();
+    root.userData.placeholderMesh = null;
+  } catch (err) {
+    console.warn(`艦の設計「${design.name}」のモデル読み込みに失敗しました。仮の船体のままにします。`, err);
+  }
 }
 
 // v61: 第3引数shipは、モデル読み込み完了後に接舷面(dockingFace)情報を
@@ -889,8 +983,8 @@ async function loadSavedShipModelInto(root, classKey, ship) {
     // 読み込みが成功した時点で初めて箱を消す。読み込み失敗時は
     // 箱のまま操縦できる状態を維持し、無操作の艦にならないようにする
     const placeholder = root.userData.placeholderMesh;
-    if (placeholder) {
-      root.remove(placeholder);
+    if (placeholder && placeholder.parent) {
+      placeholder.parent.remove(placeholder);
     }
     root.userData.correctionGroup.add(loadedObject);
     applyAdjust(root.userData.correctionGroup);
@@ -912,44 +1006,10 @@ async function loadSavedShipModelInto(root, classKey, ship) {
     }
   };
 
+  // v78: GLB/OBJの読み込みは parseShipModelData に共通化（GLBはfetchを
+  // 使わずに読み込むので、iPadで巨大なモデルが読めない問題も避けられる）
   try {
-    if (saved.format === 'glb') {
-      fetch(saved.glbDataUrl)
-        .then((r) => r.arrayBuffer())
-        .then((buf) => {
-          const manager = new THREE.LoadingManager();
-          const loader = new THREE.GLTFLoader(manager);
-          loader.textureLoader = new THREE.TextureLoader(manager);
-          loader.parse(buf, '', (gltf) => onLoaded(gltf.scene), (err) => {
-            console.warn(`艦モデル(${classKey})のGLB読み込みに失敗しました。仮メッシュのままにします。`, err);
-          });
-        })
-        .catch((err) => console.warn(`艦モデル(${classKey})のGLB読み込みに失敗しました。仮メッシュのままにします。`, err));
-    } else if (saved.format === 'obj') {
-      const finish = (materials) => {
-        const objLoader = new THREE.OBJLoader();
-        if (materials) {
-          materials.preload();
-          objLoader.setMaterials(materials);
-        }
-        const objGroup = objLoader.parse(saved.objText);
-        onLoaded(objGroup);
-      };
-
-      if (!saved.mtlText) {
-        finish(null);
-      } else {
-        const texMap = saved.textures || {};
-        const manager = new THREE.LoadingManager();
-        manager.setURLModifier((url) => {
-          const baseName = url.split('/').pop().split('\\').pop();
-          return texMap[baseName] || url;
-        });
-        const mtlLoader = new THREE.MTLLoader(manager);
-        const materials = mtlLoader.parse(saved.mtlText, '');
-        finish(materials);
-      }
-    }
+    onLoaded(await parseShipModelData(saved));
   } catch (err) {
     console.warn(`艦モデル(${classKey})の読み込みに失敗しました。仮メッシュのままにします。`, err);
   }
@@ -972,7 +1032,18 @@ function initGame() {
   // v61: 接舷面(dockingFace)情報をshipへ反映するため、モデル読み込みを
   // 開始する前にship自体を生成しておく（生成順を入れ替え）。
   const ship = ShipController.spawnPlayerShip(shipClass, mesh, { x: 0, y: 0, z: 0 });
-  loadSavedShipModelInto(mesh, shipClass, ship);
+  // v78: 自作の艦（設計）が選ばれていればそれを使う。読み込みは非同期なので、
+  // それまでは艦種プリセットのまま（停止中なので切り替わっても影響はない）。
+  const designId = params.get('design') || persisted.shipDesignId;
+  if (params.get('design')) savePersistedSettings({ shipDesignId: designId });
+  if (designId) {
+    loadShipDesign(designId).then((design) => {
+      if (design) applyShipDesignInGame(ship, mesh, design);
+      else loadSavedShipModelInto(mesh, shipClass, ship);
+    });
+  } else {
+    loadSavedShipModelInto(mesh, shipClass, ship);
+  }
 
   // v77: 母港（地球の高度2,000km）を基準にした座標系を用意する。
   // 艦・ポートのローカル座標は従来どおりで、その原点が地球周回軌道上にある。

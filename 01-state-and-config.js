@@ -8,7 +8,7 @@
 // v77: 表記を「0.000.000.000」形式に変更（CHANGELOG.md「バージョン番号の
 // 付け方」参照）。左から メジャー.機能バージョン.修正番号.ビルド番号。
 // 機能バージョンは従来の vNN の番号（v77 → 077）。
-const GAME_VERSION = '0.077.000.000';
+const GAME_VERSION = '0.078.000.000';
 
 // -------------------------------------------------------------
 // 速度制限モード
@@ -363,6 +363,8 @@ const SETTINGS_STORAGE_KEY = 'spaceSimSettings';
 
 const DEFAULT_PERSISTED_SETTINGS = {
   shipClass: 'rocket',
+  // v78: 自作の艦（21-ship-design.js の設計ID）。nullなら shipClass の艦種プリセット
+  shipDesignId: null,
   speedCapMode: null, // null = 艦プリセットのデフォルトに従う（オーバーライドなし）
   showDebugHud: true,
   autoDampingEnabled: true, // 自動姿勢制動（回転ダンピングのみ、v10で並進制動から分離）
@@ -926,16 +928,20 @@ const DOCKING_FACE_AXES = {
 //     （面選択による90度単位の回転）に、u/v軸まわりのtilt角を
 //     追加合成したもの。
 // 戻り値: { position: {x,y,z}, quaternion: {x,y,z,w} }（いずれも艦ローカル）
-function computeDockingFaceLocalTransform(dockingFace, halfExtents) {
+// v78: center は船体のバウンディングボックス中心の艦ローカル座標（省略時は
+// 原点）。自作の艦（21-ship-design.js）では重心と船体の中心が一致しない
+// ことがあるため、面の位置をその分ずらす。
+function computeDockingFaceLocalTransform(dockingFace, halfExtents, center) {
   const axisDef = DOCKING_FACE_AXES[dockingFace.axis] || DOCKING_FACE_AXES.nz;
   const n = axisDef.normal;
   const u = axisDef.u;
   const v = axisDef.v;
 
+  const c0 = center || { x: 0, y: 0, z: 0 };
   const faceCenter = {
-    x: n.x * halfExtents.x,
-    y: n.y * halfExtents.y,
-    z: n.z * halfExtents.z,
+    x: c0.x + n.x * halfExtents.x,
+    y: c0.y + n.y * halfExtents.y,
+    z: c0.z + n.z * halfExtents.z,
   };
   const offsetU = dockingFace.offsetU || 0;
   const offsetV = dockingFace.offsetV || 0;
@@ -989,7 +995,7 @@ function computeEffectiveShipDockingTarget(dockingTarget, ship) {
   if (!dockingFace || !dockingTarget) return dockingTarget;
 
   const halfExtents = ship.dockingFaceBoxHalfExtents || { x: 0, y: 0, z: 0 };
-  const faceLocal = computeDockingFaceLocalTransform(dockingFace, halfExtents);
+  const faceLocal = computeDockingFaceLocalTransform(dockingFace, halfExtents, ship.dockingFaceBoxCenter);
 
   // 港での艦の最終姿勢: 「艦ローカル姿勢 * faceLocal.quaternion」が
   // dockingTarget.quaternionに一致するような艦ローカル姿勢を求める。

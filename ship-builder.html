@@ -406,6 +406,135 @@
     border: 1px solid rgba(255,80,80,0.3);
   }
 
+
+  /* -----------------------------------------------------------
+     v78: 艦の設計パネル
+  ----------------------------------------------------------- */
+  details.adjust-section { border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px; margin-bottom: 10px; }
+  details.adjust-section > summary {
+    font-size: 12px;
+    font-weight: 700;
+    color: #9fd8ff;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+    padding: 4px 0 8px;
+    list-style: none;
+  }
+  details.adjust-section > summary::-webkit-details-marker { display: none; }
+  details.adjust-section > summary::before { content: '▸ '; color: rgba(159,216,255,0.6); }
+  details.adjust-section[open] > summary::before { content: '▾ '; }
+  .adjust-section h3 { font-size: 11px; color: rgba(159,216,255,0.75); margin: 10px 0 6px; font-weight: 600; }
+  .field-row {
+    display: grid;
+    grid-template-columns: 92px 1fr auto;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 12px;
+  }
+  .field-row label { color: #9fb3c8; }
+  .text-input, .num-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.18);
+    background: rgba(255,255,255,0.06);
+    color: #dfefff;
+    font-size: 13px;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  .text-input { grid-column: 2 / 4; }
+  .num-input { font-variant-numeric: tabular-nums; }
+  select.text-input { appearance: auto; }
+  .unit { font-size: 11px; color: #9fb3c8; min-width: 28px; }
+  .scale-row .num-input { width: 96px; flex: 0 0 auto; }
+  .btn-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
+  .btn-row button, .small-btn {
+    flex: 1 1 auto;
+    padding: 8px 6px;
+    font-size: 11px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.16);
+    background: rgba(255,255,255,0.05);
+    color: #dfefff;
+  }
+  .small-btn { width: 100%; margin-top: 4px; }
+  .btn-row button.danger { color: #ff9d9d; border-color: rgba(255,80,80,0.3); }
+  .btn-row button.active { background: rgba(255,180,60,0.3); border-color: rgba(255,210,120,0.9); color: #fff; }
+  .hint { margin: 4px 0 0; font-size: 10px; color: rgba(159,179,200,0.75); line-height: 1.5; }
+  .derived { font-size: 11px; color: #bfe3ff; margin: 2px 0 6px; line-height: 1.5; }
+  .derived.warn { color: #ffcf7a; }
+  .model-line { font-size: 12px; color: #dfefff; margin-bottom: 4px; word-break: break-all; }
+  .check-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #9fb3c8; margin-top: 6px; }
+  .pos-row {
+    display: grid;
+    grid-template-columns: 18px 1fr 84px;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .pos-row .axis-label { font-size: 12px; font-weight: 700; color: #6cc3ff; text-align: center; }
+  .pos-row .num-input { padding: 4px 6px; font-size: 12px; }
+  .pod-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+  .pod-chip {
+    padding: 5px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    border: 1px solid rgba(255,200,120,0.35);
+    background: rgba(255,200,120,0.08);
+    color: #ffd9a0;
+  }
+  .pod-chip.selected { background: rgba(255,200,120,0.35); color: #fff; }
+  .pod-editor { padding: 8px; border-radius: 8px; background: rgba(255,200,120,0.06); border: 1px solid rgba(255,200,120,0.2); margin-bottom: 6px; }
+  .pod-editor-title { font-size: 12px; color: #ffd9a0; margin-bottom: 6px; }
+  .perf { font-size: 11px; line-height: 1.7; color: #dfefff; }
+  .perf .warn { color: #ffcf7a; }
+  .perf .ok { color: #8fffb4; }
+  .design-status { min-height: 14px; margin-bottom: 6px; }
+  .close-dropzone {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.25);
+    background: rgba(0,0,0,0.5);
+    color: #dfefff;
+    font-size: 16px;
+  }
+  .empty-state { background: rgba(5,7,12,0.92); z-index: 6; }
+  .viewport-legend {
+    position: absolute;
+    left: 12px;
+    bottom: 8px;
+    font-size: 10px;
+    color: rgba(223,239,255,0.65);
+    pointer-events: none;
+    text-shadow: 0 0 3px #000;
+  }
+  .lg-cog { color: #ffb347; }
+  .lg-main { color: #6cf0ff; }
+  .lg-line { color: #6cf0ff; }
+  .lg-retro { color: #b7a6ff; }
+  .lg-rcs { color: #ffd27a; }
+  .place-banner {
+    position: absolute;
+    left: 50%;
+    top: 48px;
+    transform: translateX(-50%);
+    padding: 6px 12px;
+    border-radius: 8px;
+    background: rgba(255,180,60,0.25);
+    border: 1px solid rgba(255,210,120,0.8);
+    color: #fff;
+    font-size: 12px;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+
   input[type="file"] { display: none; }
 
   /* -----------------------------------------------------------
@@ -459,7 +588,7 @@
 
   <div class="topbar">
     <a class="link-back" href="settings.html">&lt; 設定へ戻る</a>
-    <h1>艦船建造</h1>
+    <h1>艦船建造（艦の設計）</h1>
     <div class="classBadge" id="classBadge">--</div>
   </div>
 
@@ -468,6 +597,8 @@
   <div class="viewport-wrap">
     <canvas id="viewportCanvas"></canvas>
     <div class="viewport-hint" id="viewportHint">ドラッグ: 視点回転 / ピンチ・ホイール: ズーム / シフト+ドラッグ・二本指スワイプ: 視点パン</div>
+    <div class="viewport-legend"><span class="lg-cog">●</span> 重心　<span class="lg-main">▲</span> 主エンジン　<span class="lg-line">━</span> 推力線　<span class="lg-retro">▲</span> 逆噴射　<span class="lg-rcs">■</span> 姿勢スラスター</div>
+    <div class="place-banner" id="placeBanner" style="display:none;">船体をタップして姿勢スラスターを置きます（終わるときは「完了」）</div>
 
     <div class="ortho-view-panel">
       <button class="ortho-view-btn" data-ortho-face="front" title="正面（もう一度押すと背面）">正面</button>
@@ -481,7 +612,8 @@
       <button class="debug-btn" id="crossSegmentedBoundsDebugBtn" title="衝突判定用の交差区間分割ボックス（Z軸8×X軸8の交差、最大64分割）を確認表示（開発用の一時機能）">当たり判定(Z×X軸)</button>
     </div>
 
-    <div class="empty-state" id="emptyState">
+    <div class="empty-state hidden" id="emptyState">
+      <button class="close-dropzone" id="closeDropzoneBtn" type="button" title="閉じる">✕</button>
       <div class="icon">🛰️</div>
       <div class="format-tabs">
         <div class="format-tab selected" data-format="glb" id="tabGlb">GLB</div>
@@ -518,74 +650,200 @@
 
       <button class="btn-load" id="loadModelBtn" disabled>モデルを読み込む</button>
       <div class="status-line" id="statusLine"></div>
+      <p class="hint">読み込んだモデルは、いまの設計の大きさに合わせて拡大・縮小され、中心が原点に来るよう自動で位置合わせされます。</p>
     </div>
   </div>
 
-  <div class="adjust-panel" id="adjustPanel">
-    <div class="adjust-section">
-      <h2>回転</h2>
-      <div class="axis-row">
-        <div class="axis-label">X</div>
-        <input type="range" id="rotX" min="-180" max="180" step="1" value="0">
-        <div class="axis-value" id="rotXVal">0°</div>
-      </div>
-      <div class="axis-row">
-        <div class="axis-label">Y</div>
-        <input type="range" id="rotY" min="-180" max="180" step="1" value="0">
-        <div class="axis-value" id="rotYVal">0°</div>
-      </div>
-      <div class="axis-row">
-        <div class="axis-label">Z</div>
-        <input type="range" id="rotZ" min="-180" max="180" step="1" value="0">
-        <div class="axis-value" id="rotZVal">0°</div>
-      </div>
-      <div class="quick-rot-row">
-        <button data-quick="yaw180">Y+180°（前後反転）</button>
-        <button data-quick="pitch90">X+90°（縦→横）</button>
-        <button data-quick="pitchm90">X-90°</button>
-        <button data-quick="roll90">Z+90°</button>
-      </div>
-    </div>
+  <div class="adjust-panel visible" id="adjustPanel">
+    <div class="status-line design-status" id="designStatus"></div>
 
-    <div class="adjust-section">
-      <h2>スケール（原寸に対する倍率）</h2>
+    <details class="adjust-section" id="designSection" open>
+      <summary>艦の設計</summary>
+      <div class="field-row">
+        <label for="designName">名前</label>
+        <input type="text" id="designName" maxlength="40" class="text-input">
+      </div>
+      <div class="field-row">
+        <label for="designSelect">保存済み</label>
+        <select id="designSelect" class="text-input"></select>
+      </div>
+      <div class="btn-row">
+        <button type="button" id="newDesignBtn">新規</button>
+        <button type="button" id="duplicateDesignBtn">複製</button>
+        <button type="button" id="deleteDesignBtn" class="danger">削除</button>
+      </div>
+      <div class="field-row">
+        <label for="templateSelect">ひな形</label>
+        <select id="templateSelect" class="text-input"></select>
+      </div>
+      <p class="hint">「新規」で作るときの形・性能の初期値です。</p>
+    </details>
+
+    <details class="adjust-section" id="hullSection" open>
+      <summary>船体</summary>
+      <div class="model-line" id="modelLine">モデルなし（箱の仮船体）</div>
+      <div class="btn-row">
+        <button type="button" id="openModelLoaderBtn">モデルを読み込む</button>
+        <button type="button" id="removeModelBtn" class="danger">モデルを外す</button>
+      </div>
+      <div id="boxShapeRows">
+        <div class="axis-row">
+          <div class="axis-label">幅</div>
+          <input type="range" id="boxW" min="3" max="100" step="1" value="25">
+          <div class="axis-value" id="boxWVal">25%</div>
+        </div>
+        <div class="axis-row">
+          <div class="axis-label">高</div>
+          <input type="range" id="boxH" min="3" max="100" step="1" value="25">
+          <div class="axis-value" id="boxHVal">25%</div>
+        </div>
+        <p class="hint">箱の仮船体の幅・高さ（全長に対する割合）。</p>
+      </div>
+      <div id="rotationRows">
+        <h3>モデルの向き</h3>
+        <div class="axis-row">
+          <div class="axis-label">X</div>
+          <input type="range" id="rotX" min="-180" max="180" step="1" value="0">
+          <div class="axis-value" id="rotXVal">0°</div>
+        </div>
+        <div class="axis-row">
+          <div class="axis-label">Y</div>
+          <input type="range" id="rotY" min="-180" max="180" step="1" value="0">
+          <div class="axis-value" id="rotYVal">0°</div>
+        </div>
+        <div class="axis-row">
+          <div class="axis-label">Z</div>
+          <input type="range" id="rotZ" min="-180" max="180" step="1" value="0">
+          <div class="axis-value" id="rotZVal">0°</div>
+        </div>
+        <div class="quick-rot-row">
+          <button data-quick="yaw180">Y+180°（前後反転）</button>
+          <button data-quick="pitch90">X+90°（縦→横）</button>
+          <button data-quick="pitchm90">X-90°</button>
+          <button data-quick="roll90">Z+90°</button>
+        </div>
+        <button class="reset-link" id="resetAdjustBtn" type="button">向きをリセット</button>
+      </div>
+    </details>
+
+    <details class="adjust-section" id="sizeSection" open>
+      <summary>大きさ</summary>
       <div class="scale-row">
-        <input type="range" id="scaleSlider" min="-3" max="3" step="0.01" value="0">
-        <div class="scale-value" id="scaleVal">×1.00</div>
+        <input type="range" id="sizeSlider" min="0.69897" max="3.69897" step="0.001" value="1">
+        <input type="number" id="sizeInput" class="num-input" min="5" max="5000" step="any">
+        <span class="unit">m</span>
       </div>
       <div class="scale-presets">
-        <button data-preset-scale="autofit">自動フィット</button>
-        <button data-preset-scale="1">×1</button>
-        <button data-preset-scale="0.1">×0.1</button>
-        <button data-preset-scale="10">×10</button>
+        <button type="button" data-size="10">10m</button>
+        <button type="button" data-size="50">50m</button>
+        <button type="button" data-size="200">200m</button>
+        <button type="button" data-size="1000">1km</button>
+        <button type="button" data-size="5000">5km</button>
       </div>
-    </div>
+      <div class="derived" id="dimsLine"></div>
+      <label class="check-row"><input type="checkbox" id="sizeScalesSpec" checked> 大きさに合わせて質量・推力も変える</label>
+    </details>
 
-    <div class="adjust-section">
-      <h2>位置オフセット（艦の重心からのズレ補正）</h2>
-      <div class="axis-row">
-        <div class="axis-label">X</div>
-        <input type="range" id="offX" min="-20" max="20" step="0.1" value="0">
-        <div class="axis-value" id="offXVal">0.0</div>
+    <details class="adjust-section" id="specSection" open>
+      <summary>質量・速度</summary>
+      <div class="field-row">
+        <label for="massInput">質量</label>
+        <input type="number" id="massInput" class="num-input" min="0" step="any">
+        <span class="unit">t</span>
       </div>
-      <div class="axis-row">
-        <div class="axis-label">Y</div>
-        <input type="range" id="offY" min="-20" max="20" step="0.1" value="0">
-        <div class="axis-value" id="offYVal">0.0</div>
+      <div class="field-row">
+        <label for="maxSpeedInput">最高速度</label>
+        <input type="number" id="maxSpeedInput" class="num-input" min="1" step="any">
+        <span class="unit">m/s</span>
       </div>
-      <div class="axis-row">
-        <div class="axis-label">Z</div>
-        <input type="range" id="offZ" min="-20" max="20" step="0.1" value="0">
-        <div class="axis-value" id="offZVal">0.0</div>
+      <div class="field-row">
+        <label for="maxAngInput">最大角速度</label>
+        <input type="number" id="maxAngInput" class="num-input" min="0.1" step="any">
+        <span class="unit">°/s</span>
       </div>
-    </div>
+      <div class="field-row">
+        <label for="inertiaInput">慣性の係数</label>
+        <input type="number" id="inertiaInput" class="num-input" min="0.001" max="2" step="any">
+        <span class="unit"></span>
+      </div>
+      <p class="hint">回転のしにくさ（慣性モーメント）の係数。1 は質量が船体全体に一様に詰まっている状態で、小さいほど質量が重心の近くに集まっていて向きを変えやすくなります。初期値はひな形の艦種と同じ回りやすさになる値です。</p>
+      <button type="button" class="small-btn" id="autoSpecBtn">大きさから自動で決める（質量・推力・角速度・慣性）</button>
+    </details>
 
-    <div class="adjust-section">
-      <button class="reset-link" id="resetAdjustBtn" type="button">回転・スケール・位置をリセット</button>
-    </div>
+    <details class="adjust-section" id="mainSection" open>
+      <summary>主エンジン</summary>
+      <div class="field-row">
+        <label for="mainThrustInput">最大推力</label>
+        <input type="number" id="mainThrustInput" class="num-input" min="0" step="any">
+        <span class="unit">kN</span>
+      </div>
+      <div class="derived" id="mainAccelLine"></div>
+      <h3>位置（噴射口）</h3>
+      <div class="pos-rows" id="mainPosRows"></div>
+      <div class="btn-row">
+        <button type="button" id="mainToSternBtn">艦尾の中央へ</button>
+        <button type="button" id="mainToCogAxisBtn">重心の真後ろへ</button>
+      </div>
+      <div class="derived" id="mainOffsetLine"></div>
+    </details>
 
-    <div class="adjust-section" id="dockingFaceSection">
-      <h2>接舷面（ドッキングポートに合わせる面）</h2>
+    <details class="adjust-section" id="retroSection">
+      <summary>逆噴射エンジン</summary>
+      <div class="field-row">
+        <label for="retroThrustInput">推力（合計）</label>
+        <input type="number" id="retroThrustInput" class="num-input" min="0" step="any">
+        <span class="unit">kN</span>
+      </div>
+      <div class="derived" id="retroAccelLine"></div>
+      <p class="hint">艦首の面の、重心をはさんだ左右対称の位置に2基置かれます（回転を生まない配置）。</p>
+    </details>
+
+    <details class="adjust-section" id="cogSection" open>
+      <summary>重心</summary>
+      <div class="pos-rows" id="cogPosRows"></div>
+      <div class="btn-row">
+        <button type="button" id="cogToMainAxisBtn">主エンジンの推力線上へ</button>
+        <button type="button" id="cogToCenterBtn">船体の中心へ</button>
+      </div>
+      <p class="hint">重心が主エンジンの推力線（ビューの水色の線）からずれていると、主エンジンを吹かしたときに艦が回ろうとします。その回転は姿勢スラスターが自動で打ち消します（打ち消しきれないときは主エンジンの出力が自動で絞られます）。</p>
+    </details>
+
+    <details class="adjust-section" id="rcsSection" open>
+      <summary>姿勢スラスター</summary>
+      <div class="field-row">
+        <label for="rcsThrustInput">1噴射口の推力</label>
+        <input type="number" id="rcsThrustInput" class="num-input" min="0" step="any">
+        <span class="unit">kN</span>
+      </div>
+      <div class="btn-row">
+        <button type="button" id="rcsPlaceBtn">＋ 船体をタップして追加</button>
+        <button type="button" id="rcsAutoBtn">自動配置（8基）</button>
+        <button type="button" id="rcsClearBtn" class="danger">全部外す</button>
+      </div>
+      <div class="pod-list" id="podList"></div>
+      <div class="pod-editor" id="podEditor" style="display:none;">
+        <div class="pod-editor-title" id="podEditorTitle"></div>
+        <div class="pos-rows" id="podPosRows"></div>
+        <div class="field-row">
+          <label for="podThrustInput">推力（この基だけ）</label>
+          <input type="number" id="podThrustInput" class="num-input" min="0" step="any" placeholder="共通">
+          <span class="unit">kN</span>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="podSnapBtn">いちばん近い船体表面へ</button>
+          <button type="button" id="podDeleteBtn" class="danger">この基を外す</button>
+        </div>
+      </div>
+      <p class="hint">1基につき、船体から外向きの噴射口1つと、表面に沿った4方向の噴射口4つがあります。座標を入力すると、いちばん近い船体表面に吸着します。ビューの■をタップすると選択できます。</p>
+    </details>
+
+    <details class="adjust-section" id="perfSection" open>
+      <summary>性能（自動計算）</summary>
+      <div class="perf" id="perfBox">計算中…</div>
+    </details>
+
+    <details class="adjust-section" id="dockingFaceSection">
+      <summary>接舷面（ドッキングポートに合わせる面）</summary>
       <div class="docking-face-grid">
         <button type="button" class="docking-face-btn" data-face-axis="px">+X</button>
         <button type="button" class="docking-face-btn" data-face-axis="nx">-X</button>
@@ -619,20 +877,13 @@
         <button class="reset-link" id="clearDockingFaceBtn" type="button">接舷面の設定を解除</button>
       </div>
       <p class="docking-face-hint">面を選ぶと、ビューポートに水色の板と法線の矢印が表示されます。「U」「V」はその面の平面上でのズレ、「傾U」「傾V」は面の傾きです。</p>
-    </div>
-
-    <div class="adjust-section">
-      <button class="reset-link" id="replaceModelBtn" type="button">別のモデルに差し替える</button>
-    </div>
-
-    <div class="adjust-section">
-      <button class="reset-link" id="removeModelBtn" type="button" style="color:#ff9d9d;">このモデルを削除して仮メッシュに戻す</button>
-    </div>
+    </details>
   </div>
 
-  <div class="footer-bar" id="footerBar" style="display:none;">
-    <a class="btn btn-secondary" href="settings.html">キャンセル</a>
-    <button class="btn btn-primary" id="saveBtn">この艦種にモデルを保存</button>
+  <div class="footer-bar" id="footerBar">
+    <a class="btn btn-secondary" href="settings.html">設定へ戻る</a>
+    <button class="btn btn-primary" id="saveBtn">保存</button>
+    <button class="btn btn-primary" id="saveAndFlyBtn">保存して出撃</button>
   </div>
 
 </div>
@@ -647,6 +898,8 @@
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/MTLLoader.js"></script>
 <script src="01-state-and-config.js"></script>
+<script src="21-ship-design.js"></script>
 <script src="09-ship-builder.js"></script>
+<script src="22-ship-designer.js"></script>
 </body>
 </html>

@@ -110,6 +110,11 @@ const ThrusterSolver = {
   // ターはforce/pitchYawのarmを持たない設計）、単純な加算で安全に
   // 合成できる。念のため合算後は1.0でクランプする。
   solve(ship, desiredForce, desiredTorque) {
+    // v78: 自作の艦は、重心まわりの力・トルクの釣り合いを解く配分方式
+    // （21-ship-design.js ShipAllocator）を使う。艦種プリセットは従来どおり。
+    if (ship && ship.allocation === 'balanced' && typeof ShipAllocator !== 'undefined') {
+      return ShipAllocator.solve(ship, desiredForce, desiredTorque);
+    }
     const pitchYawTorque = { x: desiredTorque.x, y: desiredTorque.y, z: 0 };
     const rollTorque = { x: 0, y: 0, z: desiredTorque.z };
 
@@ -380,6 +385,9 @@ const ThrusterSolver = {
   // キャッシュして毎フレームの再計算を避ける。
   // -----------------------------------------------------------
   _estimateMaxAngularAccel(ship) {
+    if (ship.allocation === 'balanced' && typeof ShipAllocator !== 'undefined') {
+      return ShipAllocator.estimateMaxAngularAccel(ship);
+    }
     if (ship._maxAngularAccelCache && ship._maxAngularAccelCacheThrusters === ship.thrusters) {
       return ship._maxAngularAccelCache;
     }
@@ -422,6 +430,9 @@ const ThrusterSolver = {
   // 参照）。回転側の_estimateMaxAngularAccel()と対になる並進版。
   // -----------------------------------------------------------
   _estimateMaxLinearDecel(ship) {
+    if (ship.allocation === 'balanced' && typeof ShipAllocator !== 'undefined') {
+      return ShipAllocator.estimateMaxLinearDecel(ship);
+    }
     if (ship._maxLinearDecelCache && ship._maxLinearDecelCacheThrusters === ship.thrusters) {
       return ship._maxLinearDecelCache;
     }
@@ -467,6 +478,9 @@ const ThrusterSolver = {
   // 出力を食い合うことも多いSAFETY_FACTORはZ軸より保守的にしてある。
   // -----------------------------------------------------------
   _estimateMaxLateralDecel(ship) {
+    if (ship.allocation === 'balanced' && typeof ShipAllocator !== 'undefined') {
+      return ShipAllocator.estimateMaxLateralDecel(ship);
+    }
     if (ship._maxLateralDecelCache && ship._maxLateralDecelCacheThrusters === ship.thrusters) {
       return ship._maxLateralDecelCache;
     }

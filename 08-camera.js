@@ -55,6 +55,21 @@ const CameraSystem = {
   MIN_DISTANCE: 8,
   MAX_DISTANCE: 300,
 
+  // v78: 艦の大きさ（最大寸法[m]）に応じた倍率。自作の艦は10m〜5000mまで
+  // 変えられるため、追従カメラの位置・自由視点の距離の範囲をこれで拡大する。
+  // ロケット級（約8m）以下は1（従来どおり）。
+  _shipScale: 1,
+
+  setShipSize(sizeM) {
+    const k = Math.max(1, (sizeM || 8) / 8);
+    const ratio = k / this._shipScale;
+    this._shipScale = k;
+    this.MIN_DISTANCE = 8 * k;
+    this.MAX_DISTANCE = 300 * k;
+    this._orbit.distance = clamp(this._orbit.distance * ratio, this.MIN_DISTANCE, this.MAX_DISTANCE);
+    this._panOffsetLocal = vecScale(this._panOffsetLocal, ratio);
+  },
+
   // -----------------------------------------------------------
   // 初期化: ドラッグ操作のイベントバインド
   //   canvasEl: レンダラーのcanvas要素（renderer.domElement）
@@ -323,7 +338,7 @@ const CameraSystem = {
   resetView() {
     this._orbit.azimuth = 0;
     this._orbit.elevation = 0.2;
-    this._orbit.distance = 30;
+    this._orbit.distance = 30 * this._shipScale;
     this._panOffsetLocal = { x: 0, y: 0, z: 0 };
   },
 
@@ -357,7 +372,8 @@ const CameraSystem = {
   // （バグ報告：「視点が船のロールに追従しない」）。
   // -----------------------------------------------------------
   _updateChase(camera, ship) {
-    const camOffset = rotateVecByQuat({ x: 0, y: 6, z: 24 }, ship.quaternion);
+    const k = this._shipScale;
+    const camOffset = rotateVecByQuat({ x: 0, y: 6 * k, z: 24 * k }, ship.quaternion);
     camera.position.set(
       ship.position.x + camOffset.x,
       ship.position.y + camOffset.y,

@@ -112,9 +112,14 @@ const FlightPhysics = {
 
     // 回転: ローカル合トルク→角加速度→角速度積分（慣性モーメントは
     // スカラー簡略化のため、トルクはローカル軸のまま角加速度に変換）
-    const angAccelX = totalTorqueLocal.x / ship.inertia;
-    const angAccelY = totalTorqueLocal.y / ship.inertia;
-    const angAccelZ = totalTorqueLocal.z / ship.inertia;
+    // v78: 自作の艦（21-ship-design.js）は船体の形から求めた軸ごとの
+    // 慣性モーメント（細長い艦はロールより首振りが重い）を使う。
+    // 角速度の向きが変わることによるジャイロ効果は、操縦・自動ドッキングの
+    // 制御を単純に保つため従来どおり省略する。
+    const I = ship.inertiaTensor;
+    const angAccelX = totalTorqueLocal.x / (I ? I.x : ship.inertia);
+    const angAccelY = totalTorqueLocal.y / (I ? I.y : ship.inertia);
+    const angAccelZ = totalTorqueLocal.z / (I ? I.z : ship.inertia);
 
     ship.angularVelocity.x += angAccelX * dt;
     ship.angularVelocity.y += angAccelY * dt;

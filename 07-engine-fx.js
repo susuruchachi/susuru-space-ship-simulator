@@ -132,6 +132,8 @@ const EngineFx = {
   // このファイルを一切触らずにエフェクトも追従する。
   // -----------------------------------------------------------
   _spawnThrustFx(ship, dt) {
+    // v78: 自作の艦は大きさに応じて噴射の長さ・太さを拡大する（ロケット級は1）
+    const fx = ship.fxScale || 1;
     for (const t of ship.thrusters) {
       const ratio = ship.thrusterOutputRatios[t.id] ?? 0;
       if (ratio <= 0.01) continue;
@@ -151,7 +153,7 @@ const EngineFx = {
         const p = this._acquireParticle(pool);
         if (!p) break;
 
-        const spread = isMain ? 0.35 : 0.5;
+        const spread = isMain ? 0.35 : 0.5;  // 速度に掛けるので大きさの倍率は不要
         const jitterX = (Math.random() - 0.5) * spread;
         const jitterY = (Math.random() - 0.5) * spread;
         const jitterZ = (Math.random() - 0.5) * spread;
@@ -161,9 +163,9 @@ const EngineFx = {
         p.y = nozzleWorld.y;
         p.z = nozzleWorld.z;
 
-        const baseSpeed = isMain
+        const baseSpeed = (isMain
           ? 12 + Math.random() * 8 + ratio * 10
-          : 6 + Math.random() * 4;
+          : 6 + Math.random() * 4) * fx;
 
         p.vx = dirWorld.x * baseSpeed + jitterX * baseSpeed * 0.3 + ship.velocity.x;
         p.vy = dirWorld.y * baseSpeed + jitterY * baseSpeed * 0.3 + ship.velocity.y;
@@ -173,9 +175,9 @@ const EngineFx = {
           ? 0.5 + Math.random() * 0.4
           : 0.2 + Math.random() * 0.15;
         p.life = p.maxLife;
-        p.size = isMain
+        p.size = (isMain
           ? (2.2 + ratio * 2.4) * (0.7 + Math.random() * 0.6)
-          : 1.0 + Math.random() * 0.6;
+          : 1.0 + Math.random() * 0.6) * fx;
       }
     }
   },

@@ -17,6 +17,14 @@
 //   - 読み込んだモデルの向き(X/Y/Z回転)・スケール・位置オフセットを調整
 //   - 艦種(rocket/cruiser/battleship)ごとにモデル+調整値を保存
 //
+// v78: 「艦の設計」（21-ship-design.js、名前を付けて何隻でも保存できる
+// 自作の艦）の編集画面になった。大きさ・質量・主エンジン・重心・姿勢
+// スラスターなどの設計の編集と保存は 22-ship-designer.js が担当し、この
+// ファイルは3Dビュー（カメラ操作・平行投影）・モデルの読み込み・接舷面・
+// 当たり判定の確認表示を受け持つ。両者は window.ShipBuilderCore でつながる。
+// モデルの位置オフセット・スケールは設計側（中心合わせ・大きさ）が
+// 自動で決めるため、スライダーは無くした。
+//
 // スラスター位置の見直しやモデル差し替え時の自動整合は範囲外
 // （ユーザー指定により、今回はインポートと向き合わせのみ）。
 //
@@ -71,6 +79,12 @@
     document.getElementById('loadModelBtn').disabled = true;
   }
 
+  // v78: 設計の編集（22-ship-designer.js）から差し込む処理
+  let onAdjustHook = null;          // 回転などを変えた直後（毎回）
+  let onRotationCommitHook = null;  // 回転の操作を終えたとき
+  let hullHalfExtentsHook = null;   // 船体の半寸法（接舷面の計算用）
+  let onModelLoadedHook = null;     // モデルを読み込んだとき（引数: ユーザーの操作による読み込みか）
+
   // -----------------------------------------------------------
   // DOM参照
   // -----------------------------------------------------------
@@ -106,9 +120,14 @@
   let pendingMtlFile = null;
   let pendingTexFiles = []; // File[]
 
+  // v78: モデル読み込みパネルの中と、設計パネルの上部の両方に表示する
+  const designStatusEl = document.getElementById('designStatus');
   function setStatus(msg, isError) {
-    statusLine.textContent = msg || '';
-    statusLine.classList.toggle('error', !!isError);
+    for (const el of [statusLine, designStatusEl]) {
+      if (!el) continue;
+      el.textContent = msg || '';
+      el.classList.toggle('error', !!isError);
+    }
   }
 
   function refreshLoadButtonEnabled() {
@@ -214,6 +233,7 @@
   let correctionGroup = null; // rotation/scale/offset補正を適用する中間ノード
   let gridHelper = null;
   let axesHelper = null;
+  let forwardArrow = null;
 
   // オービットカメラ（簡易実装。ライブラリ非依存でOrbitControls相当の
   // 挙動をタッチ/マウス両対応で自前実装する）
@@ -272,8 +292,8 @@
     // モデルは常にこのグループの子として追加し、艦の進行方向の
     // 目印として艦首側(-Z、ゲーム内の前方に相当)へ矢印を出しておく
     const arrowDir = new THREE.Vector3(0, 0, -1);
-    const arrow = new THREE.ArrowHelper(arrowDir, new THREE.Vector3(0, 0, 0), 5, 0xffcc55, 1.2, 0.6);
-    scene.add(arrow);
+    forwardArrow = new THREE.ArrowHelper(arrowDir, new THREE.Vector3(0, 0, 0), 5, 0xffcc55, 1.2, 0.6);
+    scene.add(forwardArrow);
 
     correctionGroup = new THREE.Group();
     scene.add(correctionGroup);
@@ -426,7 +446,6 @@
   const activePointers = new Map();
 
   canvas.addEventListener('pointerdown', (e) => {
-    if (!modelRoot) return;
     activePointers.set(e.pointerId, e);
     dragging = true;
     panning = e.shiftKey;
@@ -457,12 +476,14 @@
     panning = false;
     try { canvas.releasePointerCapture(e.pointerId); } catch (err) {}
   });
+  // v78: ズームの範囲は艦の大きさ（10m〜5000m）に合わせて変える（setSceneScale）
+  const zoomLimits = { min: 1, max: 500 };
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
     if (orbitState.ortho) {
-      orbitState.orthoZoom = clamp(orbitState.orthoZoom * (1 + e.deltaY * 0.001), 0.5, 500);
+      orbitState.orthoZoom = clamp(orbitState.orthoZoom * (1 + e.deltaY * 0.001), zoomLimits.min * 0.5, zoomLimits.max);
     } else {
-      orbitState.radius = clamp(orbitState.radius * (1 + e.deltaY * 0.001), 1, 500);
+      orbitState.radius = clamp(orbitState.radius * (1 + e.deltaY * 0.001), zoomLimits.min, zoomLimits.max);
     }
   }, { passive: false });
 
@@ -482,7 +503,7 @@
         pinchLastMidX = midX;
         pinchLastMidY = midY;
       } else {
-        const scaled = clamp(pinchStartRadius * (pinchStartDist / Math.max(1, dist)), orbitState.ortho ? 0.5 : 1, 500);
+        const scaled = clamp(pinchStartRadius * (pinchStartDist / Math.max(1, dist)), orbitState.ortho ? zoomLimits.min * 0.5 : zoomLimits.min, zoomLimits.max);
         if (orbitState.ortho) {
           orbitState.orthoZoom = scaled;
         } else {
@@ -512,6 +533,7 @@
 
   function applyAdjustToGroup() {
     if (!correctionGroup) return;
+    if (typeof onAdjustHook === 'function') onAdjustHook();
     const toRad = (d) => (d * Math.PI) / 180;
     correctionGroup.rotation.set(
       toRad(adjust.rotationDeg.x),
@@ -540,15 +562,6 @@
   const rotYVal = document.getElementById('rotYVal');
   const rotZVal = document.getElementById('rotZVal');
 
-  const scaleSlider = document.getElementById('scaleSlider'); // log軸: 10^value
-  const scaleVal = document.getElementById('scaleVal');
-
-  const offX = document.getElementById('offX');
-  const offY = document.getElementById('offY');
-  const offZ = document.getElementById('offZ');
-  const offXVal = document.getElementById('offXVal');
-  const offYVal = document.getElementById('offYVal');
-  const offZVal = document.getElementById('offZVal');
 
   function syncRotUiFromState() {
     rotX.value = adjust.rotationDeg.x;
@@ -558,32 +571,14 @@
     rotYVal.textContent = `${Math.round(adjust.rotationDeg.y)}°`;
     rotZVal.textContent = `${Math.round(adjust.rotationDeg.z)}°`;
   }
-  function syncScaleUiFromState() {
-    scaleSlider.value = Math.log10(adjust.scale);
-    scaleVal.textContent = `×${adjust.scale.toFixed(2)}`;
-  }
-  function syncOffsetUiFromState() {
-    offX.value = adjust.offset.x;
-    offY.value = adjust.offset.y;
-    offZ.value = adjust.offset.z;
-    offXVal.textContent = adjust.offset.x.toFixed(1);
-    offYVal.textContent = adjust.offset.y.toFixed(1);
-    offZVal.textContent = adjust.offset.z.toFixed(1);
-  }
 
+  // v78: 回転を変えると船体の外形が変わるので、離した時点（change）で
+  // 設計側に中心合わせ・姿勢スラスターの再配置をさせる（onRotationCommitHook）
+  const commitRotation = () => { if (typeof onRotationCommitHook === 'function') onRotationCommitHook(); };
   rotX.addEventListener('input', () => { adjust.rotationDeg.x = Number(rotX.value); rotXVal.textContent = `${rotX.value}°`; applyAdjustToGroup(); });
   rotY.addEventListener('input', () => { adjust.rotationDeg.y = Number(rotY.value); rotYVal.textContent = `${rotY.value}°`; applyAdjustToGroup(); });
   rotZ.addEventListener('input', () => { adjust.rotationDeg.z = Number(rotZ.value); rotZVal.textContent = `${rotZ.value}°`; applyAdjustToGroup(); });
-
-  scaleSlider.addEventListener('input', () => {
-    adjust.scale = Math.pow(10, Number(scaleSlider.value));
-    scaleVal.textContent = `×${adjust.scale.toFixed(2)}`;
-    applyAdjustToGroup();
-  });
-
-  offX.addEventListener('input', () => { adjust.offset.x = Number(offX.value); offXVal.textContent = adjust.offset.x.toFixed(1); applyAdjustToGroup(); });
-  offY.addEventListener('input', () => { adjust.offset.y = Number(offY.value); offYVal.textContent = adjust.offset.y.toFixed(1); applyAdjustToGroup(); });
-  offZ.addEventListener('input', () => { adjust.offset.z = Number(offZ.value); offZVal.textContent = adjust.offset.z.toFixed(1); applyAdjustToGroup(); });
+  [rotX, rotY, rotZ].forEach((el) => el.addEventListener('change', commitRotation));
 
   // クイック回転ボタン（よくある「モデルが上向き/横向きで読み込まれる」
   // ケースのショートカット。既存の回転に加算する）
@@ -596,6 +591,7 @@
       if (kind === 'roll90') adjust.rotationDeg.z = wrapDeg180(adjust.rotationDeg.z + 90);
       syncRotUiFromState();
       applyAdjustToGroup();
+      commitRotation();
     });
   });
   function wrapDeg180(d) {
@@ -605,47 +601,12 @@
     return v;
   }
 
-  document.querySelectorAll('[data-preset-scale]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const p = btn.dataset.presetScale;
-      if (p === 'autofit') {
-        adjust.scale = computeAutofitScale();
-      } else {
-        adjust.scale = Number(p);
-      }
-      syncScaleUiFromState();
-      applyAdjustToGroup();
-    });
-  });
-
-  // モデルのバウンディングサイズから「艦種の目安の全長」に収まる
-  // 倍率を逆算する（GLB/OBJがcm単位・mm単位等でエクスポートされ、
-  // 極端に大小になっているケースの救済用）
-  function computeAutofitScale() {
-    if (!modelRoot) return 1;
-    const box = new THREE.Box3().setFromObject(modelRoot);
-    const size = new THREE.Vector3();
-    box.getSize(size);
-    const longestAxis = Math.max(size.x, size.y, size.z);
-    if (longestAxis <= 0 || !isFinite(longestAxis)) return 1;
-
-    const targetLengthByClass = { rocket: 8, cruiser: 60, battleship: 140 };
-    const targetLength = targetLengthByClass[classKey] ?? 8;
-    return targetLength / longestAxis;
-  }
-
+  // v78: 「回転をリセット」。スケール（大きさ）・位置（中心合わせ）は設計側が決める。
   document.getElementById('resetAdjustBtn').addEventListener('click', () => {
     adjust.rotationDeg = { x: 0, y: 0, z: 0 };
-    adjust.scale = 1;
-    adjust.offset = { x: 0, y: 0, z: 0 };
     syncRotUiFromState();
-    syncScaleUiFromState();
-    syncOffsetUiFromState();
     applyAdjustToGroup();
-    // 回転・スケール・位置を変えるとバウンディングボックスが変わり、
-    // 接舷面のズレ量(offsetU/V)の基準もズレるため、接舷面もあわせて
-    // リセットする（そのまま残すと面の位置が意図せずズレて見える）。
-    setDockingFace(null);
+    commitRotation();
   });
 
   // -----------------------------------------------------------
@@ -674,7 +635,10 @@
   // 半寸法をローカル座標系で返す。index.html側のバウンディングボックス
   // 計算（loadSavedShipModelInto内、補正後correctionGroupから算出）と
   // 基準を一致させるため、ここでも同じくcorrectionGroup全体から取る。
+  // v78: 設計側（22-ship-designer.js）が船体の寸法を知っているのでそちらを優先する
+  // （モデルが無い箱の仮船体でも接舷面を設定できる）
   function computeCurrentHalfExtents() {
+    if (typeof hullHalfExtentsHook === 'function') return hullHalfExtentsHook();
     if (!modelRoot) return { x: 0, y: 0, z: 0 };
     const box = new THREE.Box3().setFromObject(correctionGroup);
     if (box.isEmpty()) return { x: 0, y: 0, z: 0 };
@@ -707,7 +671,6 @@
 
   document.querySelectorAll('.docking-face-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
-      if (!modelRoot) return;
       const axis = btn.dataset.faceAxis;
       // 既に同じ面が選択されている場合はオフセット/傾きを維持したまま
       // 面だけ選び直せるようにする（誤タップでの値消失を避ける）。
@@ -755,14 +718,14 @@
   // スケール・位置オフセットのスライダー操作にも自動追従する。
   function rebuildDockingFaceGizmo() {
     if (dockingFaceGizmo) {
-      correctionGroup.remove(dockingFaceGizmo);
+      if (dockingFaceGizmo.parent) dockingFaceGizmo.parent.remove(dockingFaceGizmo);
       dockingFaceGizmo.traverse((obj) => {
         if (obj.geometry) obj.geometry.dispose();
         if (obj.material) obj.material.dispose();
       });
       dockingFaceGizmo = null;
     }
-    if (!dockingFace || !modelRoot) return;
+    if (!dockingFace) return;
 
     const halfExtents = computeCurrentHalfExtents();
     const local = computeDockingFaceLocalTransform(dockingFace, halfExtents);
@@ -815,7 +778,11 @@
     );
     group.add(arrow);
 
-    correctionGroup.add(group);
+    // v78: 設計座標（船体の中心が原点）で計算した位置なので、補正ノード
+    // （モデルの回転・スケール）の子ではなくシーン直下に置く。以前は
+    // correctionGroupの子にしていたため、スケールが1でないと位置が
+    // 二重にスケールされてずれて見えていた。
+    scene.add(group);
     dockingFaceGizmo = group;
   }
 
@@ -858,22 +825,15 @@
     orbitState.orthoZoom = maxDim * 1.0;
   }
 
-  function onModelLoadedIntoScene(root) {
+  function onModelLoadedIntoScene(root, fromUser) {
     clearModelRoot();
     modelRoot = root;
     correctionGroup.add(modelRoot);
     applyAdjustToGroup();
-    frameCameraOnModel();
-    // 新しいモデル（差し替え含む）を読み込んだ直後は、以前のモデルの
-    // 形状に基づいた接舷面はそのまま流用できないため一旦解除する。
-    // 保存済みモデルの復元時(restoreExistingModel)は、この直後に
-    // 呼び出し側が保存されていたdockingFaceを明示的に復元する。
-    setDockingFace(null);
-
     emptyState.classList.add('hidden');
-    adjustPanel.classList.add('visible');
-    footerBar.style.display = '';
-    viewportHint.style.display = '';
+    // v78: 中心合わせ・大きさ合わせ・カメラの向けなおしは設計側が行う
+    if (typeof onModelLoadedHook === 'function') onModelLoadedHook(!!fromUser);
+    else frameCameraOnModel();
   }
 
   loadModelBtn.addEventListener('click', async () => {
@@ -885,7 +845,7 @@
       } else {
         await loadObjFromFiles(pendingObjFile, pendingMtlFile, pendingTexFiles);
       }
-      setStatus('読み込み完了。向き・スケールを調整してください。', false);
+      setStatus('読み込み完了。設計の大きさに合わせて拡大・縮小しました。艦首の向きが違う場合は「モデルの向き」で直してください。', false);
     } catch (e) {
       console.error(e);
       setStatus(`読み込みに失敗しました: ${e.message || e}`, true);
@@ -929,11 +889,14 @@
           arrayBuffer,
           '',
           (gltf) => {
-            onModelLoadedIntoScene(gltf.scene);
             // 保存用にBase64も保持しておく（保存ボタン押下時に使用）
             pendingSaveGlbArrayBuffer = arrayBuffer;
             pendingSaveFormat = 'glb';
             pendingSaveFileName = file.name;
+            pendingSaveObjText = null;
+            pendingSaveMtlText = null;
+            pendingSaveTextures = null;
+            onModelLoadedIntoScene(gltf.scene, true);
             resolve();
           },
           (err) => reject(err instanceof Error ? err : new Error('GLBの解析に失敗しました'))
@@ -958,11 +921,11 @@
           }
           try {
             const objGroup = objLoader.parse(objText);
-            onModelLoadedIntoScene(objGroup);
-
             pendingSaveFormat = 'obj';
             pendingSaveFileName = objFile.name;
             pendingSaveObjText = objText;
+            pendingSaveGlbArrayBuffer = null;
+            onModelLoadedIntoScene(objGroup, true);
             resolve();
           } catch (e) {
             reject(e instanceof Error ? e : new Error('OBJの解析に失敗しました'));
@@ -1041,182 +1004,110 @@
     return `data:${mimeType};base64,${btoa(binary)}`;
   }
 
-  document.getElementById('saveBtn').addEventListener('click', async () => {
-    if (!pendingSaveFormat) {
-      setStatus('保存できるモデルがありません。', true);
-      return;
-    }
-    const saveBtnEl = document.getElementById('saveBtn');
-    saveBtnEl.disabled = true;
-    setStatus('保存中…', false);
-    try {
-      const data = {
-        format: pendingSaveFormat,
-        fileName: pendingSaveFileName,
-        glbDataUrl: pendingSaveFormat === 'glb'
-          ? arrayBufferToDataUrl(pendingSaveGlbArrayBuffer, 'model/gltf-binary')
-          : null,
-        objText: pendingSaveFormat === 'obj' ? pendingSaveObjText : null,
-        mtlText: pendingSaveFormat === 'obj' ? pendingSaveMtlText : null,
-        textures: pendingSaveFormat === 'obj' ? pendingSaveTextures : null,
-        adjust: {
-          rotationDeg: { ...adjust.rotationDeg },
-          scale: adjust.scale,
-          offset: { ...adjust.offset },
-        },
-        // v61: 接舷面（ドッキングフェイス）。未設定ならnull。
-        dockingFace: dockingFace
-          ? {
-              axis: dockingFace.axis,
-              offsetU: dockingFace.offsetU,
-              offsetV: dockingFace.offsetV,
-              tiltDeg: { ...dockingFace.tiltDeg },
-            }
-          : null,
-      };
-      await saveShipModelData(classKey, data);
-      setStatus(`${ShipClassPresets[classKey].label}にモデルを保存しました。`, false);
-    } catch (e) {
-      console.error(e);
-      if (e && e.name === 'QuotaExceededError') {
-        // v13: IndexedDBへ移行済みのため、この上限はlocalStorageより
-        // はるかに大きい。それでも出る場合は端末のストレージ空き容量
-        // 自体が不足している可能性が高い。
-        setStatus('保存に失敗しました（容量不足）。端末のストレージ空き容量を確認するか、モデルのファイルサイズを小さくしてください。', true);
-      } else {
-        setStatus('保存に失敗しました。', true);
-      }
-    } finally {
-      saveBtnEl.disabled = false;
-    }
-  });
+  // v78: 保存は設計単位（22-ship-designer.js）。ここでは保存用のモデル
+  // データ（GLBはBase64のdata URL、OBJは本文）を組み立てるだけ。
+  // 生成結果はキャッシュし、同じモデルのまま何度保存しても変換し直さない。
+  let modelDataCache = null;
+  function getModelDataForSave() {
+    if (!pendingSaveFormat) return null;
+    const key = pendingSaveFormat === 'glb' ? pendingSaveGlbArrayBuffer : pendingSaveObjText;
+    if (modelDataCache && modelDataCache.key === key) return modelDataCache.data;
+    const data = {
+      format: pendingSaveFormat,
+      fileName: pendingSaveFileName,
+      glbDataUrl: pendingSaveFormat === 'glb'
+        ? arrayBufferToDataUrl(pendingSaveGlbArrayBuffer, 'model/gltf-binary')
+        : null,
+      objText: pendingSaveFormat === 'obj' ? pendingSaveObjText : null,
+      mtlText: pendingSaveFormat === 'obj' ? pendingSaveMtlText : null,
+      textures: pendingSaveFormat === 'obj' ? pendingSaveTextures : null,
+    };
+    modelDataCache = { key, data };
+    return data;
+  }
 
   // v13: 「箱」（ドロップゾーン=emptyState）はモデル読み込み後に
   // hiddenのまま戻す手段が無く、削除（このモデルを削除して仮メッシュに
   // 戻す）以外でモデルを差し替えられなかった。この関数でドロップゾーン
   // を再表示する処理を共通化し、削除ボタンと新設の差し替えボタン
   // 両方から使えるようにする。
-  function showDropzoneForReplace() {
+  // v78: モデルを外して箱の仮船体に戻す（保存は設計側の「保存」で行う）
+  function removeModel() {
     clearModelRoot();
     pendingSaveFormat = null;
     pendingSaveGlbArrayBuffer = null;
     pendingSaveObjText = null;
     pendingSaveMtlText = null;
     pendingSaveTextures = null;
-    setDockingFace(null);
+  }
 
+  // モデル読み込み用のパネル（ドロップゾーン）を出す／閉じる
+  function showDropzone() {
     emptyState.classList.remove('hidden');
-    adjustPanel.classList.remove('visible');
-    footerBar.style.display = 'none';
-    viewportHint.style.display = 'none';
   }
-
-  document.getElementById('removeModelBtn').addEventListener('click', async () => {
-    try {
-      await removeShipModelData(classKey);
-      setStatus('モデルを削除しました。次回はゲーム内の仮メッシュが使われます。', false);
-    } catch (e) {
-      console.error(e);
-      setStatus('モデルの削除に失敗しました。', true);
-      return;
-    }
-    showDropzoneForReplace();
-  });
-
-  const replaceModelBtn = document.getElementById('replaceModelBtn');
-  if (replaceModelBtn) {
-    replaceModelBtn.addEventListener('click', () => {
-      // 削除とは異なり、保存済みデータはまだ消さない。
-      // ここで新しいファイルを読み込んで「保存」ボタンを押すまでは
-      // 保存済みモデルはそのまま残る（読み込み失敗時のフォールバック）。
-      showDropzoneForReplace();
-      setStatus('新しいモデルをドロップまたは選択してください。まだ保存はされていません。', false);
-    });
+  function hideDropzone() {
+    emptyState.classList.add('hidden');
   }
+  const closeDropzoneBtn = document.getElementById('closeDropzoneBtn');
+  if (closeDropzoneBtn) closeDropzoneBtn.addEventListener('click', hideDropzone);
 
   // -----------------------------------------------------------
-  // 既存保存データがあれば起動時に復元
+  // 保存済みのモデルデータ（GLB/OBJ）をシーンに読み込む。
+  // v78: 起動時に艦種ごとのモデルを自動で読むのをやめ、設計側から
+  // 「この設計のモデル」「艦種に保存されていたモデル」を渡して呼ぶ。
   // -----------------------------------------------------------
-  async function restoreExistingModel() {
-    setStatus('保存済みのモデルを確認しています…', false);
-    let existing;
-    try {
-      existing = await loadShipModelData(classKey);
-    } catch (e) {
-      console.error(e);
-      setStatus('保存済みモデルの読み込みに失敗しました。', true);
-      return;
-    }
-    if (!existing) {
-      setStatus('');
-      return;
-    }
-
-    adjust.rotationDeg = { ...existing.adjust.rotationDeg };
-    adjust.scale = existing.adjust.scale;
-    adjust.offset = { ...existing.adjust.offset };
-    syncRotUiFromState();
-    syncScaleUiFromState();
-    syncOffsetUiFromState();
-
-    setStatus('保存済みのモデルを読み込んでいます…', false);
-
-    if (existing.format === 'glb') {
-      // v67: fetch(dataUrl)はiPad(iOS WebKit)で巨大なdata URLの読み込みに
-      // 失敗することがあったため、atob直接デコード(dataUrlToArrayBuffer、
-      // 01-state-and-config.js)に変更。
+  function restoreModelFromData(existing) {
+    return new Promise((resolve, reject) => {
       try {
-        const buf = dataUrlToArrayBuffer(existing.glbDataUrl);
-        const loader = createRobustGltfLoader();
-        loader.parse(buf, '', (gltf) => {
-          onModelLoadedIntoScene(gltf.scene);
-          pendingSaveFormat = 'glb';
+        if (existing.format === 'glb') {
+          // v67: fetch(dataUrl)はiPad(iOS WebKit)で巨大なdata URLの読み込みに
+          // 失敗することがあったため、atob直接デコード(dataUrlToArrayBuffer、
+          // 01-state-and-config.js)に変更。
+          const buf = dataUrlToArrayBuffer(existing.glbDataUrl);
+          const loader = createRobustGltfLoader();
+          loader.parse(buf, '', (gltf) => {
+            pendingSaveFormat = 'glb';
+            pendingSaveFileName = existing.fileName;
+            pendingSaveGlbArrayBuffer = buf;
+            pendingSaveObjText = null;
+            pendingSaveMtlText = null;
+            pendingSaveTextures = null;
+            modelDataCache = { key: buf, data: existing };
+            onModelLoadedIntoScene(gltf.scene, false);
+            resolve();
+          }, (err) => reject(err instanceof Error ? err : new Error('GLBの解析に失敗しました')));
+        } else if (existing.format === 'obj') {
+          let materials = null;
+          if (existing.mtlText) {
+            const texMap = existing.textures || {};
+            const manager = new THREE.LoadingManager();
+            manager.setURLModifier((url) => {
+              const baseName = url.split('/').pop().split('\\').pop();
+              if (texMap[baseName]) return texMap[baseName];
+              return url;
+            });
+            materials = new THREE.MTLLoader(manager).parse(existing.mtlText, '');
+            materials.preload();
+          }
+          const objLoader = new THREE.OBJLoader();
+          if (materials) objLoader.setMaterials(materials);
+          const objGroup = objLoader.parse(existing.objText);
+          pendingSaveFormat = 'obj';
           pendingSaveFileName = existing.fileName;
-          pendingSaveGlbArrayBuffer = buf;
-          // onModelLoadedIntoScene内で一旦nullに戻されるため、
-          // 保存されていた接舷面をここで明示的に復元する。
-          if (existing.dockingFace) setDockingFace({ ...existing.dockingFace, tiltDeg: { ...existing.dockingFace.tiltDeg } });
-          setStatus('保存済みモデルを読み込みました。', false);
-        }, (err) => setStatus('保存済みモデルの読み込みに失敗しました。', true));
-      } catch (e) {
-        console.error(e);
-        setStatus('保存済みモデルの読み込みに失敗しました。', true);
-      }
-    } else if (existing.format === 'obj') {
-      const finish = (materials) => {
-        const objLoader = new THREE.OBJLoader();
-        if (materials) {
-          materials.preload();
-          objLoader.setMaterials(materials);
+          pendingSaveObjText = existing.objText;
+          pendingSaveMtlText = existing.mtlText;
+          pendingSaveTextures = existing.textures;
+          pendingSaveGlbArrayBuffer = null;
+          modelDataCache = { key: existing.objText, data: existing };
+          onModelLoadedIntoScene(objGroup, false);
+          resolve();
+        } else {
+          reject(new Error(`未対応のモデル形式: ${existing.format}`));
         }
-        const objGroup = objLoader.parse(existing.objText);
-        onModelLoadedIntoScene(objGroup);
-        pendingSaveFormat = 'obj';
-        pendingSaveFileName = existing.fileName;
-        pendingSaveObjText = existing.objText;
-        pendingSaveMtlText = existing.mtlText;
-        pendingSaveTextures = existing.textures;
-        // onModelLoadedIntoScene内で一旦nullに戻されるため、
-        // 保存されていた接舷面をここで明示的に復元する。
-        if (existing.dockingFace) setDockingFace({ ...existing.dockingFace, tiltDeg: { ...existing.dockingFace.tiltDeg } });
-        setStatus('保存済みモデルを読み込みました。', false);
-      };
-
-      if (!existing.mtlText) {
-        finish(null);
-      } else {
-        const texMap = existing.textures || {};
-        const manager = new THREE.LoadingManager();
-        manager.setURLModifier((url) => {
-          const baseName = url.split('/').pop().split('\\').pop();
-          if (texMap[baseName]) return texMap[baseName];
-          return url;
-        });
-        const mtlLoader = new THREE.MTLLoader(manager);
-        const materials = mtlLoader.parse(existing.mtlText, '');
-        finish(materials);
+      } catch (e) {
+        reject(e);
       }
-    }
+    });
   }
 
   // -----------------------------------------------------------
@@ -1366,11 +1257,71 @@
   }
 
   // -----------------------------------------------------------
+  // v78: 艦の大きさ（最大寸法[m]）に合わせて、カメラの描画範囲・ズーム
+  // の範囲・床のグリッド・座標軸などの大きさを変える（10m〜5000m）。
+  // -----------------------------------------------------------
+  let sceneScale = 8;
+  function setSceneScale(size) {
+    sceneScale = Math.max(1, size);
+    zoomLimits.min = sceneScale * 0.08;
+    zoomLimits.max = sceneScale * 8;
+    camera.near = sceneScale / 400;
+    camera.far = sceneScale * 60;
+    camera.updateProjectionMatrix();
+    orthoCamera.near = sceneScale / 400;
+    orthoCamera.far = sceneScale * 60;
+    orthoCamera.updateProjectionMatrix();
+    const g = sceneScale * 2.5;
+    gridHelper.scale.setScalar(g / 20);
+    axesHelper.scale.setScalar(sceneScale / 16);
+    forwardArrow.scale.setScalar(sceneScale / 10);
+    orbitState.radius = clamp(orbitState.radius, zoomLimits.min, zoomLimits.max);
+    orbitState.orthoZoom = clamp(orbitState.orthoZoom, zoomLimits.min * 0.5, zoomLimits.max);
+  }
+
+  // 設計座標の箱（中心・寸法）に視点を合わせる
+  function frameCameraOnBox(center, size) {
+    orbitState.target.set(center.x, center.y, center.z);
+    const maxDim = Math.max(size.x, size.y, size.z, 0.001);
+    orbitState.radius = maxDim * 1.8;
+    orbitState.orthoZoom = maxDim * 1.0;
+  }
+
+  // -----------------------------------------------------------
   // 起動
   // -----------------------------------------------------------
   initScene();
   syncRotUiFromState();
-  syncScaleUiFromState();
-  syncOffsetUiFromState();
-  restoreExistingModel();
+
+  window.ShipBuilderCore = {
+    THREE,
+    get scene() { return scene; },
+    get canvas() { return canvas; },
+    getCamera: getActiveCamera,
+    get correctionGroup() { return correctionGroup; },
+    getModelRoot: () => modelRoot,
+    adjust,
+    applyAdjust: applyAdjustToGroup,
+    syncRotationUi: syncRotUiFromState,
+    getModelDataForSave,
+    getModelFileName: () => pendingSaveFileName,
+    restoreModelFromData,
+    removeModel,
+    showDropzone,
+    hideDropzone,
+    setStatus,
+    getDockingFace: () => dockingFace,
+    setDockingFace: (df) => setDockingFace(df ? { ...df, tiltDeg: { ...(df.tiltDeg || { u: 0, v: 0 }) } } : null),
+    rebuildDockingFaceGizmo: () => rebuildDockingFaceGizmo(),
+    setSceneScale,
+    frameCameraOnBox,
+    initialClassKey: classKey,
+    isDragGesture: () => activePointers.size >= 2,
+    setHooks(h) {
+      if ('onAdjust' in h) onAdjustHook = h.onAdjust;
+      if ('onRotationCommit' in h) onRotationCommitHook = h.onRotationCommit;
+      if ('hullHalfExtents' in h) hullHalfExtentsHook = h.hullHalfExtents;
+      if ('onModelLoaded' in h) onModelLoadedHook = h.onModelLoaded;
+    },
+  };
 })();

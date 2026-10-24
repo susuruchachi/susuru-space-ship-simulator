@@ -474,7 +474,7 @@ const HUD = {
       let target;
       if (ship.dockingFace) {
         const halfExtents = ship.dockingFaceBoxHalfExtents || { x: 0, y: 0, z: 0 };
-        const faceLocal = computeDockingFaceLocalTransform(ship.dockingFace, halfExtents);
+        const faceLocal = computeDockingFaceLocalTransform(ship.dockingFace, halfExtents, ship.dockingFaceBoxCenter);
         const faceWorldOffset = rotateVecByQuat(faceLocal.position, ship.quaternion);
         target = {
           position: {
