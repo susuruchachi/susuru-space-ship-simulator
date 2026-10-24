@@ -1238,7 +1238,10 @@ function animate() {
   SolarSystem.update(SimClock.jd);
 
   Navigation.updateFrames(); // v85: 母港の軌道の位置・天体の速度
-  ShipController.update(dt);
+  // v85: 星図で時間を早送り（・一時停止）している間は、艦も同じ速さで動かす
+  const shipTimeScale = StarMap.isOpen() ? SimClock.timeScale : 1;
+  if (shipTimeScale === 1) ShipController.update(dt);
+  else ShipController.updateTimeScaled(dt * shipTimeScale);
   Navigation.postUpdate();
   // v85: postUpdate は原点の付け替え（母港以外で原点から20km離れるたび）や地表からの
   // 押し戻しで艦の位置を書き換える。艦のメッシュを合わせ直さないと、その1フレームだけ

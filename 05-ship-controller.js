@@ -70,6 +70,67 @@ const ShipController = {
     this._syncMesh(ship);
   },
 
+  // -----------------------------------------------------------
+  // v85: 星図で時間を早送りしている間の艦の動き（simDt = 実時間 × 倍率 [s]）
+  //   星図を開いている間は操縦しないので、推進・姿勢の制御はせず、重力だけで動かす
+  //   （周回軌道ならそのまま軌道を回る）。ワープ・自動航行中は、ワープを早く進める。
+  //   1フレームで進む時間が長いので、軌道の周期に合わせた細かな刻みで計算する。
+  // -----------------------------------------------------------
+  FAST_MAX_SUBSTEPS: 4000,
+  WARP_MAX_SUBSTEPS: 400,
+
+  updateTimeScaled(simDt) {
+    const ship = State.ship;
+    if (!ship || State.paused || !(simDt > 0)) return; // 一時停止（倍率0）なら艦も止める
+    if (ship.autoDockingEnabled && ship._dockingPhase === 'docked') return;
+    const nav = typeof Navigation !== 'undefined' ? Navigation : null;
+    if (nav && nav.isWarping()) {
+      const n = Math.min(this.WARP_MAX_SUBSTEPS, Math.ceil(simDt / 0.05));
+      const h = simDt / n;
+      for (let i = 0; i < n && nav.isWarping(); i++) nav.stepWarp(ship, State.input, h);
+      this._syncMesh(ship);
+      return;
+    }
+    // 母港の近く（母港のフレーム）では、ポートと一緒に軌道を回ったまま止めておく
+    // （ポートに対するずれはごくわずかで、回るフレームでは大きな刻みの計算が不安定になるため）
+    let remaining = nav && nav.frame && nav.frame.isHome ? 0 : simDt;
+    let steps = 0;
+    while (remaining > 1e-9 && steps < this.FAST_MAX_SUBSTEPS) {
+      // 刻み: いちばん強い重力の天体を回る軌道の周期の約1/1000（遠いほど長く）
+      let h = remaining;
+      const g = nav ? nav.gravityAccel(ship) : null;
+      if (g) {
+        const a = Math.hypot(g.x, g.y, g.z);
+        const v = Math.max(1, vecLength(ship.velocity));
+        if (a > 1e-12) h = Math.min(h, Math.max(0.02, 0.006 * (v / a)));
+      }
+      const left = this.FAST_MAX_SUBSTEPS - steps;
+      if (left <= 1) h = remaining;
+      else h = Math.max(h, remaining / left);
+      if (g) { ship.velocity.x += g.x * h; ship.velocity.y += g.y * h; ship.velocity.z += g.z * h; }
+      ship.position.x += ship.velocity.x * h;
+      ship.position.y += ship.velocity.y * h;
+      ship.position.z += ship.velocity.z * h;
+      remaining -= h;
+      steps++;
+    }
+    // 姿勢: 周回姿勢を合わせているならその向きに、そうでなければ今の回転を続ける
+    if (nav && nav.arrivalHold && nav.arrivalHold.kind === 'orbit') {
+      const q = nav._orbitAttitude(ship, nav.arrivalHold.bodyId);
+      if (q) ship.quaternion = q;
+    } else {
+      const w = ship.angularVelocity;
+      const ang = Math.hypot(w.x, w.y, w.z) * simDt;
+      if (ang > 0) {
+        const k = Math.min(1, Math.PI / ang); // 1フレームで半回転より多くは回さない（見た目のため）
+        this._integratePose(ship, simDt * k);
+      }
+    }
+    ship.thrusterOutputRatios = {};
+    ship.fxOutputRatios = null;
+    this._syncMesh(ship);
+  },
+
   // 速度・角速度から位置・姿勢を積分
   _integratePose(ship, dt) {
     ship.position.x += ship.velocity.x * dt;
