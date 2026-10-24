@@ -243,6 +243,7 @@ function normalizeShipDesign(d) {
     thrust: Math.max(0, Number(e.thrust) || 0),
     diameter: Number(e.diameter) > 0 ? Number(e.diameter) : null,
     engineType: shipEngineType(e.engineType),
+    twist: e.twist === 'left' ? 'left' : 'right', // v85: 重力波共振機関の螺旋のねじれの向き
   }));
   out.mains = mains.length ? mains : base.mains;
   delete out.main;
@@ -317,7 +318,7 @@ function buildShipSpecFromDesign(design) {
     const dia = shipDesignNozzleDiameter(d, e, 'main');
     thrusters.push({
       id: `main_${e.id}`, position: P(e.position), direction: { x: 0, y: 0, z: 1 },
-      maxThrust: Math.max(0, e.thrust), kind: 'main', engineType: e.engineType,
+      maxThrust: Math.max(0, e.thrust), kind: 'main', engineType: e.engineType, twist: e.twist,
       nozzleDiameter: dia, plumeScale: dia / shipDesignAutoNozzleDiameter(d, 'main'),
     });
   }

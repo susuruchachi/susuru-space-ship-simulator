@@ -123,7 +123,7 @@ const EngineFx = {
     for (const t of ship.thrusters) if (t.kind === 'main') mainCount++;
     for (const t of ship.thrusters) {
       if (t.kind !== 'main') continue; // v85: 逆噴射は姿勢スラスターと同じ噴射で描く
-      const plume = EnginePlumes.create(t.engineType);
+      const plume = EnginePlumes.create(t.engineType, { twist: t.twist });
       // ノズルの直径（艦種プリセットは自作の艦の自動の直径と同じ決め方）
       const dia = t.nozzleDiameter > 0 ? t.nozzleDiameter : 0.9 * Math.pow(fx, 0.85) / Math.sqrt(Math.max(1, mainCount));
       const dir = vecNormalize(t.direction);

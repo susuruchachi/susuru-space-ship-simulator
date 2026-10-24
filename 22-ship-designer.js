@@ -158,7 +158,7 @@
     mouth.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(dir.x, dir.y, dir.z).normalize());
     g.add(mouth);
     // v85: 全開のときの炎（機関の種類ごとの形。27-engine-plumes.js）
-    const fl = EnginePlumes.create(plume.engineType);
+    const fl = EnginePlumes.create(plume.engineType, { twist: plume.twist });
     fl.update(1, 0.4);
     fl.object.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(dir.x, dir.y, dir.z).normalize());
     fl.object.scale.setScalar(plume.diameter);
@@ -205,7 +205,7 @@
       g.add(hit);
       g.position.set(e.position.x, e.position.y, e.position.z);
       markers.add(g);
-      markers.add(nozzleMouth(e.position, { x: 0, y: 0, z: 1 }, { ...shipDesignPlumeEstimate(design, e, 'main'), engineType: e.engineType }, MAT.mainMouth, MAT.mainPlume));
+      markers.add(nozzleMouth(e.position, { x: 0, y: 0, z: 1 }, { ...shipDesignPlumeEstimate(design, e, 'main'), engineType: e.engineType, twist: e.twist }, MAT.mainMouth, MAT.mainPlume));
     }
     const tc = shipDesignThrustCenter(design);
     markers.add(lineMesh([
@@ -853,6 +853,8 @@
       $('mainEditorTitle').textContent = design.mains.length > 1 ? `${i + 1}基目（${mainSideLabel(sel)}）` : '主エンジン（1基）';
       syncDiameterField($('mainDiaInput'), $('mainDiaLine'), sel, 'main');
       $('mainEngineType').value = sel.engineType || 'rocket';
+      $('mainTwistRow').style.display = sel.engineType === 'gwave' ? '' : 'none';
+      $('mainTwist').value = sel.twist === 'left' ? 'left' : 'right';
       mainPos.sync(1.5);
     }
   }
@@ -1196,6 +1198,10 @@
       thrust: src ? src.thrust : shipDesignAutoSpec(design.baseClass, design.hull.size).mainThrust,
       diameter: src ? src.diameter : null,
       engineType: src ? src.engineType : 'rocket',
+      // 左右対称の位置に足すときは、ねじれも逆向きにする（左右で打ち消し合う見た目）
+      twist: !src ? 'right'
+        : (Math.abs(base.x) >= eps && Math.abs(x + base.x) < eps) ? (src.twist === 'left' ? 'right' : 'left')
+          : (src.twist || 'right'),
     };
     design.mains.push(e);
     setActive('main', e.id);
@@ -1337,6 +1343,13 @@
     const e = selectedMain();
     if (!e) return;
     e.engineType = shipEngineType($('mainEngineType').value);
+    onPhysicsEdit();
+  });
+  // v85: 重力波共振機関の螺旋のねじれの向き（エンジンごと）
+  $('mainTwist').addEventListener('change', () => {
+    const e = selectedMain();
+    if (!e) return;
+    e.twist = $('mainTwist').value === 'left' ? 'left' : 'right';
     onPhysicsEdit();
   });
   $('mainTypeAllBtn').addEventListener('click', () => {

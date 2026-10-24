@@ -137,8 +137,10 @@ const EnginePlumes = {
   // 1つのノズルの炎を作る。返す物: { object, update(ratio, time) }
   //   object は「ノズルの位置・噴射の向き +Z・ノズルの直径 1」の大きさなので、
   //   呼び出し側で位置・向き・拡大率（直径）を決める。
-  create(type) {
+  //   opts.twist: 重力波共振機関の螺旋のねじれの向き 'right'（右ねじ。既定）| 'left'
+  create(type, opts) {
     type = normalizeEngineType(type);
+    const tw = opts && opts.twist === 'left' ? -1 : 1;
     const group = new THREE.Group();
     group.frustumCulled = false;
     const parts = [];
@@ -233,7 +235,7 @@ const EnginePlumes = {
       group.add(helixGroup);
       const lines = [];
       for (let i = 0; i < 3; i++) {
-        const m = new THREE.Mesh(this._helix(`gwhelix${i}`, 4, (i * Math.PI * 2) / 3),
+        const m = new THREE.Mesh(this._helix(`gwhelix${i}${tw < 0 ? 'L' : 'R'}`, 4 * tw, (i * Math.PI * 2) / 3),
           this._material({ a: 0xffffff, b: 0xd8ecff, c: 0x9cc4ff, fade: 0.49, edge: 0.0, flicker: 0, dash: 14, flow: 2.2 }));
         m.frustumCulled = false;
         m.renderOrder = 6;
@@ -248,7 +250,8 @@ const EnginePlumes = {
         cone.mat.uniforms.uIntensity.value = 0.45 * (0.3 + 0.7 * ratio);
         helixGroup.scale.set(1, 1, L);
         // 螺旋が回りながら後ろへ流れる（出力が高いほど速い）
-        helixGroup.rotation.z = -time * (1.5 + 3 * ratio);
+        // ねじれの向きに合わせて回る（左ねじれは逆回り）
+        helixGroup.rotation.z = -tw * time * (1.5 + 3 * ratio);
         for (const p of lines) {
           p.mat.uniforms.uIntensity.value = 1.1 * (0.3 + 0.7 * ratio);
           p.mat.uniforms.uFlow.value = 1 + 2.5 * ratio;

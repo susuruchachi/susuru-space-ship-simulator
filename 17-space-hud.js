@@ -47,6 +47,7 @@ const SpaceHud = {
         <label class="space-orbit-alt-wrap" title="軌道の高度（地表から）。空欄なら天体全体が見える高さ"><input type="number" class="space-orbit-alt" min="0" step="any" placeholder="高度"><span>km</span></label>
         <button class="btn-space-autopilot" title="目的地へ自動でワープ (G)">🎯<span class="snb-text"> 自動航行</span></button>
         <button class="btn-space-warp" title="手動ワープ。スロットルで速度、操縦桿で向き (J)">⚡<span class="snb-text"> ワープ</span></button>
+        <button class="btn-space-orbit-att" title="周回姿勢: 下を天体の中心へ、機首を進む向きへ向け続ける (O)">🛰<span class="snb-text"> 周回姿勢</span></button>
         <button class="btn-space-labels" title="天体名の表示 (L)">🏷</button>
         <button class="btn-space-orbits" title="軌道線の表示">◯</button>
         <button class="btn-space-compact" title="パネルを小さく/大きく">▴</button>
@@ -60,6 +61,8 @@ const SpaceHud = {
     this._els.warpBtn = el.querySelector('.btn-space-warp');
     this._els.autoBtn = el.querySelector('.btn-space-autopilot');
     this._els.labelBtn = el.querySelector('.btn-space-labels');
+    this._els.orbitAttBtn = el.querySelector('.btn-space-orbit-att');
+    this._els.orbitAttBtn.addEventListener('click', () => Navigation.toggleOrbitAttitude());
     this._els.select = el.querySelector('.space-target-select');
 
     this._fillTargetSelect();
@@ -193,6 +196,7 @@ const SpaceHud = {
       if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
       if (e.code === 'KeyJ') this.toggleWarp();
       else if (e.code === 'KeyG') this.toggleAutopilot();
+      else if (e.code === 'KeyO') Navigation.toggleOrbitAttitude();
       else if (e.code === 'KeyL') {
         this.showLabels = !this.showLabels;
         savePersistedSettings({ showBodyLabels: this.showLabels });
@@ -386,6 +390,7 @@ const SpaceHud = {
     this._els.warpBtn.classList.toggle('is-on', w.active && !w.autopilot);
     this._els.autoBtn.innerHTML = w.active && w.autopilot ? '🎯<span class="snb-text"> 自動航行を中止</span>' : '🎯<span class="snb-text"> 自動航行</span>';
     this._els.autoBtn.classList.toggle('is-on', w.active && w.autopilot);
+    this._els.orbitAttBtn.classList.toggle('is-on', Navigation.isOrbitAttitude());
     this._els.labelBtn.classList.toggle('is-off', !this.showLabels);
     this._els.orbitBtn.classList.toggle('is-off', !Universe.settings.showOrbits);
     this.syncTargetSelect();

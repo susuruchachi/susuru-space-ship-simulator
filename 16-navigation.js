@@ -814,13 +814,48 @@ const Navigation = {
     if (!b) return null;
     const c = this.universeToLocal(b.pos);
     const up = vecNormalize({ x: ship.position.x - c.x, y: ship.position.y - c.y, z: ship.position.z - c.z });
-    // 進む向き: 天体に対する速度（このフレームは天体と一緒に動くので、艦の速度そのもの）を水平に
-    const v = ship.velocity;
+    // 進む向き: 天体に対する速度を水平に
+    const v = this._velocityRelativeTo(ship, b);
     let f = { x: v.x - up.x * vecDot(v, up), y: v.y - up.y * vecDot(v, up), z: v.z - up.z * vecDot(v, up) };
     if (vecLength(f) < 1e-3) return null;
     f = vecNormalize(f);
     const p = { x: ship.position.x + f.x, y: ship.position.y + f.y, z: ship.position.z + f.z };
     return this._lookQuat(ship, p, up);
+  },
+
+  // 天体 b に対する艦の速度（今のフレームの軸で）。天体と一緒に動くフレームなら艦の速度そのもの
+  _velocityRelativeTo(ship, b) {
+    const f = this.frame;
+    if (!f.orbit && !f.lagrange && f.bodyId === b.id) return ship.velocity;
+    const vu = Astro.mat3MulVec(f.rot, ship.velocity);
+    const vp = this._framePointVelocity(f, ship.position);
+    const vb = this.bodyVelocity(b.id);
+    return Astro.mat3MulVec(f.rotT, { x: vu.x + vp.x - vb.x, y: vu.y + vp.y - vb.y, z: vu.z + vp.z - vb.z });
+  },
+
+  // v85: 手動で周回姿勢（下を天体の中心へ・機首を進む向きへ）を入れる・切る。
+  // いちばん影響の強い天体（影響圏の内側の天体）を回っているとみなす
+  isOrbitAttitude() {
+    return !!(this.arrivalHold && this.arrivalHold.kind === 'orbit');
+  },
+  toggleOrbitAttitude() {
+    if (this.isOrbitAttitude()) {
+      this.arrivalHold = null;
+      this.warp.status = '周回姿勢を解除しました';
+      return false;
+    }
+    const ship = State.ship;
+    if (!ship || this.warp.active) return false;
+    const b = SolarSystem.dominantBody(this.shipUniverse());
+    if (!b) return false;
+    if (vecLength(this._velocityRelativeTo(ship, b)) < 1) {
+      this.warp.status = `${b.ja}に対して止まっているので、進む向きが決まりません（周回姿勢にできません）`;
+      return false;
+    }
+    const label = `${b.ja}の周回姿勢（下を${b.ja}へ・機首を進む向きへ）`;
+    this.arrivalHold = { kind: 'orbit', bodyId: b.id, label };
+    this.warp.status = `${label}に合わせています`;
+    return true;
   },
 
   // 周回の角速度（艦のローカル軸）: 姿勢を軌道に合わせ続けるための回り方
@@ -831,8 +866,14 @@ const Navigation = {
     const r = { x: ship.position.x - c.x, y: ship.position.y - c.y, z: ship.position.z - c.z };
     const r2 = vecDot(r, r);
     if (!(r2 > 0)) return { x: 0, y: 0, z: 0 };
-    const h = vecCross(r, ship.velocity); // 角運動量の向き（周回の回転軸）
+    const h = vecCross(r, this._velocityRelativeTo(ship, b)); // 角運動量の向き（周回の回転軸）
     const wFrame = { x: h.x / r2, y: h.y / r2, z: h.z / r2 };
+    // 母港のように回っているフレームでは、フレームの回転のぶんを引く
+    const wf = this._frameOmega(this.frame);
+    if (wf) {
+      const wl = Astro.mat3MulVec(this.frame.rotT, wf);
+      wFrame.x -= wl.x; wFrame.y -= wl.y; wFrame.z -= wl.z;
+    }
     return rotateVecByQuat(wFrame, conjugateQuat(ship.quaternion));
   },
 
@@ -842,8 +883,10 @@ const Navigation = {
   stepArrivalHold(ship, input) {
     const h = this.arrivalHold;
     if (!h || this.warp.active) return input;
-    const userInput = Math.abs(input.rotatePitch) + Math.abs(input.rotateYaw) + Math.abs(input.rotateRoll)
-      + Math.abs(input.thrustStrafeX) + Math.abs(input.thrustStrafeY) + Math.abs(input.thrustForward);
+    // v85: 周回姿勢は回転の操作をしたときだけ解除する（スロットルを入れて加速しても向きは合わせ続ける）
+    const rotIn = Math.abs(input.rotatePitch) + Math.abs(input.rotateYaw) + Math.abs(input.rotateRoll);
+    const userInput = h.kind === 'orbit' ? rotIn
+      : rotIn + Math.abs(input.thrustStrafeX) + Math.abs(input.thrustStrafeY) + Math.abs(input.thrustForward);
     if (userInput > 0.05 || ship.autoDockingEnabled) {
       this.arrivalHold = null;
       return input;
