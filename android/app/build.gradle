@@ -1,5 +1,5 @@
 // v86: 宇宙船シミュレーターの Android アプリ（Trusted Web Activity）
-// すするanki と同じ作り。中身は Web 版（GitHub Pages）をそのまま Chrome で全画面表示する。
+// 中身は Web 版（GitHub Pages）をそのまま Chrome で全画面表示する。
 // Chrome で動くので Google でのログインも Web 版と同じように使え、アプリの更新は Web 版を更新するだけで届く。
 // 一度開けば、Web 版のサービスワーカー（sw.js）でオフラインでも起動できる。
 plugins {
@@ -36,13 +36,14 @@ android {
 
     signingConfigs {
         release {
-            // 署名鍵は環境変数で渡す（GitHub Actions では Secrets から）。無ければデバッグ用の鍵で署名する
-            def ks = System.getenv('SUSURU_KEYSTORE')
+            // このアプリ専用の署名鍵を環境変数で渡す（GitHub Actions では Secrets から。docs/android-app.md）。
+            // 無ければデバッグ用の鍵で署名する
+            def ks = System.getenv('SPACESIM_KEYSTORE')
             if (ks) {
                 storeFile file(ks)
-                storePassword System.getenv('SUSURU_KEYSTORE_PASSWORD')
-                keyAlias System.getenv('SUSURU_KEY_ALIAS') ?: 'susuruanki'
-                keyPassword System.getenv('SUSURU_KEY_PASSWORD') ?: System.getenv('SUSURU_KEYSTORE_PASSWORD')
+                storePassword System.getenv('SPACESIM_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('SPACESIM_KEY_ALIAS') ?: 'spaceshipsim'
+                keyPassword System.getenv('SPACESIM_KEY_PASSWORD') ?: System.getenv('SPACESIM_KEYSTORE_PASSWORD')
             }
         }
     }
@@ -50,7 +51,7 @@ android {
     buildTypes {
         release {
             minifyEnabled false
-            signingConfig System.getenv('SUSURU_KEYSTORE') ? signingConfigs.release : signingConfigs.debug
+            signingConfig System.getenv('SPACESIM_KEYSTORE') ? signingConfigs.release : signingConfigs.debug
         }
     }
 

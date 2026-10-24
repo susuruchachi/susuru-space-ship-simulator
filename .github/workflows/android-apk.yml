@@ -1,9 +1,11 @@
-# v86: Android アプリ（APK）を作る（すするanki と同じ作り）
+# v86: Android アプリ（APK）を作る
 # 中身は Web 版（GitHub Pages）をそのまま Chrome で全画面表示する Trusted Web Activity。
 # 作り直すのはアイコンや名前を変えたいときだけで大丈夫（ゲームの更新は Web 版を更新するだけで届く）。
 # 手動で実行: Actions → android-apk → Run workflow。android/ を変えて push したときも作る。
-# 署名鍵: Secrets に ANDROID_KEYSTORE_BASE64（.jks を base64 にしたもの）と ANDROID_KEYSTORE_PASSWORD を入れておく
-#        （すするanki と同じ鍵を使えば、同じ assetlinks.json の指紋で検証できる。無いときは使い捨ての鍵で署名する）
+# 署名鍵（このアプリ専用。作り方は docs/android-app.md）:
+#   Secrets に SPACESIM_KEYSTORE_BASE64（.jks を base64 にしたもの）と SPACESIM_KEYSTORE_PASSWORD を入れておく。
+#   無いときは使い捨ての鍵で署名する（作り直すたびに、前のアプリを一度アンインストールしないと上書きできない）。
+# 実行結果の画面（Summary）に、署名の指紋と assetlinks.json に書く内容を表示する。
 name: android-apk
 
 on:
@@ -21,27 +23,41 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - uses: android-actions/setup-android@v3
+      # Android SDK は GitHub の Ubuntu の実行環境に入っている（ANDROID_HOME）
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.14.3'
       - name: Prepare keystore
         env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_B64: ${{ secrets.SPACESIM_KEYSTORE_BASE64 }}
         run: |
-          if [ -n "$KEYSTORE_B64" ]; then echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"; echo "SUSURU_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"; else echo "署名鍵が無いので使い捨ての鍵で署名します"; fi
+          if [ -n "$KEYSTORE_B64" ]; then echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"; echo "SPACESIM_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"; else echo "署名鍵が無いので使い捨ての鍵で署名します"; fi
       - name: Build APK
         working-directory: android
         env:
-          SUSURU_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          SPACESIM_KEYSTORE_PASSWORD: ${{ secrets.SPACESIM_KEYSTORE_PASSWORD }}
         run: gradle --no-daemon assembleRelease
-      - name: Rename APK
+      - name: Rename APK and show the signing fingerprint
         id: apk
         run: |
           VER=$(grep -oP "GAME_VERSION = '\K[^']+" 01-state-and-config.js)
           OUT="space-ship-simulator-${VER}.apk"
           cp android/app/build/outputs/apk/release/app-release.apk "$OUT"
           echo "file=$OUT" >> "$GITHUB_OUTPUT"
+          BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          FP=$("$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs "$OUT" | grep -m1 'SHA-256' | awk '{print $NF}' | tr 'a-f' 'A-F' | sed 's/../&:/g; s/:$//')
+          {
+            echo "## $OUT"
+            echo ""
+            if [ -n "$SPACESIM_KEYSTORE" ]; then echo "署名: このアプリ専用の鍵（Secrets）"; else echo "署名: 使い捨ての鍵（Secrets の SPACESIM_KEYSTORE_BASE64 が無いため）"; fi
+            echo ""
+            echo "署名の SHA-256 指紋: \`$FP\`"
+            echo ""
+            echo "https://susuruchachi.github.io/.well-known/assetlinks.json の配列に、次の項目を追加すると、アプリ上部のアドレスバーが消えます:"
+            echo '```json'
+            echo "{ \"relation\": [\"delegate_permission/common.handle_all_urls\"], \"target\": { \"namespace\": \"android_app\", \"package_name\": \"io.github.susuruchachi.spaceshipsim\", \"sha256_cert_fingerprints\": [\"$FP\"] } }"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: space-ship-simulator-apk

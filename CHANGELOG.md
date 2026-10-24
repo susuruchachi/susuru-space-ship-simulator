@@ -8,6 +8,19 @@ v50以降、変更のたびにここへ追記していく想定です（それ�
 
 ## v86（0.086.000.000〜） - 2026-10-24
 
+### 変更: Android アプリを すするanki から独立（専用の署名鍵・設定）。APK 作成の失敗も直した（0.086.000.004）
+
+- **要望**: 「すするankiとは独立させようかな」。
+- 署名鍵はこのアプリ専用にした。GitHub の Secrets の名前を `SPACESIM_KEYSTORE_BASE64`・`SPACESIM_KEYSTORE_PASSWORD`
+  にし（すするanki の `ANDROID_KEYSTORE_*` は使わない）、鍵の別名の既定値を `spaceshipsim` にした。鍵が無ければ使い捨ての鍵で署名する。
+  鍵の作り方と登録のしかたは `docs/android-app.md`。
+- android-apk ワークフローの実行結果の画面（Summary）に、APK の署名の SHA-256 指紋と、
+  `https://susuruchachi.github.io/.well-known/assetlinks.json` に追加する項目をそのまま貼れる形で表示するようにした。
+  `android/assetlinks.json` はこのアプリの項目だけの雛形にした（同じドメインなので、ファイル自体はユーザーサイトの1つを共有する）。
+- 0.086.000.003 では、ワークフローの Android SDK を準備する手順（android-actions/setup-android）が、もう無い
+  パッケージ `tools` を入れようとして失敗し、APK が作られていなかった。GitHub の実行環境に最初から入っている
+  Android SDK を使うようにした。
+
 ### 変更: Android アプリを すするanki と同じ作り（Trusted Web Activity）に。Google ログインが使える（0.086.000.003）
 
 - **要望**: 「他のすするankiとかではログインできるように作れたけど」。
