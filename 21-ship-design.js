@@ -162,6 +162,13 @@ function defaultRcsPodsForBox(dims) {
   return pods.map((p, i) => ({ id: `p${i + 1}`, ...p }));
 }
 
+// v85: 主エンジンに重力場機関（三段圧縮・重力波共振）を積んでいるか
+function shipDesignHasGravityEngine(d) {
+  return (d.mains || []).some((e) => e.engineType === 'gravity3' || e.engineType === 'gwave');
+}
+// 重力場機関の艦が、境界面の向きを変えて90°向きを変えるのにかかる時間の目安 [s]
+const SHIP_BOUNDARY_TURN_TIME = 4;
+
 // v85: 機関の種類（27-engine-plumes.js が無い画面でも壊れないよう、ここでも確かめる）
 function shipEngineType(t) {
   return ['rocket', 'nuclear', 'gravity3', 'gwave'].includes(t) ? t : 'rocket';
@@ -358,6 +365,21 @@ function buildShipSpecFromDesign(design) {
     y: Math.max(1e-6, e.y * f),
     z: Math.max(1e-6, e.z * f),
   };
+  // v85: 重力場機関の艦は、密度境界面そのものの向きを変えて姿勢を変える（噴射しない）。
+  // 姿勢スラスターが無くても回れるよう、3軸それぞれ±の向きに回す力として持つ
+  // （姿勢制御ジャイロと同じ扱い。自動ドッキングや自動航行の向き合わせもこれで回る）。
+  // 強さ: 90°を約 BOUNDARY_TURN_TIME 秒で回れ、最大角速度にも約1秒で届く角加速度
+  if (shipDesignHasGravityEngine(d)) {
+    const alpha = Math.max((4 * (Math.PI / 2)) / (SHIP_BOUNDARY_TURN_TIME * SHIP_BOUNDARY_TURN_TIME), Math.max(0.001, d.maxAngularSpeed));
+    for (const [ax, v] of [['x', 1], ['x', -1], ['y', 1], ['y', -1], ['z', 1], ['z', -1]]) {
+      const axis = { x: 0, y: 0, z: 0 };
+      axis[ax] = v;
+      thrusters.push({
+        id: `boundary_${ax}${v > 0 ? 'p' : 'n'}`, position: { x: 0, y: 0, z: 0 }, direction: { x: 0, y: 0, z: 0 },
+        torqueAxis: axis, maxThrust: inertiaTensor[ax] * alpha, kind: 'gyro', boundary: true,
+      });
+    }
+  }
   const size = Math.max(dims.x, dims.y, dims.z);
   return {
     label: d.name,

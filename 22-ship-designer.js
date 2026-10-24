@@ -1020,7 +1020,8 @@
         `90°向きを変える時間: ピッチ ${turn(3, I.x)}・ヨー ${turn(4, I.y)}・ロール ${turn(5, I.z)}`,
         `主エンジン全開時: ${balance}`,
         `噴射口: 主エンジン${nMain}・逆噴射${design.retro.thrust > 0 ? design.retro.nozzles.length : 0}・姿勢スラスター${pods}基（各5方向）${design.gyro.torque > 0 ? '・姿勢制御ジャイロ' : ''}`,
-        pods === 0 && !(design.gyro.torque > 0) ? '<span class="warn">姿勢スラスターかジャイロが無いと向きを変えられません。</span>' : '',
+        shipDesignHasGravityEngine(design) ? '<span class="ok">重力場機関: 密度境界面の向きを変えて姿勢を変えます（姿勢スラスターが無くても回れます。噴射なし）</span>' : '',
+        pods === 0 && !(design.gyro.torque > 0) && !shipDesignHasGravityEngine(design) ? '<span class="warn">姿勢スラスターかジャイロが無いと向きを変えられません。</span>' : '',
       ].filter(Boolean).join('<br>');
     } catch (e) {
       console.warn(e);
