@@ -28,3 +28,9 @@
 | 銀河系の渦巻腕 | Reid et al. (2019), ApJ 885, 131 |
 
 データやテクスチャを作り直すスクリプトは `tools/` にあります。
+
+## ライブラリ
+
+| 対象 | 出典 | ライセンス |
+|---|---|---|
+| three.js r128（`lib/three/`。本体・GLTF/OBJ/MTL 読み込み・ブルーム） | https://threejs.org/ （three.js authors） | MIT |
