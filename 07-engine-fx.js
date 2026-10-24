@@ -17,7 +17,9 @@
 // =============================================================
 
 const EngineFx = {
-  MAX_MAIN_PARTICLES: 600,
+  // v81: 主エンジンを複数持てる自作の艦のため、主エンジン用は多めに確保
+  // （1基あたりの量は _spawnThrustFx で基数に応じて減らす）
+  MAX_MAIN_PARTICLES: 1800,
   MAX_RCS_PARTICLES: 400,
 
   _mainPool: null, // { points, geometry, particles: [...] }
@@ -134,6 +136,12 @@ const EngineFx = {
   _spawnThrustFx(ship, dt) {
     // v78: 自作の艦は大きさに応じて噴射の長さ・太さを拡大する（ロケット級は1）
     const fx = ship.fxScale || 1;
+    // v81: 主エンジンが4基以上あるときは1基あたりの粒子を減らし、全基の噴射が
+    // 粒子の容量（MAX_MAIN_PARTICLES）に収まるようにする（減らさないと
+    // 古い粒子から上書きされ、どの噴射も短く途切れて見える）
+    let mainCount = 0;
+    for (const t of ship.thrusters) if (t.kind === 'main') mainCount++;
+    const mainDensity = Math.min(1, 3 / Math.max(1, mainCount));
     for (const t of ship.thrusters) {
       const ratio = ship.thrusterOutputRatios[t.id] ?? 0;
       if (ratio <= 0.01) continue;
@@ -146,7 +154,7 @@ const EngineFx = {
 
       // 出力比に応じてスポーン数を可変（多いほど濃い噴射に見える）
       const spawnCount = isMain
-        ? Math.round(ratio * 14)
+        ? Math.round(ratio * 14 * mainDensity)
         : Math.round(ratio * 6);
 
       for (let i = 0; i < spawnCount; i++) {

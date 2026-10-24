@@ -584,7 +584,11 @@
       if (kind === 'yaw180') adjust.rotationDeg.y = wrapDeg180(adjust.rotationDeg.y + 180);
       if (kind === 'pitch90') adjust.rotationDeg.x = wrapDeg180(adjust.rotationDeg.x + 90);
       if (kind === 'pitchm90') adjust.rotationDeg.x = wrapDeg180(adjust.rotationDeg.x - 90);
+      // v81: Y軸・Z軸も90°ずつ回せるように
+      if (kind === 'yaw90') adjust.rotationDeg.y = wrapDeg180(adjust.rotationDeg.y + 90);
+      if (kind === 'yawm90') adjust.rotationDeg.y = wrapDeg180(adjust.rotationDeg.y - 90);
       if (kind === 'roll90') adjust.rotationDeg.z = wrapDeg180(adjust.rotationDeg.z + 90);
+      if (kind === 'rollm90') adjust.rotationDeg.z = wrapDeg180(adjust.rotationDeg.z - 90);
       syncRotUiFromState();
       applyAdjustToGroup();
       commitRotation();

@@ -8,6 +8,10 @@
 // 21-ship-design.js、3Dビューとモデルの読み込みは 09-ship-builder.js
 // （window.ShipBuilderCore）が担当する。
 //
+// v81: 主エンジンを複数持てるようにし、部品（主エンジン・姿勢スラスター・
+// 重心）を3Dビュー上の移動ギズモ（X/Y/Z の矢印と中央のつまみ）で
+// 動かせるようにした。
+//
 // 座標はすべて「設計座標」（建造画面のワールド座標。船体の中心が原点、
 // 艦首-Z・上+Y・右+X、単位m）。
 // =============================================================
@@ -21,6 +25,8 @@
   let modelDirty = false;   // 船体モデルを読み込み/外してから未保存か
   let dirty = false;        // 何か変更してから未保存か
   let selectedPodId = null;
+  let selectedMainId = null; // v81: パネルで編集中の主エンジン
+  let active = null;         // v81: ギズモを出している部品 { kind: 'pod' | 'main' | 'cog', id }
   let placing = false;
   let hullVersion = 0;      // 船体の形が変わるたびに+1（表面の三角形キャッシュの無効化）
   let triCache = null;
@@ -74,6 +80,7 @@
   const MAT = {
     cog: new THREE.MeshBasicMaterial({ color: 0xffb347, depthTest: false, transparent: true }),
     main: new THREE.MeshBasicMaterial({ color: 0x6cf0ff, depthTest: false, transparent: true }),
+    mainSel: new THREE.MeshBasicMaterial({ color: 0xff7a3a, depthTest: false, transparent: true }),
     retro: new THREE.MeshBasicMaterial({ color: 0xb7a6ff, depthTest: false, transparent: true }),
     pod: new THREE.MeshBasicMaterial({ color: 0xffd27a, depthTest: false, transparent: true }),
     podSel: new THREE.MeshBasicMaterial({ color: 0xff7a3a, depthTest: false, transparent: true }),
@@ -129,6 +136,7 @@
   function rebuildMarkers() {
     disposeGroup(markers);
     if (!design) return;
+    validateSelection();
     const size = design.hull.size;
     const dims = design.hull.dims;
     const u = Math.max(size * 0.018, 0.08); // 目印の基本サイズ
@@ -145,18 +153,34 @@
         { x: c.x + ax.x * u * 3, y: c.y + ax.y * u * 3, z: c.z + ax.z * u * 3 },
       ], 0xffb347, false));
     }
+    const cogHit = new THREE.Mesh(new THREE.SphereGeometry(u * 2.4, 8, 6), MAT.hit);
+    cogHit.position.set(c.x, c.y, c.z);
+    cogHit.userData.part = { kind: 'cog', id: null };
+    markers.add(cogHit);
 
-    // 主エンジン: 噴射口（後ろ向きの円錐）と推力線
-    const mp = design.main.position;
-    markers.add(cone(mp, { x: 0, y: 0, z: 1 }, u * 3, u * 1.4, MAT.main));
+    // 主エンジン: 1基ずつ噴射口（後ろ向きの円錐）。推力線は全エンジンの
+    // 推力の中心を通る（全基を同じ出力で吹かしたときの合力の線）
+    const multi = design.mains.length > 1;
+    for (const e of design.mains) {
+      const sel = e.id === selectedMainId && (multi || (active && active.kind === 'main'));
+      const g = new THREE.Group();
+      g.add(cone({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }, u * 3, u * 1.4, sel ? MAT.mainSel : MAT.main));
+      const hit = new THREE.Mesh(new THREE.SphereGeometry(u * 2.6, 8, 6), MAT.hit);
+      hit.position.set(0, 0, u * 1.5);
+      hit.userData.part = { kind: 'main', id: e.id };
+      g.add(hit);
+      g.position.set(e.position.x, e.position.y, e.position.z);
+      markers.add(g);
+    }
+    const tc = shipDesignThrustCenter(design);
     markers.add(lineMesh([
-      { x: mp.x, y: mp.y, z: -dims.z * 0.75 },
-      { x: mp.x, y: mp.y, z: dims.z * 0.75 },
+      { x: tc.x, y: tc.y, z: -dims.z * 0.75 },
+      { x: tc.x, y: tc.y, z: dims.z * 0.75 },
     ], 0x6cf0ff, true, u * 1.5));
     // 重心から推力線までのずれ
-    const off = Math.hypot(c.x - mp.x, c.y - mp.y);
+    const off = Math.hypot(c.x - tc.x, c.y - tc.y);
     if (off > size * 1e-4) {
-      markers.add(lineMesh([{ x: c.x, y: c.y, z: c.z }, { x: mp.x, y: mp.y, z: c.z }], 0xff6a4a, false));
+      markers.add(lineMesh([{ x: c.x, y: c.y, z: c.z }, { x: tc.x, y: tc.y, z: c.z }], 0xff6a4a, false));
     }
 
     // 逆噴射
@@ -181,11 +205,12 @@
       }
       // タップで選びやすいよう、見えない大きめの当たり判定
       const hit = new THREE.Mesh(new THREE.SphereGeometry(u * 2.4, 8, 6), MAT.hit);
-      hit.userData.podId = pod.id;
+      hit.userData.part = { kind: 'pod', id: pod.id };
       g.add(hit);
       g.position.set(pod.position.x, pod.position.y, pod.position.z);
       markers.add(g);
     }
+    placeGizmo();
   }
 
   // -----------------------------------------------------------
@@ -382,6 +407,7 @@
     });
     design.rcs.pods = pods;
     selectedPodId = null;
+    if (active && active.kind === 'pod') active = null;
   }
 
   function nextPodId() {
@@ -428,7 +454,7 @@
     design.hull.size = size;
     design.hull.dims = sc(design.hull.dims);
     design.cog = sc(design.cog);
-    design.main.position = sc(design.main.position);
+    for (const e of design.mains) e.position = sc(e.position);
     for (const pod of design.rcs.pods) pod.position = sc(pod.position);
     const df = core.getDockingFace();
     if (df) core.setDockingFace({ ...df, offsetU: df.offsetU * k, offsetV: df.offsetV * k });
@@ -436,7 +462,7 @@
       // 質量は体積に比例、推力は質量に比例（加速度を保つ）、角速度は控えめに
       const k3 = k * k * k;
       design.mass *= k3;
-      design.main.thrust *= k3;
+      for (const e of design.mains) e.thrust *= k3;
       design.retro.thrust *= k3;
       design.rcs.thrust *= k3;
       for (const pod of design.rcs.pods) if (pod.thrust > 0) pod.thrust *= k3;
@@ -464,7 +490,8 @@
     // スラスターは新しい箱の表面へ（同じ側に留まるよう比率で移してから吸着）
     const k = design.hull.dims[axis] / Math.max(old, 1e-9);
     for (const pod of design.rcs.pods) pod.position[axis] *= k;
-    design.main.position[axis] = clamp(design.main.position[axis], -design.hull.dims[axis] / 2, design.hull.dims[axis] / 2);
+    const half = design.hull.dims[axis] / 2;
+    for (const e of design.mains) e.position[axis] = clamp(e.position[axis] * k, -half, half);
     hullVersion++;
     resnapPods();
     afterShapeChange(false);
@@ -530,8 +557,13 @@
     };
   }
 
-  const mainPos = makePosRows($('mainPosRows'), () => design.main.position, (v) => {
-    design.main.position = v;
+  const mainPos = makePosRows($('mainPosRows'), () => {
+    const e = selectedMain();
+    return e ? e.position : { x: 0, y: 0, z: 0 };
+  }, (v) => {
+    const e = selectedMain();
+    if (!e) return;
+    e.position = v;
     onPhysicsEdit();
   });
   const cogPos = makePosRows($('cogPosRows'), () => design.cog, (v) => {
@@ -554,6 +586,14 @@
 
   function selectedPod() {
     return design && design.rcs.pods.find((p) => p.id === selectedPodId) || null;
+  }
+
+  function findMain(id) {
+    return design && design.mains.find((e) => e.id === id) || null;
+  }
+  function selectedMain() {
+    if (!design || !design.mains.length) return null;
+    return findMain(selectedMainId) || design.mains[0];
   }
 
   function snapSelectedPod() {
@@ -592,21 +632,25 @@
     if (document.activeElement !== $('maxSpeedInput')) $('maxSpeedInput').value = inputValue(design.maxSpeed);
     if (document.activeElement !== $('maxAngInput')) $('maxAngInput').value = inputValue(design.maxAngularSpeed * 180 / Math.PI);
     if (document.activeElement !== $('inertiaInput')) $('inertiaInput').value = inputValue(design.inertiaFactor);
-    if (document.activeElement !== $('mainThrustInput')) $('mainThrustInput').value = inputValue(design.main.thrust / 1000);
+    const selMain = selectedMain();
+    if (document.activeElement !== $('mainThrustInput')) $('mainThrustInput').value = selMain ? inputValue(selMain.thrust / 1000) : '';
     if (document.activeElement !== $('retroThrustInput')) $('retroThrustInput').value = inputValue(design.retro.thrust / 1000);
     if (document.activeElement !== $('rcsThrustInput')) $('rcsThrustInput').value = inputValue(design.rcs.thrust / 1000);
     const g = 9.80665;
-    const aMain = design.main.thrust / design.mass;
-    $('mainAccelLine').textContent = `主エンジンだけでの加速度 ${fmtNum(aMain)} m/s²（${fmtNum(aMain / g, 2)} G）`;
+    const mainTotal = shipDesignMainThrust(design);
+    const aMain = mainTotal / design.mass;
+    const nMain = design.mains.length;
+    $('mainAccelLine').textContent = `${nMain > 1 ? `主エンジン${nMain}基の合計 ${fmtForce(mainTotal)}・` : ''}主エンジンだけでの加速度 ${fmtNum(aMain)} m/s²（${fmtNum(aMain / g, 2)} G）`;
     const aRetro = design.retro.thrust / design.mass;
     $('retroAccelLine').textContent = `逆噴射だけでの減速度 ${fmtNum(aRetro)} m/s²（${fmtNum(aRetro / g, 2)} G）`;
-    const off = Math.hypot(design.cog.x - design.main.position.x, design.cog.y - design.main.position.y);
+    const tc = shipDesignThrustCenter(design);
+    const off = Math.hypot(design.cog.x - tc.x, design.cog.y - tc.y);
     const offEl = $('mainOffsetLine');
     if (off < design.hull.size * 1e-4) {
       offEl.textContent = '推力線は重心を通っています（主エンジンだけでは回転しない）。';
       offEl.classList.remove('warn');
     } else {
-      offEl.textContent = `推力線と重心のずれ ${fmtLen(off)}（主エンジン全開で ${fmtForce(design.main.thrust * off).replace('N', 'N·m')} の回転力）`;
+      offEl.textContent = `推力線と重心のずれ ${fmtLen(off)}（主エンジン全開で ${fmtForce(mainTotal * off).replace('N', 'N·m')} の回転力）`;
       offEl.classList.add('warn');
     }
     for (const id of ['faceOffU', 'faceOffV']) {
@@ -616,10 +660,47 @@
       el.max = String(lim);
       el.step = String(Math.max(0.1, design.hull.size / 1000));
     }
-    mainPos.sync(1.5);
+    renderMainList();
     cogPos.sync(1.3);
+    $('cogGizmoBtn').classList.toggle('active', !!(active && active.kind === 'cog'));
     renderPodList();
     schedulePerf();
+  }
+
+  // v81: 主エンジンの一覧（チップ）と、選んだエンジンの編集欄
+  function renderMainList() {
+    const list = $('mainList');
+    list.innerHTML = '';
+    const sel = selectedMain();
+    design.mains.forEach((e, i) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      const on = sel && e.id === sel.id;
+      chip.className = `pod-chip main-chip${on ? ' selected' : ''}`;
+      chip.textContent = `${i + 1}. ${mainSideLabel(e)}・${fmtForce(e.thrust)}`;
+      chip.addEventListener('click', () => {
+        // 選んでいるエンジンのチップをもう一度押すとギズモを出し入れ
+        if (on && active && active.kind === 'main' && active.id === e.id) setActive(null);
+        else setActive('main', e.id);
+      });
+      list.appendChild(chip);
+    });
+    $('mainRemoveBtn').disabled = design.mains.length <= 1;
+    $('mainEditor').style.display = sel ? '' : 'none';
+    if (sel) {
+      const i = design.mains.indexOf(sel);
+      $('mainEditorTitle').textContent = design.mains.length > 1 ? `${i + 1}基目（${mainSideLabel(sel)}）` : '主エンジン（1基）';
+      mainPos.sync(1.5);
+    }
+  }
+
+  // 「右上」「中央」のような、艦尾から見たエンジンの位置の説明
+  function mainSideLabel(e) {
+    const d = design.hull.dims;
+    const tx = d.x * 0.05, ty = d.y * 0.05;
+    const h = e.position.x > tx ? '右' : e.position.x < -tx ? '左' : '';
+    const v = e.position.y > ty ? '上' : e.position.y < -ty ? '下' : '';
+    return (h + v) || '中央';
   }
 
   function renderPodList() {
@@ -630,7 +711,7 @@
       chip.type = 'button';
       chip.className = `pod-chip${pod.id === selectedPodId ? ' selected' : ''}`;
       chip.textContent = `${i + 1}. ${podSideLabel(pod)}`;
-      chip.addEventListener('click', () => selectPod(pod.id === selectedPodId ? null : pod.id));
+      chip.addEventListener('click', () => setActive(pod.id === selectedPodId ? null : 'pod', pod.id));
       list.appendChild(chip);
     });
     const pod = selectedPod();
@@ -655,10 +736,22 @@
     return best[0] === 'z' ? `${face}の面` : `${along}・${face}`;
   }
 
-  function selectPod(id) {
-    selectedPodId = id;
+  // v81: 部品を選ぶ（ギズモを出す）。kind が null なら選択を外す
+  function setActive(kind, id) {
+    active = kind ? { kind, id: kind === 'cog' ? null : id } : null;
+    selectedPodId = kind === 'pod' ? id : null;
+    if (kind === 'main') selectedMainId = id;
     rebuildMarkers();
-    renderPodList();
+    syncUi();
+  }
+
+  // 消えた部品を指している選択を外す
+  function validateSelection() {
+    if (!design) return;
+    if (selectedPodId && !selectedPod()) selectedPodId = null;
+    if (!findMain(selectedMainId)) selectedMainId = design.mains.length ? design.mains[0].id : null;
+    if (active && ((active.kind === 'pod' && !design.rcs.pods.some((p) => p.id === active.id))
+      || (active.kind === 'main' && !findMain(active.id)))) active = null;
   }
 
   // -----------------------------------------------------------
@@ -693,23 +786,29 @@
       // 主エンジン全開を要求したときの配分（重心のずれをどこまで打ち消せるか）
       let ratios = null;
       for (let i = 0; i < 6; i++) ratios = ShipAllocator.solve(ship, { x: 0, y: 0, z: -1 }, { x: 0, y: 0, z: 0 });
-      const mainUse = ratios.main || 0;
+      // 主エンジン全体として出せた推力の割合（エンジンごとの出力比を推力で重み付け）
+      const mainTotal = shipDesignMainThrust(design);
+      let mainUsed = 0;
+      for (const e of design.mains) mainUsed += (ratios[`main_${e.id}`] || 0) * Math.max(0, e.thrust);
+      const mainUse = mainTotal > 0 ? mainUsed / mainTotal : 0;
       const res = ShipAllocator.resultant(ship, ratios);
       const torqueCap = Math.max(a.capPos[3], a.capPos[4], 1e-9);
       const resid = Math.hypot(res.torque.x, res.torque.y) / torqueCap;
-      const off = Math.hypot(design.cog.x - design.main.position.x, design.cog.y - design.main.position.y);
+      const tc = shipDesignThrustCenter(design);
+      const off = Math.hypot(design.cog.x - tc.x, design.cog.y - tc.y);
+      const nMain = design.mains.length;
       const toMax = fwd > 0 ? spec.maxSpeed / fwd : Infinity;
       const pods = design.rcs.pods.length;
       let balance;
       if (off < design.hull.size * 1e-4) balance = '<span class="ok">釣り合っています（推力線が重心を通る）</span>';
-      else if (mainUse > 0.98 && resid < 0.02) balance = '<span class="ok">重心のずれは姿勢スラスターで打ち消せます（主エンジン100%使用可）</span>';
-      else balance = `<span class="warn">重心のずれを打ち消しきれないため、主エンジンは最大 ${Math.round(mainUse * 100)}% に自動で絞られます（姿勢スラスターを強くするか、重心を推力線に近づけてください）</span>`;
+      else if (mainUse > 0.98 && resid < 0.02) balance = `<span class="ok">重心のずれは姿勢スラスター${nMain > 1 ? 'とエンジンごとの出力差' : ''}で打ち消せます（主エンジン100%使用可）</span>`;
+      else balance = `<span class="warn">重心のずれを打ち消しきれないため、主エンジンは${nMain > 1 ? '全体で' : ''}最大 ${Math.round(mainUse * 100)}% に自動で絞られます（姿勢スラスターを強くするか、重心を推力線に近づけてください）</span>`;
       box.innerHTML = [
         `前進の最大加速度: <b>${fmtNum(fwd)} m/s²</b>（${fmtNum(fwd / g, 2)} G）・最高速度 ${fmtNum(spec.maxSpeed)} m/s まで約 ${fmtTime(toMax)}`,
         `減速（逆噴射）: ${fmtNum(back)} m/s²・横/上下への移動: ${fmtNum(lat)} m/s²`,
         `90°向きを変える時間: ピッチ ${turn(3, I.x)}・ヨー ${turn(4, I.y)}・ロール ${turn(5, I.z)}`,
         `主エンジン全開時: ${balance}`,
-        `噴射口: 主エンジン1・逆噴射${design.retro.thrust > 0 ? 2 : 0}・姿勢スラスター${pods}基（各5方向）`,
+        `噴射口: 主エンジン${nMain}・逆噴射${design.retro.thrust > 0 ? 2 : 0}・姿勢スラスター${pods}基（各5方向）`,
         pods === 0 ? '<span class="warn">姿勢スラスターが無いと向きを変えられません。</span>' : '',
       ].filter(Boolean).join('<br>');
     } catch (e) {
@@ -751,7 +850,12 @@
   $('maxSpeedInput').addEventListener('change', () => { design.maxSpeed = Math.max(1, numFromInput($('maxSpeedInput'), design.maxSpeed)); onPhysicsEdit(); });
   $('maxAngInput').addEventListener('change', () => { design.maxAngularSpeed = Math.max(0.05, numFromInput($('maxAngInput'), 1)) * Math.PI / 180; onPhysicsEdit(); });
   $('inertiaInput').addEventListener('change', () => { design.inertiaFactor = clamp(numFromInput($('inertiaInput'), design.inertiaFactor), 0.001, 2); onPhysicsEdit(); });
-  $('mainThrustInput').addEventListener('change', () => { design.main.thrust = numFromInput($('mainThrustInput'), design.main.thrust / 1000) * 1000; onPhysicsEdit(); });
+  $('mainThrustInput').addEventListener('change', () => {
+    const e = selectedMain();
+    if (!e) return;
+    e.thrust = numFromInput($('mainThrustInput'), e.thrust / 1000) * 1000;
+    onPhysicsEdit();
+  });
   $('retroThrustInput').addEventListener('change', () => { design.retro.thrust = numFromInput($('retroThrustInput'), design.retro.thrust / 1000) * 1000; onPhysicsEdit(); });
   $('rcsThrustInput').addEventListener('change', () => { design.rcs.thrust = numFromInput($('rcsThrustInput'), design.rcs.thrust / 1000) * 1000; onPhysicsEdit(); });
   $('podThrustInput').addEventListener('change', () => {
@@ -765,7 +869,7 @@
   $('autoSpecBtn').addEventListener('click', () => {
     const auto = shipDesignAutoSpec(design.baseClass, design.hull.size);
     design.mass = auto.mass;
-    design.main.thrust = auto.mainThrust;
+    distributeMainThrust(auto.mainThrust);
     design.retro.thrust = auto.retroThrust;
     design.rcs.thrust = auto.rcsThrust;
     for (const pod of design.rcs.pods) pod.thrust = null;
@@ -776,17 +880,91 @@
     core.setStatus(`大きさ ${fmtLen(design.hull.size)} に合わせて、${shipTemplateSpec(design.baseClass).label}の性能を元に質量・推力・角速度を決めました。`);
   });
 
+  // 主エンジンの推力の合計を total にする（各エンジンの推力の比は保つ）
+  function distributeMainThrust(total) {
+    const cur = shipDesignMainThrust(design);
+    for (const e of design.mains) {
+      e.thrust = cur > 0 ? total * (Math.max(0, e.thrust) / cur) : total / design.mains.length;
+    }
+  }
+
+  // 艦尾の表面のZ（その X・Y の位置で、後ろから船体に当たるところ）。
+  // 当たらなければ船体の外形（箱）の艦尾の面
+  function sternSurfaceZ(x, y) {
+    const zMax = design.hull.dims.z / 2;
+    const target = core.getModelRoot() || boxHull;
+    if (!target) return zMax;
+    target.updateWorldMatrix(true, true);
+    const rc = new THREE.Raycaster(new THREE.Vector3(x, y, zMax + design.hull.size), new THREE.Vector3(0, 0, -1));
+    const hits = rc.intersectObject(target, true);
+    // 後ろ寄り1/4より前で当たるのは、艦尾に穴が開いているなどで中まで
+    // 突き抜けたとき。その場合は外形の艦尾の面にする
+    const h = hits.find((x) => x.object.isMesh && x.face && x.point.z >= zMax - design.hull.dims.z * 0.25);
+    return h ? Math.min(h.point.z, zMax) : zMax;
+  }
+
+  function nextMainId() {
+    let n = 1;
+    const used = new Set(design.mains.map((e) => e.id));
+    while (used.has(`m${n}`)) n++;
+    return `m${n}`;
+  }
+
+  // 主エンジンを足す: 選んでいるエンジンと同じ推力で、左右対称の位置
+  // （そこが空いていなければ横にずらした位置）に置く
+  $('mainAddBtn').addEventListener('click', () => {
+    const src = selectedMain();
+    const dims = design.hull.dims;
+    const base = src ? src.position : { x: 0, y: 0, z: dims.z / 2 };
+    const eps = design.hull.size * 1e-3;
+    const taken = (x, y) => design.mains.some((e) => Math.abs(e.position.x - x) < eps && Math.abs(e.position.y - y) < eps);
+    let x = -base.x, y = base.y;
+    if (Math.abs(base.x) < eps || taken(x, y)) {
+      const step = Math.max(dims.x * 0.22, design.hull.size * 0.02);
+      x = base.x + step;
+      for (let i = 0; i < 8 && taken(x, y); i++) x += step;
+      x = clamp(x, -dims.x / 2, dims.x / 2);
+    }
+    const e = {
+      id: nextMainId(),
+      position: { x, y, z: base.z },
+      thrust: src ? src.thrust : shipDesignAutoSpec(design.baseClass, design.hull.size).mainThrust,
+    };
+    design.mains.push(e);
+    setActive('main', e.id);
+    markDirty();
+    core.setStatus(`主エンジンを追加しました（${design.mains.length}基）。矢印（ギズモ）をドラッグするか、位置の欄で動かせます。`);
+  });
+  $('mainRemoveBtn').addEventListener('click', () => {
+    if (design.mains.length <= 1) return;
+    const e = selectedMain();
+    design.mains = design.mains.filter((x) => x !== e);
+    selectedMainId = design.mains[0].id;
+    if (active && active.kind === 'main') active = null;
+    onPhysicsEdit();
+    core.setStatus(`主エンジンを外しました（${design.mains.length}基）。`);
+  });
+
   $('mainToSternBtn').addEventListener('click', () => {
-    design.main.position = { x: 0, y: 0, z: design.hull.dims.z / 2 };
+    const e = selectedMain();
+    if (!e) return;
+    e.position = { x: e.position.x, y: e.position.y, z: sternSurfaceZ(e.position.x, e.position.y) };
     onPhysicsEdit();
   });
+  // 推力の中心が重心の真後ろに来るよう、全エンジンを同じだけ上下左右にずらす
   $('mainToCogAxisBtn').addEventListener('click', () => {
-    design.main.position = { x: design.cog.x, y: design.cog.y, z: design.main.position.z };
+    const tc = shipDesignThrustCenter(design);
+    const dx = design.cog.x - tc.x, dy = design.cog.y - tc.y;
+    for (const e of design.mains) e.position = { x: e.position.x + dx, y: e.position.y + dy, z: e.position.z };
     onPhysicsEdit();
   });
   $('cogToMainAxisBtn').addEventListener('click', () => {
-    design.cog = { x: design.main.position.x, y: design.main.position.y, z: design.cog.z };
+    const tc = shipDesignThrustCenter(design);
+    design.cog = { x: tc.x, y: tc.y, z: design.cog.z };
     onPhysicsEdit();
+  });
+  $('cogGizmoBtn').addEventListener('click', () => {
+    setActive(active && active.kind === 'cog' ? null : 'cog');
   });
   $('cogToCenterBtn').addEventListener('click', () => {
     design.cog = { x: 0, y: 0, z: 0 };
@@ -803,12 +981,14 @@
     if (!confirm('姿勢スラスターを全部外しますか？')) return;
     design.rcs.pods = [];
     selectedPodId = null;
+    if (active && active.kind === 'pod') active = null;
     onPhysicsEdit();
   });
   $('podSnapBtn').addEventListener('click', () => { snapSelectedPod(); onPhysicsEdit(); });
   $('podDeleteBtn').addEventListener('click', () => {
     design.rcs.pods = design.rcs.pods.filter((p) => p.id !== selectedPodId);
     selectedPodId = null;
+    if (active && active.kind === 'pod') active = null;
     onPhysicsEdit();
   });
 
@@ -820,6 +1000,7 @@
     $('rcsPlaceBtn').classList.toggle('active', on);
     $('rcsPlaceBtn').textContent = on ? '完了' : '＋ 船体をタップして追加';
     $('placeBanner').style.display = on ? '' : 'none';
+    placeGizmo();
   }
   $('rcsPlaceBtn').addEventListener('click', () => setPlacing(!placing));
 
@@ -836,36 +1017,366 @@
     handleTap(e);
   });
 
-  function handleTap(e) {
+  // 画面上の点（clientX/Y）を通る視線
+  function setRayFromClient(clientX, clientY) {
     const rect = core.canvas.getBoundingClientRect();
-    const ndc = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
-    const cam = core.getCamera();
-    raycaster.setFromCamera(ndc, cam);
-    // 既存のスラスターの選択（配置モード中も、既存の■をタップしたら選択）
-    const podHits = raycaster.intersectObjects(markers.children, true).filter((h) => h.object.userData.podId);
-    if (podHits.length && !placing) {
-      selectPod(podHits[0].object.userData.podId);
-      $('rcsSection').open = true;
+    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, core.getCamera());
+    return raycaster.ray;
+  }
+
+  // 画面上の点の先にある船体表面の点と、そこでの（手前向きの）法線
+  function raycastHullAt(clientX, clientY) {
+    const target = core.getModelRoot() || boxHull;
+    if (!target) return null;
+    setRayFromClient(clientX, clientY);
+    // 面のあるメッシュだけ（箱の仮船体の輪郭線や、モデル内の線・点には吸着しない）
+    const h = raycaster.intersectObject(target, true).find((x) => x.object.isMesh && x.face);
+    if (!h) return null;
+    const n = h.face.normal.clone().transformDirection(h.object.matrixWorld);
+    if (n.dot(raycaster.ray.direction) > 0) n.negate();
+    return { position: { x: h.point.x, y: h.point.y, z: h.point.z }, normal: { x: n.x, y: n.y, z: n.z } };
+  }
+
+  function handleTap(e) {
+    if (!placing) {
+      // 部品（重心・主エンジン・姿勢スラスター）をタップ → 選んでギズモを出す。
+      // 何もないところをタップ → 選択を外す
+      setRayFromClient(e.clientX, e.clientY);
+      const hit = raycaster.intersectObjects(markers.children, true).find((h) => h.object.userData.part);
+      if (hit) {
+        const part = hit.object.userData.part;
+        setActive(part.kind, part.id);
+        const sec = $({ pod: 'rcsSection', main: 'mainSection', cog: 'cogSection' }[part.kind]);
+        if (sec) sec.open = true;
+      } else if (active || selectedPodId) {
+        setActive(null);
+      }
       return;
     }
-    if (!placing) return;
-    const target = core.getModelRoot() || boxHull;
-    if (!target) return;
-    const hits = raycaster.intersectObject(target, true);
-    if (!hits.length) return;
-    const h = hits[0];
-    let n = h.face ? h.face.normal.clone().transformDirection(h.object.matrixWorld) : new THREE.Vector3(0, 1, 0);
-    if (n.dot(raycaster.ray.direction) > 0) n.negate();
-    const pod = {
-      id: nextPodId(),
-      position: { x: h.point.x, y: h.point.y, z: h.point.z },
-      normal: { x: n.x, y: n.y, z: n.z },
-    };
+    const s = raycastHullAt(e.clientX, e.clientY);
+    if (!s) return;
+    const pod = { id: nextPodId(), position: s.position, normal: s.normal };
     design.rcs.pods.push(pod);
     selectedPodId = pod.id;
     onPhysicsEdit();
     core.setStatus(`姿勢スラスターを追加しました（${design.rcs.pods.length}基）。`);
   }
+
+
+  // -----------------------------------------------------------
+  // v81: 移動ギズモ
+  //   選んだ部品（重心・主エンジン・姿勢スラスター）に X(赤)・Y(緑)・Z(青) の
+  //   矢印と、中央のつまみ（白）を出す。
+  //   矢印をドラッグ → その軸に沿って動かす（姿勢スラスターは動かした先から
+  //     いちばん近い船体表面に吸着したまま動く）
+  //   つまみをドラッグ → 姿勢スラスターは指の下の船体表面を滑らせる。
+  //     重心・主エンジンは画面に平行な面の中で動かす
+  //   画面上でいつも同じ大きさに見えるよう、描画のたびに拡大率を合わせる。
+  //   ドラッグは 09-ship-builder.js の視点操作より先に（キャプチャ段階で）
+  //   受け取り、ギズモをつかんでいる間は視点が一緒に回らないようにする。
+  // -----------------------------------------------------------
+  const GIZMO_PX = 96; // 矢印の長さ（画面上のおよそのピクセル数）
+  const GIZMO_AXES = [
+    { key: 'x', dir: new THREE.Vector3(1, 0, 0), color: 0xff5a5a },
+    { key: 'y', dir: new THREE.Vector3(0, 1, 0), color: 0x5ae06a },
+    { key: 'z', dir: new THREE.Vector3(0, 0, 1), color: 0x5a9cff },
+  ];
+  const GIZMO_HOT = 0xffe14a; // つかんでいる矢印の色
+  const gizmo = new THREE.Group();
+  gizmo.visible = false;
+  scene.add(gizmo);
+  const gizmoMats = {};
+  function gizmoMat(color) {
+    return new THREE.MeshBasicMaterial({ color, depthTest: false, depthWrite: false, transparent: true, opacity: 0.95 });
+  }
+  for (const ax of GIZMO_AXES) {
+    const mat = gizmoMat(ax.color);
+    gizmoMats[ax.key] = { mat, color: ax.color };
+    const arm = new THREE.Group();
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.028, 0.74, 8), mat);
+    shaft.position.y = 0.14 + 0.37;
+    const head = new THREE.Mesh(new THREE.ConeGeometry(0.075, 0.2, 16), mat);
+    head.position.y = 0.88 + 0.1;
+    shaft.renderOrder = 40;
+    head.renderOrder = 40;
+    arm.add(shaft, head);
+    arm.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), ax.dir);
+    gizmo.add(arm);
+  }
+  {
+    const mat = gizmoMat(0xffffff);
+    gizmoMats.free = { mat, color: 0xffffff };
+    const knob = new THREE.Mesh(new THREE.SphereGeometry(0.1, 16, 12), mat);
+    knob.renderOrder = 41;
+    gizmo.add(knob);
+  }
+  gizmo.traverse((o) => { o.frustumCulled = false; });
+
+  function setGizmoHot(key) {
+    for (const [k, m] of Object.entries(gizmoMats)) m.mat.color.setHex(k === key ? GIZMO_HOT : m.color);
+  }
+
+  // 描画の直前に、画面上の大きさが一定になるよう拡大率を合わせる
+  const _gv = new THREE.Vector3(), _gw = new THREE.Vector3();
+  function updateGizmoScale(camera) {
+    if (!gizmo.visible || !camera) return;
+    const h = Math.max(1, core.canvas.clientHeight);
+    let worldPerPx;
+    if (camera.isOrthographicCamera) {
+      worldPerPx = (camera.top - camera.bottom) / (camera.zoom || 1) / h;
+    } else {
+      camera.getWorldDirection(_gv);
+      const depth = Math.max(camera.near, _gw.copy(gizmo.position).sub(camera.position).dot(_gv));
+      worldPerPx = (2 * depth * Math.tan((camera.fov * Math.PI) / 360)) / h;
+    }
+    gizmo.scale.setScalar(worldPerPx * GIZMO_PX);
+    gizmo.updateMatrixWorld(true);
+  }
+  const prevBeforeRender = scene.onBeforeRender;
+  scene.onBeforeRender = function (renderer, sc, camera, rt) {
+    if (typeof prevBeforeRender === 'function') prevBeforeRender.call(this, renderer, sc, camera, rt);
+    updateGizmoScale(camera);
+  };
+
+  function activePosition() {
+    if (!active || !design) return null;
+    if (active.kind === 'cog') return design.cog;
+    if (active.kind === 'main') { const e = findMain(active.id); return e ? e.position : null; }
+    if (active.kind === 'pod') { const pod = design.rcs.pods.find((x) => x.id === active.id); return pod ? pod.position : null; }
+    return null;
+  }
+
+  function placeGizmo() {
+    const p = placing ? null : activePosition();
+    gizmo.visible = !!p;
+    if (p) gizmo.position.set(p.x, p.y, p.z);
+  }
+
+  function partLabel(kind, id) {
+    if (kind === 'cog') return '重心';
+    if (kind === 'main') {
+      const i = design.mains.findIndex((e) => e.id === id);
+      return design.mains.length > 1 ? `主エンジン${i + 1}` : '主エンジン';
+    }
+    return `姿勢スラスター${design.rcs.pods.findIndex((p) => p.id === id) + 1}`;
+  }
+
+  // 設計座標の点 → 画面上の点（clientX/Y）
+  const _pv = new THREE.Vector3();
+  function toClient(p) {
+    const rect = core.canvas.getBoundingClientRect();
+    _pv.set(p.x, p.y, p.z).project(core.getCamera());
+    return { x: rect.left + ((_pv.x + 1) / 2) * rect.width, y: rect.top + ((1 - _pv.y) / 2) * rect.height, z: _pv.z };
+  }
+
+  function segDist(px, py, a, b) {
+    const vx = b.x - a.x, vy = b.y - a.y;
+    const L2 = vx * vx + vy * vy;
+    const t = L2 > 1e-9 ? clamp(((px - a.x) * vx + (py - a.y) * vy) / L2, 0, 1) : 0;
+    return Math.hypot(px - (a.x + vx * t), py - (a.y + vy * t));
+  }
+
+  // 指（マウス）の下にあるギズモの部分: 'x' | 'y' | 'z' | 'free' | null。
+  // 画面に映った矢印までの距離で判定する（指でもつかみやすいよう幅を広めに）
+  function pickGizmo(clientX, clientY, pointerType) {
+    if (!gizmo.visible) return null;
+    const tol = pointerType === 'mouse' ? 14 : 24;
+    const o = gizmo.position, sc = gizmo.scale.x;
+    const c = toClient(o);
+    if (c.z > 1) return null; // カメラの後ろ
+    if (Math.hypot(clientX - c.x, clientY - c.y) <= tol + 4) return 'free';
+    let best = null, bestD = tol;
+    for (const ax of GIZMO_AXES) {
+      const a = toClient({ x: o.x + ax.dir.x * sc * 0.14, y: o.y + ax.dir.y * sc * 0.14, z: o.z + ax.dir.z * sc * 0.14 });
+      const b = toClient({ x: o.x + ax.dir.x * sc * 1.08, y: o.y + ax.dir.y * sc * 1.08, z: o.z + ax.dir.z * sc * 1.08 });
+      const d = segDist(clientX, clientY, a, b);
+      if (d < bestD) { bestD = d; best = ax.key; }
+    }
+    return best;
+  }
+
+  // 視線（ray）に最も近い、軸（origin + t·dir）上の点の t。視線と軸がほぼ平行なら null
+  function axisParam(ray, origin, dir) {
+    const w = new THREE.Vector3().subVectors(origin, ray.origin);
+    const b = dir.dot(ray.direction);
+    const denom = 1 - b * b;
+    if (denom < 1e-4) return null;
+    return (b * ray.direction.dot(w) - dir.dot(w)) / denom;
+  }
+
+  // ドラッグ中だけ、つかんだ軸に沿った長い線を出す
+  let gizmoGuide = null;
+  function showGizmoGuide(axisKey, origin) {
+    hideGizmoGuide();
+    const ax = GIZMO_AXES.find((a) => a.key === axisKey);
+    if (!ax) return;
+    const L = design.hull.size * 2;
+    gizmoGuide = lineMesh([
+      { x: origin.x - ax.dir.x * L, y: origin.y - ax.dir.y * L, z: origin.z - ax.dir.z * L },
+      { x: origin.x + ax.dir.x * L, y: origin.y + ax.dir.y * L, z: origin.z + ax.dir.z * L },
+    ], ax.color, false);
+    gizmoGuide.material.opacity = 0.55;
+    scene.add(gizmoGuide);
+  }
+  function hideGizmoGuide() {
+    if (!gizmoGuide) return;
+    scene.remove(gizmoGuide);
+    gizmoGuide.geometry.dispose();
+    gizmoGuide.material.dispose();
+    gizmoGuide = null;
+  }
+
+  let gizmoDrag = null;
+
+  function beginGizmoDrag(e, axis) {
+    const p = activePosition();
+    if (!p) return false;
+    const start = new THREE.Vector3(p.x, p.y, p.z);
+    const d = {
+      pointerId: e.pointerId, axis, kind: active.kind, id: active.id, start,
+      last: { x: e.clientX, y: e.clientY }, raf: 0, moved: false,
+    };
+    const ray = setRayFromClient(e.clientX, e.clientY).clone();
+    if (axis !== 'free') {
+      d.dir = GIZMO_AXES.find((a) => a.key === axis).dir.clone();
+      // 視線とほぼ平行な軸は、指の動きから位置が決まらないので動かさない
+      d.t0 = Math.abs(d.dir.dot(ray.direction)) < 0.995 ? axisParam(ray, start, d.dir) : null;
+    } else {
+      if (d.kind === 'pod') {
+        // 手前に見えている姿勢スラスターは、指の下の船体表面を滑らせる。
+        // つまんだ点と部品の中心の画面上のずれを覚えておく（つかんだ瞬間に飛ばないように）
+        const c = toClient(start);
+        d.grab = { x: c.x - e.clientX, y: c.y - e.clientY };
+        const h = raycastHullAt(c.x, c.y);
+        d.surfaceSlide = !!h && Math.hypot(h.position.x - start.x, h.position.y - start.y, h.position.z - start.z) < design.hull.size * 0.03;
+      }
+      // 重心・主エンジンと、船体の陰（向こう側）にある姿勢スラスターは、
+      // 画面に平行な面の中で動かす（姿勢スラスターはそこからいちばん近い表面へ）
+      if (!d.surfaceSlide) {
+        const n = core.getCamera().getWorldDirection(new THREE.Vector3());
+        d.plane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, start);
+        d.hit0 = ray.intersectPlane(d.plane, new THREE.Vector3());
+        d.prevHit = d.hit0 ? d.hit0.clone() : null;
+      }
+    }
+    gizmoDrag = d;
+    try { core.canvas.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+    setGizmoHot(axis);
+    if (axis !== 'free') showGizmoGuide(axis, start);
+    return true;
+  }
+
+  function gizmoDragMove() {
+    const d = gizmoDrag;
+    if (!d || !design) return;
+    let p = null;
+    if (d.axis !== 'free') {
+      if (d.t0 === null) return;
+      const t = axisParam(setRayFromClient(d.last.x, d.last.y), d.start, d.dir);
+      if (t === null) return;
+      p = d.start.clone().addScaledVector(d.dir, t - d.t0);
+    } else if (d.surfaceSlide) {
+      const s = raycastHullAt(d.last.x + d.grab.x, d.last.y + d.grab.y);
+      if (s) applyGizmoPosition(d, s.position, s.normal);
+      return;
+    } else if (d.kind === 'pod') {
+      // 船体の陰にある姿勢スラスター: 指の動きを、いまいる点の表面に沿った
+      // 向きに直して少しずつ動かし、そのたびに表面へ吸着する（角を回り込める）
+      const h = setRayFromClient(d.last.x, d.last.y).intersectPlane(d.plane, new THREE.Vector3());
+      const pod = design.rcs.pods.find((x) => x.id === d.id);
+      if (!h || !d.prevHit || !pod) return;
+      const delta = h.clone().sub(d.prevHit);
+      d.prevHit = h;
+      const n = new THREE.Vector3(pod.normal.x, pod.normal.y, pod.normal.z).normalize();
+      delta.addScaledVector(n, -delta.dot(n));
+      if (delta.lengthSq() < 1e-12) return;
+      const s = snapToHull({ x: pod.position.x + delta.x, y: pod.position.y + delta.y, z: pod.position.z + delta.z });
+      if (s) applyGizmoPosition(d, s.position, s.normal);
+      return;
+    } else {
+      const h = setRayFromClient(d.last.x, d.last.y).intersectPlane(d.plane, new THREE.Vector3());
+      if (!h || !d.hit0) return;
+      p = d.start.clone().add(h.sub(d.hit0));
+    }
+    // 視線と軸が平行に近いと指の小さな動きで遠くへ飛ぶため、位置の欄の
+    // スライダーと同じ範囲（重心は船体の外形の1.3倍、主エンジンは1.5倍）に収める
+    const ext = d.kind === 'cog' ? 1.3 : d.kind === 'main' ? 1.5 : 1.6;
+    const lim = (ax) => Math.max(design.hull.dims[ax] / 2 * ext, design.hull.size * 0.02);
+    const q = { x: clamp(p.x, -lim('x'), lim('x')), y: clamp(p.y, -lim('y'), lim('y')), z: clamp(p.z, -lim('z'), lim('z')) };
+    if (d.kind === 'pod') {
+      const s = snapToHull(q);
+      if (s) applyGizmoPosition(d, s.position, s.normal);
+    } else {
+      applyGizmoPosition(d, q, null);
+    }
+  }
+
+  function applyGizmoPosition(d, pos, normal) {
+    if (d.kind === 'cog') {
+      design.cog = pos;
+    } else if (d.kind === 'main') {
+      const e = findMain(d.id);
+      if (!e) return;
+      e.position = pos;
+    } else {
+      const pod = design.rcs.pods.find((x) => x.id === d.id);
+      if (!pod) return;
+      pod.position = pos;
+      if (normal) pod.normal = normal;
+    }
+    d.moved = true;
+    rebuildMarkers();
+    syncUi();
+    core.setStatus(`${partLabel(d.kind, d.id)}: X ${fmtNum(pos.x)} / Y ${fmtNum(pos.y)} / Z ${fmtNum(pos.z)} m`);
+  }
+
+  function endGizmoDrag() {
+    const d = gizmoDrag;
+    if (!d) return;
+    if (d.raf) { cancelAnimationFrame(d.raf); d.raf = 0; gizmoDragMove(); }
+    gizmoDrag = null;
+    try { core.canvas.releasePointerCapture(d.pointerId); } catch (err) { /* ignore */ }
+    setGizmoHot(null);
+    hideGizmoGuide();
+    if (d.moved) onPhysicsEdit();
+  }
+
+  // キャプチャ段階（キャンバスの親）で受け取り、ギズモをつかんだときだけ
+  // キャンバス（視点の回転・タップでの選択）へ伝えない
+  const viewportWrap = core.canvas.parentElement;
+  viewportWrap.addEventListener('pointerdown', (e) => {
+    if (gizmoDrag) { e.stopPropagation(); e.preventDefault(); return; } // つかんでいる間のほかの指は無視
+    if (e.target !== core.canvas || placing) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    const axis = pickGizmo(e.clientX, e.clientY, e.pointerType);
+    if (!axis) return;
+    if (!beginGizmoDrag(e, axis)) return;
+    e.stopPropagation();
+    e.preventDefault();
+  }, true);
+  viewportWrap.addEventListener('pointermove', (e) => {
+    const d = gizmoDrag;
+    if (!d || e.pointerId !== d.pointerId) return;
+    e.stopPropagation();
+    d.last = { x: e.clientX, y: e.clientY };
+    // 位置の計算（船体表面への吸着など）は1フレームに1回だけ
+    if (!d.raf) d.raf = requestAnimationFrame(() => { d.raf = 0; if (gizmoDrag === d) gizmoDragMove(); });
+  }, true);
+  const finishGizmoDrag = (e) => {
+    if (!gizmoDrag || e.pointerId !== gizmoDrag.pointerId) return;
+    e.stopPropagation();
+    endGizmoDrag();
+  };
+  viewportWrap.addEventListener('pointerup', finishGizmoDrag, true);
+  viewportWrap.addEventListener('pointercancel', finishGizmoDrag, true);
+  viewportWrap.addEventListener('lostpointercapture', finishGizmoDrag, true);
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !active) return;
+    const tag = document.activeElement && document.activeElement.tagName;
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+    setActive(null);
+  });
 
   // -----------------------------------------------------------
   // 09-ship-builder.js（3Dビュー・モデル読み込み）とのつなぎ
@@ -874,21 +1385,24 @@
     hullHalfExtents: () => (design ? { x: design.hull.dims.x / 2, y: design.hull.dims.y / 2, z: design.hull.dims.z / 2 } : { x: 0, y: 0, z: 0 }),
     onRotationCommit: () => {
       if (!design || !core.getModelRoot()) return;
-      const m = design.main.position, eps = design.hull.size * 1e-3;
-      const atStern = Math.abs(m.x) < eps && Math.abs(m.y) < eps && Math.abs(m.z - design.hull.dims.z / 2) < eps;
+      // 主エンジンは船体の外形（箱）の中での相対的な位置を保つ
+      // （艦尾にあったものは、向きを変えたあとの船体の艦尾へ）
+      const old = { ...design.hull.dims };
       refitHullToModel();
-      if (atStern) design.main.position = { x: 0, y: 0, z: design.hull.dims.z / 2 };
+      remapMainsToDims(old, false);
       resnapPods();
       afterShapeChange(false);
     },
     onModelLoaded: (fromUser) => {
       if (!design) return;
+      const old = { ...design.hull.dims };
       refitHullToModel();
       if (fromUser) {
-        // 新しいモデル: 主エンジンを艦尾の中央へ、スラスターは新しい船体の表面へ
+        // 新しいモデル: 主エンジンは新しい船体の艦尾の表面へ（並びは船体の幅に
+        // 合わせて広げ・縮め）、スラスターは新しい船体の表面へ
         design.hull.modelFileName = core.getModelFileName() || design.hull.modelFileName;
         design.hull.hasModel = true;
-        design.main.position = { x: 0, y: 0, z: design.hull.dims.z / 2 };
+        remapMainsToDims(old, true);
         resnapPods();
         modelDirty = true;
         core.setStatus('モデルを読み込みました。設計の大きさに合わせて拡大・縮小しています。向きが違う場合は「モデルの向き」で直してください。');
@@ -896,6 +1410,21 @@
       afterShapeChange(true);
     },
   });
+
+  // 船体の外形が old → 今の寸法に変わったとき（モデルの読み込み・向きの変更）の
+  // 主エンジンの移し方。上下左右の位置はそのまま（新しい外形からはみ出す分は
+  // 縁まで）にし、艦尾寄り（後ろ1/4）にあったエンジンと、toStern のときは
+  // 全エンジンを、新しい船体の艦尾の表面へ寄せる。それ以外は前後の位置を
+  // 全長の比率で移す。
+  function remapMainsToDims(old, toStern) {
+    const nd = design.hull.dims;
+    for (const e of design.mains) {
+      const x = clamp(e.position.x, -nd.x / 2, nd.x / 2);
+      const y = clamp(e.position.y, -nd.y / 2, nd.y / 2);
+      const atStern = toStern || e.position.z >= old.z / 4;
+      e.position = { x, y, z: atStern ? sternSurfaceZ(x, y) : e.position.z * (nd.z / Math.max(old.z, 1e-9)) };
+    }
+  }
 
   $('openModelLoaderBtn').addEventListener('click', () => core.showDropzone());
   $('removeModelBtn').addEventListener('click', () => {
@@ -938,6 +1467,8 @@
   async function openDesign(d, opts) {
     design = normalizeShipDesign(d);
     selectedPodId = null;
+    selectedMainId = design.mains.length ? design.mains[0].id : null;
+    active = null;
     setPlacing(false);
     core.removeModel();
     const a = core.adjust;
@@ -998,11 +1529,11 @@
       // 旧方式で合わせていた大きさをそのまま使い、性能はその大きさの目安値にする
       const auto = shipDesignAutoSpec(design.baseClass, design.hull.size);
       Object.assign(design, { mass: auto.mass, maxSpeed: auto.maxSpeed, maxAngularSpeed: auto.maxAngularSpeed });
-      design.main.thrust = auto.mainThrust;
       design.retro.thrust = auto.retroThrust;
       design.rcs.thrust = auto.rcsThrust;
       autoPlacePods();
-      design.main.position = { x: 0, y: 0, z: design.hull.dims.z / 2 };
+      design.mains = [{ id: 'm1', position: { x: 0, y: 0, z: sternSurfaceZ(0, 0) }, thrust: auto.mainThrust }];
+      selectedMainId = 'm1';
       rebuildMarkers();
       syncUi();
       core.setStatus(`この艦種に保存されていたモデル「${modelData.fileName || ''}」で新しい設計を作りました。名前を付けて保存してください。`);
@@ -1127,9 +1658,26 @@
   // テスト・デバッグ用
   window.ShipDesigner = {
     get design() { return design; },
+    get active() { return active; },
     snapToHull,
     setSize,
+    setActive,
     autoPlacePods: () => { autoPlacePods(); onPhysicsEdit(); },
     save: saveCurrent,
+    // ギズモの各部分（'x' | 'y' | 'z' | 'free'、t = 矢印の根元0〜先端1）の画面上の位置
+    gizmoClientPoint(key, t) {
+      if (!gizmo.visible) return null;
+      const o = gizmo.position, sc = gizmo.scale.x;
+      const ax = GIZMO_AXES.find((a) => a.key === key);
+      const k = ax ? sc * (0.14 + 0.94 * (t === undefined ? 0.7 : t)) : 0;
+      const dir = ax ? ax.dir : new THREE.Vector3();
+      return toClient({ x: o.x + dir.x * k, y: o.y + dir.y * k, z: o.z + dir.z * k });
+    },
+    partClientPoint(kind, id) {
+      const p = kind === 'cog' ? design.cog
+        : kind === 'main' ? (findMain(id) || {}).position
+          : (design.rcs.pods.find((x) => x.id === id) || {}).position;
+      return p ? toClient(p) : null;
+    },
   };
 })();

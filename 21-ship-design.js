@@ -127,7 +127,8 @@ function createShipDesign(baseClass, name) {
     // 同じ回りやすさになる値。
     inertiaFactor: t.inertiaFactor,
     cog: { x: 0, y: 0, z: 0 },
-    main: { position: { x: 0, y: 0, z: dims.z / 2 }, thrust: auto.mainThrust },
+    // v81: 主エンジンは複数持てる（初期は艦尾の中央に1基）
+    mains: [{ id: 'm1', position: { x: 0, y: 0, z: dims.z / 2 }, thrust: auto.mainThrust }],
     retro: { thrust: auto.retroThrust },
     rcs: { thrust: auto.rcsThrust, pods: defaultRcsPodsForBox(dims) },
     maxSpeed: auto.maxSpeed,
@@ -152,13 +153,38 @@ function defaultRcsPodsForBox(dims) {
   return pods.map((p, i) => ({ id: `p${i + 1}`, ...p }));
 }
 
+// 主エンジンの推力の合計と、推力の中心（推力で重み付けした噴射口の平均位置）。
+// 全エンジンを同じ出力で吹かしたときの合力は、この点を通る前後方向の線（推力線）に沿う。
+function shipDesignMainThrust(d) {
+  return (d.mains || []).reduce((s, e) => s + Math.max(0, e.thrust || 0), 0);
+}
+function shipDesignThrustCenter(d) {
+  const total = shipDesignMainThrust(d);
+  const c = { x: 0, y: 0, z: 0 };
+  const list = d.mains || [];
+  if (!list.length) return c;
+  for (const e of list) {
+    const w = total > 0 ? Math.max(0, e.thrust || 0) / total : 1 / list.length;
+    c.x += e.position.x * w; c.y += e.position.y * w; c.z += e.position.z * w;
+  }
+  return c;
+}
+
 // 古いデータや手で書き換えたデータでも壊れないよう、足りない項目を補う
 function normalizeShipDesign(d) {
   if (!d) return null;
   const base = createShipDesign(d.baseClass || 'rocket', d.name);
   const out = { ...base, ...d };
   out.hull = { ...base.hull, ...(d.hull || {}) };
-  out.main = { ...base.main, ...(d.main || {}) };
+  // v81: 主エンジン1基（main）の形の古いデータは、複数（mains）の形に直す
+  let mains = Array.isArray(d.mains) ? d.mains : (d.main ? [{ id: 'm1', ...d.main }] : base.mains);
+  mains = mains.filter((e) => e && e.position).map((e, i) => ({
+    id: e.id || `m${i + 1}`,
+    position: { x: Number(e.position.x) || 0, y: Number(e.position.y) || 0, z: Number(e.position.z) || 0 },
+    thrust: Math.max(0, Number(e.thrust) || 0),
+  }));
+  out.mains = mains.length ? mains : base.mains;
+  delete out.main;
   out.retro = { ...base.retro, ...(d.retro || {}) };
   out.rcs = { ...base.rcs, ...(d.rcs || {}) };
   if (!Array.isArray(out.rcs.pods)) out.rcs.pods = [];
@@ -202,11 +228,14 @@ function buildShipSpecFromDesign(design) {
   const dims = d.hull.dims;
   const thrusters = [];
 
-  // 主エンジン: 後方(+Z)へ噴射し、艦を前方(-Z)へ押す
-  thrusters.push({
-    id: 'main', position: P(d.main.position), direction: { x: 0, y: 0, z: 1 },
-    maxThrust: Math.max(0, d.main.thrust), kind: 'main',
-  });
+  // 主エンジン: 後方(+Z)へ噴射し、艦を前方(-Z)へ押す。複数あれば1基ずつ別に
+  // 出力を決める（重心が推力線からずれていれば、左右・上下の出力差でも釣り合いをとる）
+  for (const e of d.mains) {
+    thrusters.push({
+      id: `main_${e.id}`, position: P(e.position), direction: { x: 0, y: 0, z: 1 },
+      maxThrust: Math.max(0, e.thrust), kind: 'main',
+    });
+  }
   // 逆噴射: 艦首の面に、重心の左右対称に2基（重心をはさむので回転を生まない）
   if (d.retro.thrust > 0) {
     const zFront = -dims.z / 2;

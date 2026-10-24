@@ -290,15 +290,16 @@
     font-variant-numeric: tabular-nums;
   }
 
+  /* v81: X・Y・Z それぞれ ±90° のボタンを3列に並べる */
   .quick-rot-row {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
     gap: 8px;
-    flex-wrap: wrap;
     margin-top: 4px;
   }
+  .quick-rot-row button.wide { grid-column: 1 / -1; }
   .quick-rot-row button {
-    flex: 1 1 auto;
-    min-width: 70px;
+    min-width: 0;
     padding: 8px 6px;
     font-size: 11px;
     border-radius: 8px;
@@ -487,6 +488,11 @@
     color: #ffd9a0;
   }
   .pod-chip.selected { background: rgba(255,200,120,0.35); color: #fff; }
+  .pod-chip.main-chip { border-color: rgba(108,240,255,0.4); background: rgba(108,240,255,0.08); color: #bff6ff; }
+  .pod-chip.main-chip.selected { background: rgba(108,240,255,0.32); color: #fff; }
+  .pod-editor.main-editor { background: rgba(108,240,255,0.05); border-color: rgba(108,240,255,0.22); }
+  .pod-editor.main-editor .pod-editor-title { color: #bff6ff; }
+  .btn-row button:disabled { opacity: 0.4; }
   .pod-editor { padding: 8px; border-radius: 8px; background: rgba(255,200,120,0.06); border: 1px solid rgba(255,200,120,0.2); margin-bottom: 6px; }
   .pod-editor-title { font-size: 12px; color: #ffd9a0; margin-bottom: 6px; }
   .perf { font-size: 11px; line-height: 1.7; color: #dfefff; }
@@ -596,7 +602,7 @@
 
   <div class="viewport-wrap">
     <canvas id="viewportCanvas"></canvas>
-    <div class="viewport-hint" id="viewportHint">ドラッグ: 視点回転 / ピンチ・ホイール: ズーム / シフト+ドラッグ・二本指スワイプ: 視点パン</div>
+    <div class="viewport-hint" id="viewportHint">ドラッグ: 視点回転 / ピンチ・ホイール: ズーム / シフト+ドラッグ・二本指スワイプ: 視点パン<br>部品（▲ ■ ●）をタップ → 出てくる矢印（ギズモ）をドラッグで移動</div>
     <div class="viewport-legend"><span class="lg-cog">●</span> 重心　<span class="lg-main">▲</span> 主エンジン　<span class="lg-line">━</span> 推力線　<span class="lg-retro">▲</span> 逆噴射　<span class="lg-rcs">■</span> 姿勢スラスター</div>
     <div class="place-banner" id="placeBanner" style="display:none;">船体をタップして姿勢スラスターを置きます（終わるときは「完了」）</div>
 
@@ -716,10 +722,13 @@
           <div class="axis-value" id="rotZVal">0°</div>
         </div>
         <div class="quick-rot-row">
-          <button data-quick="yaw180">Y+180°（前後反転）</button>
-          <button data-quick="pitch90">X+90°（縦→横）</button>
-          <button data-quick="pitchm90">X-90°</button>
+          <button data-quick="pitch90">X+90°</button>
+          <button data-quick="yaw90">Y+90°</button>
           <button data-quick="roll90">Z+90°</button>
+          <button data-quick="pitchm90">X-90°</button>
+          <button data-quick="yawm90">Y-90°</button>
+          <button data-quick="rollm90">Z-90°</button>
+          <button data-quick="yaw180" class="wide">Y+180°（前後反転）</button>
         </div>
         <button class="reset-link" id="resetAdjustBtn" type="button">向きをリセット</button>
       </div>
@@ -771,19 +780,30 @@
 
     <details class="adjust-section" id="mainSection" open>
       <summary>主エンジン</summary>
-      <div class="field-row">
-        <label for="mainThrustInput">最大推力</label>
-        <input type="number" id="mainThrustInput" class="num-input" min="0" step="any">
-        <span class="unit">kN</span>
+      <div class="pod-list" id="mainList"></div>
+      <div class="btn-row">
+        <button type="button" id="mainAddBtn">＋ 主エンジンを追加</button>
+        <button type="button" id="mainRemoveBtn" class="danger">選んだエンジンを外す</button>
       </div>
       <div class="derived" id="mainAccelLine"></div>
-      <h3>位置（噴射口）</h3>
-      <div class="pos-rows" id="mainPosRows"></div>
+      <div class="pod-editor main-editor" id="mainEditor">
+        <div class="pod-editor-title" id="mainEditorTitle"></div>
+        <div class="field-row">
+          <label for="mainThrustInput">最大推力</label>
+          <input type="number" id="mainThrustInput" class="num-input" min="0" step="any">
+          <span class="unit">kN</span>
+        </div>
+        <h3>位置（噴射口）</h3>
+        <div class="pos-rows" id="mainPosRows"></div>
+        <div class="btn-row">
+          <button type="button" id="mainToSternBtn">このエンジンを艦尾の表面へ</button>
+        </div>
+      </div>
       <div class="btn-row">
-        <button type="button" id="mainToSternBtn">艦尾の中央へ</button>
-        <button type="button" id="mainToCogAxisBtn">重心の真後ろへ</button>
+        <button type="button" id="mainToCogAxisBtn">推力の中心を重心の真後ろへ</button>
       </div>
       <div class="derived" id="mainOffsetLine"></div>
+      <p class="hint">エンジンが複数あるときは、全部を同じ出力で吹かしたときの推力の中心を通る線を「推力線」として表示します。重心がずれていても、エンジンごとの出力差と姿勢スラスターで自動的に釣り合いをとります。</p>
     </details>
 
     <details class="adjust-section" id="retroSection">
@@ -803,8 +823,9 @@
       <div class="btn-row">
         <button type="button" id="cogToMainAxisBtn">主エンジンの推力線上へ</button>
         <button type="button" id="cogToCenterBtn">船体の中心へ</button>
+        <button type="button" id="cogGizmoBtn">ギズモで動かす</button>
       </div>
-      <p class="hint">重心が主エンジンの推力線（ビューの水色の線）からずれていると、主エンジンを吹かしたときに艦が回ろうとします。その回転は姿勢スラスターが自動で打ち消します（打ち消しきれないときは主エンジンの出力が自動で絞られます）。</p>
+      <p class="hint">重心が主エンジンの推力線（ビューの水色の線）からずれていると、主エンジンを吹かしたときに艦が回ろうとします。その回転は姿勢スラスターが自動で打ち消します（打ち消しきれないときは主エンジンの出力が自動で絞られます）。ビューの●をタップするか「ギズモで動かす」を押すと、矢印をドラッグして動かせます。</p>
     </details>
 
     <details class="adjust-section" id="rcsSection" open>
@@ -833,7 +854,7 @@
           <button type="button" id="podDeleteBtn" class="danger">この基を外す</button>
         </div>
       </div>
-      <p class="hint">1基につき、船体から外向きの噴射口1つと、表面に沿った4方向の噴射口4つがあります。座標を入力すると、いちばん近い船体表面に吸着します。ビューの■をタップすると選択できます。</p>
+      <p class="hint">1基につき、船体から外向きの噴射口1つと、表面に沿った4方向の噴射口4つがあります。座標を入力すると、いちばん近い船体表面に吸着します。ビューの■をタップすると選択でき、出てくる矢印（ギズモ）をドラッグすると船体の表面に沿って動かせます（中央の白い丸をつかむと指の下の表面へ）。</p>
     </details>
 
     <details class="adjust-section" id="perfSection" open>

@@ -326,12 +326,12 @@ async function renderShipDesignOptions() {
     const card = document.createElement('label');
     card.className = 'option-card';
     card.dataset.design = d.id;
-    const g = d.main.thrust / d.mass / 9.80665;
+    const g = shipDesignMainThrust(d) / d.mass / 9.80665;
     card.innerHTML = `
       <input type="radio" name="shipClass" value="design:${d.id}">
       <div class="title">★ ${d.name.replace(/[<>&]/g, '')}</div>
       <div class="desc">大きさ ${fmtSize(d.hull.size)} / 質量 ${fmtMassT(d.mass)} / 加速 ${g.toFixed(2)} G /
-        姿勢スラスター ${d.rcs.pods.length}基 / 最高速 ${Math.round(d.maxSpeed)}${d.hull.hasModel ? ' / 3Dモデルあり' : ''}</div>
+        主エンジン ${d.mains.length}基 / 姿勢スラスター ${d.rcs.pods.length}基 / 最高速 ${Math.round(d.maxSpeed)}${d.hull.hasModel ? ' / 3Dモデルあり' : ''}</div>
     `;
     card.addEventListener('click', () => selectDesign(d.id));
     wrap.appendChild(card);
