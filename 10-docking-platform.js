@@ -64,6 +64,8 @@ const DockingPlatform = {
         this._disposeGroup(this._group);
         this._group = null;
         this._hasTargetKey = null;
+        this._modelRoot = null;
+        if (typeof Collision !== 'undefined') Collision.setPortShape(null);
       }
       this._modelLoadedForPortId = null;
       return;
@@ -158,6 +160,14 @@ const DockingPlatform = {
       this._modelRoot = loadedObject;
       this._modelCorrectionGroup.add(loadedObject);
       applyAdjust(this._modelCorrectionGroup);
+      // v79: ポートの当たり判定の形（ポートの座標系＝ゲートと同じ）を作る
+      if (typeof Collision !== 'undefined' && typeof computeCollisionShape === 'function') {
+        try {
+          Collision.setPortShape(computeCollisionShape(loadedObject, this._group, 40), this._modelLoadedForPortId);
+        } catch (err) {
+          console.warn('ポートの当たり判定の作成に失敗しました。', err);
+        }
+      }
     };
 
     if (saved.format === 'glb') {
@@ -212,6 +222,7 @@ const DockingPlatform = {
       this._disposeGroup(this._modelRoot);
     }
     this._modelRoot = null;
+    if (typeof Collision !== 'undefined') Collision.setPortShape(null);
   },
 
   _buildGateMesh() {

@@ -392,6 +392,31 @@
   }
 
   // -----------------------------------------------------------
+  // 当たり判定の確認表示（ゲーム中の艦とポートの衝突判定に使う形）
+  // -----------------------------------------------------------
+  let collisionDebugOn = false;
+  let collisionDebugObj = null;
+  function refreshCollisionDebug() {
+    if (collisionDebugObj) {
+      scene.remove(collisionDebugObj);
+      collisionDebugObj.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+      collisionDebugObj = null;
+    }
+    if (!collisionDebugOn || !design) return;
+    const target = core.getModelRoot() || boxHull;
+    if (!target) return;
+    const shape = computeCollisionShape(target, scene, 32);
+    collisionDebugObj = buildCollisionShapeDebugObject(shape, 0xff8833);
+    scene.add(collisionDebugObj);
+    core.setStatus(shape ? `当たり判定: 直方体${shape.boxes.length}個（格子の1マス ${fmtLen(shape.cell)}）` : '');
+  }
+  $('collisionDebugBtn').addEventListener('click', () => {
+    collisionDebugOn = !collisionDebugOn;
+    $('collisionDebugBtn').classList.toggle('active', collisionDebugOn);
+    refreshCollisionDebug();
+  });
+
+  // -----------------------------------------------------------
   // 大きさ・寸法
   // -----------------------------------------------------------
   // 大きさを変える: 船体と、重心・エンジン・スラスターの位置を原点を中心に一様に拡大縮小
@@ -449,6 +474,7 @@
     core.setSceneScale(design.hull.size);
     rebuildBoxHull();
     rebuildMarkers();
+    refreshCollisionDebug();
     core.rebuildDockingFaceGizmo();
     if (frame) frameCamera();
     markDirty();

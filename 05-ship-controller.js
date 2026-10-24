@@ -44,7 +44,10 @@ const ShipController = {
       const h = dt / steps;
       for (let i = 0; i < steps; i++) {
         FlightPhysics.step(ship, State.input, h);
+        const prev = { x: ship.position.x, y: ship.position.y, z: ship.position.z };
         this._integratePose(ship, h);
+        // v79: ドッキングポートとの当たり判定（めり込んだら押し戻す）
+        if (typeof Collision !== 'undefined') Collision.resolve(ship, prev);
       }
     }
     this._syncMesh(ship);

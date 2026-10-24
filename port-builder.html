@@ -196,6 +196,25 @@
     color: #cfe8ff;
     font-size: 11px;
   }
+  /* v79: 当たり判定の確認表示ボタン */
+  .collision-debug-btn {
+    position: absolute;
+    top: 46px;
+    right: 12px;
+    height: 26px;
+    padding: 0 10px;
+    border-radius: 6px;
+    background: rgba(80,60,0,0.45);
+    border: 1px dashed rgba(255,210,120,0.5);
+    color: #ffd67a;
+    font-size: 10px;
+    z-index: 5;
+  }
+  .collision-debug-btn.active {
+    background: rgba(255,180,60,0.35);
+    border-color: rgba(255,210,120,0.9);
+    color: #fff;
+  }
   .ortho-view-btn.active {
     background: rgba(120,180,255,0.35);
     border-color: rgba(150,200,255,0.7);
@@ -523,6 +542,7 @@
         <button class="ortho-view-btn" data-ortho-face="top" title="上面（もう一度押すと下面）">上面</button>
         <button class="ortho-view-btn" id="viewResetBtn" title="視点をリセット">リセット</button>
       </div>
+      <button class="collision-debug-btn" id="collisionDebugBtn" type="button" title="ゲーム中に艦と当たる形（モデルを立方体の格子で近似した直方体の集まり）を表示">当たり判定を表示</button>
 
       <div class="model-empty-state" id="modelEmptyState">
         <div class="icon">🛰️</div>

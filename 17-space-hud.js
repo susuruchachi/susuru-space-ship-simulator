@@ -338,7 +338,12 @@ const SpaceHud = {
 
     // 地表接近の警告
     const warnAge = performance.now() - Navigation.lastCollisionWarning;
-    if (warnAge < 1500 && Navigation.collisionBody) {
+    const contactAge = typeof Collision !== 'undefined' ? performance.now() - Collision.lastContactAt : Infinity;
+    if (contactAge < 1500) {
+      // v79: ドッキングポートとの接触（23-collision.js）
+      this._els.warning.textContent = '⚠ ドッキングポートに接触しました';
+      this._els.warning.style.display = 'block';
+    } else if (warnAge < 1500 && Navigation.collisionBody) {
       this._els.warning.textContent = `⚠ ${Navigation.collisionBody.ja}に近づきすぎています。これ以上は降下できません`;
       this._els.warning.style.display = 'block';
     } else {

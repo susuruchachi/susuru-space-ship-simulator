@@ -775,6 +775,7 @@
 <script src="19-star-map.js"></script>
 <script src="20-small-bodies.js"></script>
 <script src="21-ship-design.js"></script>
+<script src="23-collision.js"></script>
 
 <script>
 // =============================================================
@@ -872,6 +873,16 @@ function createShipVisualRoot(classKey) {
   return root;
 }
 
+// v79: 艦の見た目（仮の箱・読み込んだモデル）が変わったら、当たり判定の形を作り直す
+function refreshShipCollisionShape(root) {
+  if (typeof Collision === 'undefined' || typeof computeCollisionShape !== 'function') return;
+  try {
+    Collision.setShipShape(computeCollisionShape(root, root, 24));
+  } catch (err) {
+    console.warn('艦の当たり判定の作成に失敗しました。', err);
+  }
+}
+
 // v78: 保存されたモデルデータ（GLB/OBJ）からThree.jsのオブジェクトを作る。
 // GLBのdata URLは、iPadで巨大なdata URLをfetchすると失敗する問題（v67）を
 // 避けるため、atobで直接デコードする（dataUrlToArrayBuffer）。
@@ -938,6 +949,7 @@ async function applyShipDesignInGame(ship, root, design) {
   );
   root.userData.designOffset.add(box);
   root.userData.placeholderMesh = box;
+  refreshShipCollisionShape(root);
 
   if (!design.hull.hasModel) return;
   const data = await loadShipDesignModel(design.id);
@@ -954,6 +966,7 @@ async function applyShipDesignInGame(ship, root, design) {
     root.userData.designOffset.remove(box);
     box.geometry.dispose();
     root.userData.placeholderMesh = null;
+    refreshShipCollisionShape(root);
   } catch (err) {
     console.warn(`艦の設計「${design.name}」のモデル読み込みに失敗しました。仮の船体のままにします。`, err);
   }
@@ -988,6 +1001,7 @@ async function loadSavedShipModelInto(root, classKey, ship) {
     }
     root.userData.correctionGroup.add(loadedObject);
     applyAdjust(root.userData.correctionGroup);
+    refreshShipCollisionShape(root);
 
     // v61: 接舷面(dockingFace)が保存されていれば艦の状態へ反映する。
     // バウンディングボックスは補正後(rotation/scale/offset適用後)の
@@ -1034,6 +1048,7 @@ function initGame() {
   const ship = ShipController.spawnPlayerShip(shipClass, mesh, { x: 0, y: 0, z: 0 });
   // v78: 自作の艦（設計）が選ばれていればそれを使う。読み込みは非同期なので、
   // それまでは艦種プリセットのまま（停止中なので切り替わっても影響はない）。
+  refreshShipCollisionShape(mesh); // 仮の箱（モデルを読み込んだら作り直す）
   const designId = params.get('design') || persisted.shipDesignId;
   if (params.get('design')) savePersistedSettings({ shipDesignId: designId });
   if (designId) {

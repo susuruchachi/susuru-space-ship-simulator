@@ -20,8 +20,8 @@
 // v78: 「艦の設計」（21-ship-design.js、名前を付けて何隻でも保存できる
 // 自作の艦）の編集画面になった。大きさ・質量・主エンジン・重心・姿勢
 // スラスターなどの設計の編集と保存は 22-ship-designer.js が担当し、この
-// ファイルは3Dビュー（カメラ操作・平行投影）・モデルの読み込み・接舷面・
-// 当たり判定の確認表示を受け持つ。両者は window.ShipBuilderCore でつながる。
+// ファイルは3Dビュー（カメラ操作・平行投影）・モデルの読み込み・接舷面を
+// 受け持つ。両者は window.ShipBuilderCore でつながる。
 // モデルの位置オフセット・スケールは設計側（中心合わせ・大きさ）が
 // 自動で決めるため、スライダーは無くした。
 //
@@ -548,10 +548,6 @@
     // 早期returnするだけなので無駄コストは小さい。
     // 関数宣言のためホイスティングにより、定義順に関わらず参照可能。
     if (typeof rebuildDockingFaceGizmo === 'function') rebuildDockingFaceGizmo();
-    // v76-debug: 区間分割バウンディングボックスの確認表示（デバッグ用）。
-    // 本実装（モデル保存時の事前計算）とは別に、開発中の目視確認のため
-    // 一時的に追加。トグルボタンがオンの間だけ再計算・再描画する。
-    if (typeof refreshSegmentedBoundsDebug === 'function') refreshSegmentedBoundsDebug();
   }
 
   // ---- スライダーDOM ----
@@ -1132,127 +1128,6 @@
       orbitState.target.set(0, 0, 0);
       if (modelRoot) frameCameraOnModel();
       refreshOrthoButtons();
-    });
-  }
-
-  // -----------------------------------------------------------
-  // v76-debug: 区間分割バウンディングボックスの確認表示（デバッグ用、
-  // 一時的な機能）。トグルボタンで表示/非表示を切り替え、オンの間は
-  // モデル調整（回転・スケール・オフセット）のたびに再計算・再描画する。
-  // 本実装（保存時に計算結果を保存データへ含める処理）とは無関係で、
-  // 目視確認専用。
-  // v76: Z軸単独8分割（computeSegmentedBoundsFromObject3D）と、
-  // Z軸×X軸の交差方式（computeCrossSegmentedBoundsFromObject3D、
-  // 左右非対称な形状をよりタイトに近似）の2モードを、それぞれ別の
-  // ボタンで排他的に切り替えて確認できるようにする。
-  // -----------------------------------------------------------
-  let segmentedBoundsDebugMode = null; // null | 'z' | 'cross'
-  let segmentedBoundsDebugGroup = null;
-  const segmentedBoundsDebugBtn = document.getElementById('segmentedBoundsDebugBtn');
-  const crossSegmentedBoundsDebugBtn = document.getElementById('crossSegmentedBoundsDebugBtn');
-
-  function clearSegmentedBoundsDebug() {
-    if (segmentedBoundsDebugGroup) {
-      correctionGroup.remove(segmentedBoundsDebugGroup);
-      segmentedBoundsDebugGroup.traverse((obj) => {
-        if (obj.geometry) obj.geometry.dispose();
-        if (obj.material) obj.material.dispose();
-      });
-      segmentedBoundsDebugGroup = null;
-    }
-  }
-
-  function refreshSegmentedBoundsDebug() {
-    clearSegmentedBoundsDebug();
-    if (!segmentedBoundsDebugMode || !modelRoot) return;
-
-    const segments = segmentedBoundsDebugMode === 'cross'
-      ? computeCrossSegmentedBoundsFromObject3D(correctionGroup, 8, 8)
-      : computeSegmentedBoundsFromObject3D(correctionGroup, 8);
-    if (segments.length === 0) return;
-
-    const group = new THREE.Group();
-    // 区間ごとに色を変えて、実際に長い方の軸に沿った並びが見た目で
-    // 分かるようにする（寒色〜暖色のグラデーション）。交差モードでは
-    // Z軸・X軸のうち実際にスパンが大きい方（＝内部で16分割されている
-    // 方）を軸にして色を補間する。どちらの軸が長いかはモデルにより
-    // 変わる（元モデルが90度ズレている等）ため、セルの実測範囲から
-    // 都度判定する（Z軸単独モードは従来通り配列の並び順=前後順その
-    // ものを使う）。
-    const colors = [0x3388ff, 0x33aaff, 0x33ffcc, 0x66ff66, 0xccff33, 0xffcc33, 0xff8833, 0xff3333];
-    let colorForIndex;
-    if (segmentedBoundsDebugMode === 'cross') {
-      const allZMin = segments.map((s) => s.zMin);
-      const allXMin = segments.map((s) => s.xMin);
-      const zLo = Math.min(...allZMin), zHi = Math.max(...allZMin);
-      const xLo = Math.min(...allXMin), xHi = Math.max(...allXMin);
-      const zRange = zHi - zLo;
-      const xRange = xHi - xLo;
-      // computeCrossSegmentedBoundsFromObject3D側の判定（スパンが
-      // 大きい方を16分割）と同じ考え方で、セルの重心位置のばらつきが
-      // 大きい方の軸を採用する。
-      const useX = xRange > zRange;
-      const lo = useX ? xLo : zLo;
-      const range = Math.max((useX ? xRange : zRange), 1e-6);
-      colorForIndex = (seg) => {
-        const t = ((useX ? seg.xMin : seg.zMin) - lo) / range; // 0〜1
-        const idx = Math.min(colors.length - 1, Math.floor(t * colors.length));
-        return colors[idx];
-      };
-    } else {
-      colorForIndex = (seg, i) => colors[i % colors.length];
-    }
-
-    segments.forEach((seg, i) => {
-      const width = Math.max(seg.xMax - seg.xMin, 1e-3);
-      const height = Math.max(seg.yMax - seg.yMin, 1e-3);
-      const depth = Math.max(seg.zMax - seg.zMin, 1e-3);
-      const cx = (seg.xMin + seg.xMax) / 2;
-      const cy = (seg.yMin + seg.yMax) / 2;
-      const cz = (seg.zMin + seg.zMax) / 2;
-
-      const geo = new THREE.BoxGeometry(width, height, depth);
-      const edges = new THREE.EdgesGeometry(geo);
-      const mat = new THREE.LineBasicMaterial({
-        color: colorForIndex(seg, i),
-        transparent: true,
-        opacity: 0.85,
-      });
-      const box = new THREE.LineSegments(edges, mat);
-      box.position.set(cx, cy, cz);
-      group.add(box);
-      geo.dispose();
-    });
-
-    // correctionGroupの子として追加することで、モデルと同じ回転・
-    // スケール・オフセットが自動的に適用される（区間分割の計算基準と
-    // 一致させるため）。
-    correctionGroup.add(group);
-    segmentedBoundsDebugGroup = group;
-  }
-
-  function refreshSegmentedBoundsDebugButtons() {
-    if (segmentedBoundsDebugBtn) {
-      segmentedBoundsDebugBtn.classList.toggle('active', segmentedBoundsDebugMode === 'z');
-    }
-    if (crossSegmentedBoundsDebugBtn) {
-      crossSegmentedBoundsDebugBtn.classList.toggle('active', segmentedBoundsDebugMode === 'cross');
-    }
-  }
-
-  if (segmentedBoundsDebugBtn) {
-    segmentedBoundsDebugBtn.addEventListener('click', () => {
-      // 同じモードをもう一度押したらオフ、それ以外はこのモードへ切替
-      segmentedBoundsDebugMode = segmentedBoundsDebugMode === 'z' ? null : 'z';
-      refreshSegmentedBoundsDebugButtons();
-      refreshSegmentedBoundsDebug();
-    });
-  }
-  if (crossSegmentedBoundsDebugBtn) {
-    crossSegmentedBoundsDebugBtn.addEventListener('click', () => {
-      segmentedBoundsDebugMode = segmentedBoundsDebugMode === 'cross' ? null : 'cross';
-      refreshSegmentedBoundsDebugButtons();
-      refreshSegmentedBoundsDebug();
     });
   }
 

@@ -8,7 +8,7 @@
 // v77: 表記を「0.000.000.000」形式に変更（CHANGELOG.md「バージョン番号の
 // 付け方」参照）。左から メジャー.機能バージョン.修正番号.ビルド番号。
 // 機能バージョンは従来の vNN の番号（v77 → 077）。
-const GAME_VERSION = '0.078.000.000';
+const GAME_VERSION = '0.079.000.000';
 
 // -------------------------------------------------------------
 // 速度制限モード
@@ -1026,286 +1026,177 @@ function computeEffectiveShipDockingTarget(dockingTarget, ship) {
 }
 
 // =============================================================
-// v76: 衝突判定用の「区間分割バウンディングボックス」計算
+// v79: 当たり判定の形（ボクセル化した直方体の集まり）
 //
-// 逆走進入防止（新機能）で、艦・ポートそれぞれの「大雑把な形状
-// マスク」として使う。精密な衝突形状ではなく、細長いロケット型・
-// 太い戦艦型といった見た目の違いをある程度反映した近似形状を
-// 安く得ることが目的。
+// v76で作りかけていた「区間分割バウンディングボックス」（前後方向・左右方向に
+// 輪切りにして、各区間の上下の範囲を箱にする方式）は、格納庫のように中が
+// 空いたポート（床と天井がある）だと、床から天井までが1つの箱になって中に
+// 入れなくなるため、方式を改めた。
 //
-// 手法: 対象オブジェクトのローカルZ軸（前後方向）をSEGMENT_COUNT個の
-// 等間隔区間に分割し、各区間に頂点が1つでも入るメッシュについて、
-// その区間内に入る頂点だけを対象にX/Y方向の境界（min/max）を求める。
-// 結果、各区間ごとに1つの直方体（ローカル座標系のAABB、区間の前後端
-// をZ方向の境界とする）ができる。「艦の先端が細く、本体が太い」等の
-// 概形が、区間ごとに幅・高さが変わる階段状の形で近似される。
+// 手法:
+//   1) root 配下のメッシュの三角形を frame の座標系で集め、最大辺を
+//      resolution 分割する立方体の格子（ボクセル）を用意する。
+//   2) 各三角形の上に点を細かく打って、三角形が通るマス（表面）に印を付ける。
+//   3) 格子の外側（余白）から、印の無いマスを塗りつぶして「外」を求める。
+//      外に届かない空きマス（閉じた船体の内部）は中身ありとみなす。
+//      入口の開いた格納庫の中は外とつながっているので、中身なしのまま。
+//   4) 隣り合う中身ありのマスを、まとめられるだけ大きな直方体にまとめる。
 //
-// 09-ship-builder.js（艦モデル保存時）・12-port-builder.js（ポート
-// モデル保存時）の両方から呼ばれ、結果を保存データに含めることで、
-// プレイ中（13-collision.js）は全頂点走査をせずこの事前計算結果を
-// そのまま使う。
+// 艦船建造画面・ドッキングポート設定画面の「当たり判定を表示」と、ゲーム中の
+// 艦とポートの衝突判定（23-collision.js）で使う。
 //
-// object3d: 対象のTHREE.Object3D（Group等の階層で良い。内部の全
-//           メッシュを走査する）。object3d自身のローカル座標系
-//           （= object3dの親から見た変換より内側）を基準とする。
-// 戻り値: 区間ボックスの配列（前から順、object3dに頂点が1つも
-//         無ければ空配列）。各要素は
-//         { zMin, zMax, xMin, xMax, yMin, yMax }
-//         （すべてobject3dのローカル座標系の値）。
-function computeSegmentedBoundsFromObject3D(object3d, segmentCount) {
-  const count = segmentCount || 8;
-  if (!object3d) return [];
-
-  // object3d自身のワールド行列の逆行列。各メッシュのワールド頂点座標を
-  // object3dローカル座標系へ変換するのに使う（object3d配下のメッシュは
-  // 個々に独自の回転・オフセットを持ちうるため、単純にmesh.geometryの
-  // 生の頂点座標を使うのではなく、必ずワールド座標経由でobject3d
-  // ローカルへ変換する）。
-  // v76-fix1: 全体のZ範囲もTHREE.Box3().setFromObject()（ワールド座標系
-  // で計算される）ではなく、ここで頂点を集計する際に同時にローカル
-  // 座標系で求める。setFromObject()を使うと、object3d自身がワールド上
-  // で移動・回転している場合にzMin/zMaxがワールド座標の値になって
-  // しまい、区間ごとの幅・高さ自体は正しくてもz座標の絶対値がずれる
-  // 不具合があった（Three.js実測で確認済み）。
-  object3d.updateWorldMatrix(true, true);
-  const toLocal = new THREE.Matrix4().copy(object3d.matrixWorld).invert();
-
-  let zMin = Infinity;
-  let zMax = -Infinity;
-  const localPoints = [];
+// 戻り値: {
+//   cell,                       // マスの1辺の長さ
+//   boxes: [{ min:{x,y,z}, max:{x,y,z} }],  // frame の座標系の直方体
+//   bounds: { min, max },       // 全体の範囲
+// } | null（三角形が無い）
+// =============================================================
+function computeCollisionShape(root, frame, resolution) {
+  const res = resolution || 32;
+  if (!root) return null;
+  root.updateWorldMatrix(true, true);
+  frame.updateWorldMatrix(true, false);
+  const toFrame = new THREE.Matrix4().copy(frame.matrixWorld).invert();
+  const m = new THREE.Matrix4();
   const v = new THREE.Vector3();
-
-  object3d.traverse((node) => {
-    if (!node.isMesh || !node.geometry) return;
-    const geo = node.geometry;
-    const posAttr = geo.attributes && geo.attributes.position;
-    if (!posAttr) return;
-
-    const localToObject3d = new THREE.Matrix4().multiplyMatrices(toLocal, node.matrixWorld);
-
-    for (let i = 0; i < posAttr.count; i++) {
-      v.fromBufferAttribute(posAttr, i);
-      v.applyMatrix4(localToObject3d);
-      localPoints.push({ x: v.x, y: v.y, z: v.z });
-      if (v.z < zMin) zMin = v.z;
-      if (v.z > zMax) zMax = v.z;
-    }
-  });
-
-  if (localPoints.length === 0) return [];
-
-  const zSpan = zMax - zMin;
-  // 全長がほぼ0（点や平面）の場合は区間分割の意味が無いので、
-  // 全体を1個の箱として返す。
-  if (zSpan < 1e-6) {
-    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
-    for (const p of localPoints) {
-      if (p.x < xMin) xMin = p.x;
-      if (p.x > xMax) xMax = p.x;
-      if (p.y < yMin) yMin = p.y;
-      if (p.y > yMax) yMax = p.y;
-    }
-    return [{ zMin, zMax, xMin, xMax, yMin, yMax }];
-  }
-
-  // 区間ごとの集計用バケツ
-  const buckets = [];
-  for (let i = 0; i < count; i++) {
-    buckets.push({
-      zMin: zMin + (zSpan * i) / count,
-      zMax: zMin + (zSpan * (i + 1)) / count,
-      xMin: Infinity, xMax: -Infinity,
-      yMin: Infinity, yMax: -Infinity,
-      hasPoint: false,
-    });
-  }
-
-  for (const p of localPoints) {
-    // pはこれでobject3dローカル座標系になっている。所属する区間を
-    // 求める（末尾の浮動小数誤差でcountを超えないようclampする）。
-    let idx = Math.floor(((p.z - zMin) / zSpan) * count);
-    if (idx < 0) idx = 0;
-    if (idx >= count) idx = count - 1;
-
-    const b = buckets[idx];
-    b.hasPoint = true;
-    if (p.x < b.xMin) b.xMin = p.x;
-    if (p.x > b.xMax) b.xMax = p.x;
-    if (p.y < b.yMin) b.yMin = p.y;
-    if (p.y > b.yMax) b.yMax = p.y;
-  }
-
-  // 頂点が1つも入らなかった区間（極端に薄い/歪なモデルで起こりうる）
-  // は、前後の隣接区間のX/Y範囲を借りて埋める（穴を作らないため）。
-  for (let i = 0; i < buckets.length; i++) {
-    if (buckets[i].hasPoint) continue;
-    // 直前の有効区間を探す。無ければ直後を探す。
-    let src = null;
-    for (let j = i - 1; j >= 0; j--) {
-      if (buckets[j].hasPoint) { src = buckets[j]; break; }
-    }
-    if (!src) {
-      for (let j = i + 1; j < buckets.length; j++) {
-        if (buckets[j].hasPoint) { src = buckets[j]; break; }
+  const tri = [];
+  root.traverse((node) => {
+    if (!node.isMesh || !node.geometry || !node.visible) return;
+    const pos = node.geometry.attributes && node.geometry.attributes.position;
+    if (!pos) return;
+    m.multiplyMatrices(toFrame, node.matrixWorld);
+    const idx = node.geometry.index;
+    const count = idx ? idx.count : pos.count;
+    for (let i = 0; i + 2 < count; i += 3) {
+      for (let j = 0; j < 3; j++) {
+        v.fromBufferAttribute(pos, idx ? idx.getX(i + j) : i + j).applyMatrix4(m);
+        tri.push(v.x, v.y, v.z);
       }
     }
-    if (src) {
-      buckets[i].xMin = src.xMin;
-      buckets[i].xMax = src.xMax;
-      buckets[i].yMin = src.yMin;
-      buckets[i].yMax = src.yMax;
-    } else {
-      // 全区間が空（起こらないはずだが安全側）
-      buckets[i].xMin = buckets[i].xMax = 0;
-      buckets[i].yMin = buckets[i].yMax = 0;
-    }
-  }
-
-  return buckets.map((b) => ({
-    zMin: b.zMin, zMax: b.zMax,
-    xMin: b.xMin, xMax: b.xMax,
-    yMin: b.yMin, yMax: b.yMax,
-  }));
-}
-
-// v76: シリアライズ用の軽量ヘルパー。computeSegmentedBoundsFromObject3D
-// の戻り値（{zMin,zMax,xMin,xMax,yMin,yMax}の配列）は既にプレーンな
-// オブジェクトのみで構成されているためJSON.stringifyにそのまま渡せるが、
-// 呼び出し側での意図を明確にするための薄いラッパーとして用意する。
-// computeCrossSegmentedBoundsFromObject3Dの戻り値（同じ形のオブジェクト
-// の配列）にもそのまま使える。
-function serializeSegmentedBounds(segments) {
-  return (segments || []).map((s) => ({
-    zMin: s.zMin, zMax: s.zMax,
-    xMin: s.xMin, xMax: s.xMax,
-    yMin: s.yMin, yMax: s.yMax,
-  }));
-}
-
-// v76: computeSegmentedBoundsFromObject3D（Z軸単独の8区間）を拡張し、
-// Z軸とX軸（Y軸周りに90度回した軸＝艦の左右方向）の両方で輪切りにし、
-// その交差（Z区間×X区間の格子セル）に実際に頂点が入るものだけを箱と
-// して残す。Z軸だけでは表現できない左右非対称な形状（片側に張り出した
-// ウイングなど）を、より艦の形状にタイトにフィットした形で近似する
-// のが目的。
-//
-// 頂点が1つも入らない格子セルは単純に除外する（隣接セルからの補完は
-// 行わない。単一軸方式で行っていた「隣接区間から埋める」処理は、
-// 格子状になると「隣接」の定義自体が曖昧になるため。モデルの形状に
-// よっては結果に穴が空きうる点に注意）。
-//
-// object3d: 対象のTHREE.Object3D（Group等の階層で良い）。
-// zSegmentCount / xSegmentCount: 各軸の分割数（デフォルト8）。
-// 戻り値: セルの配列（最大 zSegmentCount * xSegmentCount 個、実際は
-//         モデル形状に応じてそれより少ない）。各要素は
-//         { zMin, zMax, xMin, xMax, yMin, yMax }
-//         （すべてobject3dのローカル座標系の値）。
-function computeCrossSegmentedBoundsFromObject3D(object3d, zSegmentCount, xSegmentCount) {
-  const zCount = zSegmentCount || 8;
-  const xCount = xSegmentCount || 8;
-  if (!object3d) return [];
-
-  // object3d自身のワールド行列の逆行列。computeSegmentedBoundsFromObject3D
-  // と同じ理由（v76-fix1参照）で、全頂点をobject3dローカル座標系へ変換
-  // した上で min/max・格子分けを行う。
-  object3d.updateWorldMatrix(true, true);
-  const toLocal = new THREE.Matrix4().copy(object3d.matrixWorld).invert();
-
-  let zMin = Infinity, zMax = -Infinity;
-  let xMin = Infinity, xMax = -Infinity;
-  const localPoints = [];
-  const v = new THREE.Vector3();
-
-  object3d.traverse((node) => {
-    if (!node.isMesh || !node.geometry) return;
-    const posAttr = node.geometry.attributes && node.geometry.attributes.position;
-    if (!posAttr) return;
-
-    const localToObject3d = new THREE.Matrix4().multiplyMatrices(toLocal, node.matrixWorld);
-
-    for (let i = 0; i < posAttr.count; i++) {
-      v.fromBufferAttribute(posAttr, i);
-      v.applyMatrix4(localToObject3d);
-      localPoints.push({ x: v.x, y: v.y, z: v.z });
-      if (v.z < zMin) zMin = v.z;
-      if (v.z > zMax) zMax = v.z;
-      if (v.x < xMin) xMin = v.x;
-      if (v.x > xMax) xMax = v.x;
-    }
   });
+  if (tri.length < 9) return null;
 
-  if (localPoints.length === 0) return [];
-
-  const zSpan = zMax - zMin;
-  const xSpan = xMax - xMin;
-  // v76: 全長に対して幅の方が大きいモデルや、元モデルの向きが90度
-  // ズレている等、Z軸・X軸のどちらが「長辺」になるかはモデルによって
-  // 変わる。固定でZ軸だけ細かく分割すると、実際に長く伸びている方が
-  // X軸だった場合に粗いままになってしまうため、実際のスパン
-  // （zSpan/xSpan）を比較し、長い方の軸だけ分割数を2倍（8→16）にする。
-  // 差がわずかな場合はどちらを選んでも粗さの体感差はほぼ無いはずなので、
-  // 特別な閾値は設けずMath.max/Math.minの比較のみで決める。
-  let zBaseCount = zCount;
-  let xBaseCount = xCount;
-  if (zSpan > xSpan) {
-    zBaseCount = zCount * 2;
-  } else if (xSpan > zSpan) {
-    xBaseCount = xCount * 2;
+  let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < tri.length; i += 3) {
+    if (tri[i] < minX) minX = tri[i]; if (tri[i] > maxX) maxX = tri[i];
+    if (tri[i + 1] < minY) minY = tri[i + 1]; if (tri[i + 1] > maxY) maxY = tri[i + 1];
+    if (tri[i + 2] < minZ) minZ = tri[i + 2]; if (tri[i + 2] > maxZ) maxZ = tri[i + 2];
   }
-  // どちらかの幅がほぼ0（板状・平面的なモデル）の場合、その軸は
-  // 分割の意味が無いため1区間として扱う。
-  const effectiveZCount = zSpan < 1e-6 ? 1 : zBaseCount;
-  const effectiveXCount = xSpan < 1e-6 ? 1 : xBaseCount;
+  const span = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 1e-6);
+  const cell = span / res;
+  // 外側に1マスずつ余白を取る（塗りつぶしの起点）
+  const ox = minX - cell, oy = minY - cell, oz = minZ - cell;
+  const nx = Math.ceil((maxX - minX) / cell) + 3;
+  const ny = Math.ceil((maxY - minY) / cell) + 3;
+  const nz = Math.ceil((maxZ - minZ) / cell) + 3;
+  const N = nx * ny * nz;
+  const at = (x, y, z) => (z * ny + y) * nx + x;
+  const SURF = 1, OUT = 2;
+  const grid = new Uint8Array(N);
 
-  // セルをMapで管理（キー: "zIdx,xIdx"）。頂点が実際に入ったセルだけが
-  // 生成されるため、空セルを後から除外する処理は不要（生成しない）。
-  const cells = new Map();
-
-  for (const p of localPoints) {
-    let zIdx = effectiveZCount === 1
-      ? 0
-      : Math.floor(((p.z - zMin) / zSpan) * effectiveZCount);
-    if (zIdx < 0) zIdx = 0;
-    if (zIdx >= effectiveZCount) zIdx = effectiveZCount - 1;
-
-    let xIdx = effectiveXCount === 1
-      ? 0
-      : Math.floor(((p.x - xMin) / xSpan) * effectiveXCount);
-    if (xIdx < 0) xIdx = 0;
-    if (xIdx >= effectiveXCount) xIdx = effectiveXCount - 1;
-
-    const key = zIdx + ',' + xIdx;
-    let cell = cells.get(key);
-    if (!cell) {
-      cell = {
-        zMin: zMin + (zSpan * zIdx) / effectiveZCount,
-        zMax: zSpan < 1e-6 ? zMax : zMin + (zSpan * (zIdx + 1)) / effectiveZCount,
-        xMin: xMin + (xSpan * xIdx) / effectiveXCount,
-        xMax: xSpan < 1e-6 ? xMax : xMin + (xSpan * (xIdx + 1)) / effectiveXCount,
-        yMin: Infinity, yMax: -Infinity,
-      };
-      cells.set(key, cell);
+  // 2) 三角形の上に、マスの半分以下の間隔で点を打って表面のマスに印を付ける
+  // 点は必ず範囲内にあるが、座標変換の丸め誤差でわずかに外へはみ出すと
+  // 余白のマスに印が付き、外からの塗りつぶしが始められなくなる（艦やポートの
+  // 中が全部「中身あり」になる）ため、余白には印を付けない。
+  const mark = (x, y, z) => {
+    const ix = Math.min(nx - 2, Math.max(1, Math.floor((x - ox) / cell)));
+    const iy = Math.min(ny - 2, Math.max(1, Math.floor((y - oy) / cell)));
+    const iz = Math.min(nz - 2, Math.max(1, Math.floor((z - oz) / cell)));
+    grid[at(ix, iy, iz)] = SURF;
+  };
+  const step = cell * 0.5;
+  for (let i = 0; i < tri.length; i += 9) {
+    const ax = tri[i], ay = tri[i + 1], az = tri[i + 2];
+    const bx = tri[i + 3], by = tri[i + 4], bz = tri[i + 5];
+    const cx = tri[i + 6], cy = tri[i + 7], cz = tri[i + 8];
+    const longest = Math.max(Math.hypot(bx - ax, by - ay, bz - az), Math.hypot(cx - bx, cy - by, cz - bz), Math.hypot(ax - cx, ay - cy, az - cz));
+    const n = Math.min(400, Math.max(1, Math.ceil(longest / step)));
+    for (let a = 0; a <= n; a++) {
+      for (let b = 0; b <= n - a; b++) {
+        const u = a / n, w = b / n, t = 1 - u - w;
+        mark(ax * t + bx * u + cx * w, ay * t + by * u + cy * w, az * t + bz * u + cz * w);
+      }
     }
-    if (p.y < cell.yMin) cell.yMin = p.y;
-    if (p.y > cell.yMax) cell.yMax = p.y;
   }
 
-  return Array.from(cells.values());
+  // 3) 余白（必ず空）から、表面でないマスを塗りつぶして「外」にする
+  const queue = new Int32Array(N);
+  let qh = 0, qt = 0;
+  grid[0] = OUT;
+  queue[qt++] = 0;
+  while (qh < qt) {
+    const k = queue[qh++];
+    const x = k % nx, y = Math.floor(k / nx) % ny, z = Math.floor(k / (nx * ny));
+    const nb = [x > 0 ? k - 1 : -1, x < nx - 1 ? k + 1 : -1, y > 0 ? k - nx : -1, y < ny - 1 ? k + nx : -1,
+      z > 0 ? k - nx * ny : -1, z < nz - 1 ? k + nx * ny : -1];
+    for (const j of nb) {
+      if (j >= 0 && grid[j] === 0) { grid[j] = OUT; queue[qt++] = j; }
+    }
+  }
+  // 中身あり = 表面、または外に届かない空きマス
+  const solid = new Uint8Array(N);
+  for (let k = 0; k < N; k++) solid[k] = grid[k] !== OUT ? 1 : 0;
+
+  // 4) 中身ありのマスを、X→Y→Zの順に伸ばせるだけ伸ばした直方体にまとめる
+  const used = new Uint8Array(N);
+  const boxes = [];
+  for (let z = 0; z < nz; z++) {
+    for (let y = 0; y < ny; y++) {
+      for (let x = 0; x < nx; x++) {
+        const k0 = at(x, y, z);
+        if (!solid[k0] || used[k0]) continue;
+        let x1 = x;
+        while (x1 + 1 < nx && solid[at(x1 + 1, y, z)] && !used[at(x1 + 1, y, z)]) x1++;
+        let y1 = y;
+        grow_y: while (y1 + 1 < ny) {
+          for (let xx = x; xx <= x1; xx++) {
+            const k = at(xx, y1 + 1, z);
+            if (!solid[k] || used[k]) break grow_y;
+          }
+          y1++;
+        }
+        let z1 = z;
+        grow_z: while (z1 + 1 < nz) {
+          for (let yy = y; yy <= y1; yy++) {
+            for (let xx = x; xx <= x1; xx++) {
+              const k = at(xx, yy, z1 + 1);
+              if (!solid[k] || used[k]) break grow_z;
+            }
+          }
+          z1++;
+        }
+        for (let zz = z; zz <= z1; zz++) for (let yy = y; yy <= y1; yy++) for (let xx = x; xx <= x1; xx++) used[at(xx, yy, zz)] = 1;
+        boxes.push({
+          min: { x: ox + x * cell, y: oy + y * cell, z: oz + z * cell },
+          max: { x: ox + (x1 + 1) * cell, y: oy + (y1 + 1) * cell, z: oz + (z1 + 1) * cell },
+        });
+      }
+    }
+  }
+  return {
+    cell,
+    boxes,
+    bounds: { min: { x: minX, y: minY, z: minZ }, max: { x: maxX, y: maxY, z: maxZ } },
+  };
 }
 
-// v76: モデル未設定時（簡易ゲート表示のみ・GLB/OBJ未読み込み）の
-// フォールバック用に、固定寸法から単一区間の「区間分割ボックス」を
-// 生成する（配列の要素数は常に1）。halfExtentsはローカル座標系の
-// 半寸法{x,y,z}（中心が原点である前提。10-docking-platform.jsの
-// ゲート・艦のcorrectionGroup原点はどちらもこの前提を満たす）。
-function makeFallbackSegmentedBounds(halfExtents) {
-  const hx = (halfExtents && halfExtents.x) || 0;
-  const hy = (halfExtents && halfExtents.y) || 0;
-  const hz = (halfExtents && halfExtents.z) || 0;
-  return [{
-    zMin: -hz, zMax: hz,
-    xMin: -hx, xMax: hx,
-    yMin: -hy, yMax: hy,
-  }];
+// 当たり判定の形を、確認用の線（直方体の辺）として表示するオブジェクトを作る
+function buildCollisionShapeDebugObject(shape, color) {
+  const group = new THREE.Group();
+  if (!shape) return group;
+  const pts = [];
+  for (const b of shape.boxes) {
+    const { min: a, max: c } = b;
+    const corners = [
+      [a.x, a.y, a.z], [c.x, a.y, a.z], [c.x, c.y, a.z], [a.x, c.y, a.z],
+      [a.x, a.y, c.z], [c.x, a.y, c.z], [c.x, c.y, c.z], [a.x, c.y, c.z],
+    ];
+    const edges = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]];
+    for (const [i, j] of edges) pts.push(...corners[i], ...corners[j]);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+  const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: color || 0xff8833, transparent: true, opacity: 0.75 }));
+  group.add(lines);
+  return group;
 }
-
