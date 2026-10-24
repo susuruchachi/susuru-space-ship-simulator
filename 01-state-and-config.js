@@ -8,7 +8,7 @@
 // v77: 表記を「0.000.000.000」形式に変更（CHANGELOG.md「バージョン番号の
 // 付け方」参照）。左から メジャー.機能バージョン.修正番号.ビルド番号。
 // 機能バージョンは従来の vNN の番号（v77 → 077）。
-const GAME_VERSION = '0.084.000.002';
+const GAME_VERSION = '0.084.000.003';
 
 // v83: iPad・iPhone の Safari は viewport の user-scalable=no を無視し、2本指の
 // ジェスチャーでページ全体を拡大・縮小してしまう（3Dビューのピンチズームと
@@ -1353,4 +1353,115 @@ function buildCollisionShapeDebugObject(shape, color) {
   const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: color || 0xff8833, transparent: true, opacity: 0.75 }));
   group.add(lines);
   return group;
+}
+
+// =============================================================
+// v84: 光る面（放射＝emissive）の扱い
+// =============================================================
+
+// GLB の「放射の強さ」（KHR_materials_emissive_strength。Blender の放射の強さ）を
+// 反映する。Three.js r128 の GLTFLoader はこの拡張を読まず、強さ1のまま（ブルームの
+// しきい値に届かない）になるので、強さに応じて明るくする（強さ10で約2.7倍、30で約3.5倍。
+// そのままの倍率では画面が白く飛ぶので対数で弱める）。強さの指定がない光る面も、
+// はっきり光らせている（放射の色が明るい）ものは少し明るくして、ブルームがかかるようにする。
+function applyEmissiveStrength(root) {
+  if (!root) return;
+  const done = new Set();
+  root.traverse((node) => {
+    if (!node.isMesh || !node.material) return;
+    for (const m of Array.isArray(node.material) ? node.material : [node.material]) {
+      if (!m || done.has(m) || !m.emissive) continue;
+      done.add(m);
+      const ext = m.userData && m.userData.gltfExtensions && m.userData.gltfExtensions.KHR_materials_emissive_strength;
+      const strength = ext && Number(ext.emissiveStrength) > 0 ? Number(ext.emissiveStrength) : 1;
+      const peak = Math.max(m.emissive.r, m.emissive.g, m.emissive.b);
+      if (peak <= 0) continue;
+      m.userData.emissiveStrength = strength;
+      if (strength > 1) m.emissiveIntensity = 1 + 0.5 * Math.log2(strength);
+      else if (peak >= 0.5 && !m.emissiveMap) m.emissiveIntensity = 2;
+    }
+  });
+}
+
+// 光る面を、近いもの同士（一辺 cell の格子）でまとめて「光源の候補」の一覧にする。
+// 座標は frame（ポートのグループなど）の座標系。各候補: 中心・広がり（半径）・面積・色
+// （放射の色×強さで重み付けした平均）・明るさ（面積×強さ）。
+function collectEmissiveLightClusters(root, frame, opts) {
+  const cell = Math.max(1e-3, (opts && opts.cell) || 50);
+  frame.updateWorldMatrix(true, false);
+  root.updateWorldMatrix(true, true);
+  const inv = new THREE.Matrix4().copy(frame.matrixWorld).invert();
+  const m = new THREE.Matrix4();
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+  const ab = new THREE.Vector3(), ac = new THREE.Vector3();
+  const cells = new Map();
+  root.traverse((node) => {
+    if (!node.isMesh || !node.geometry || !node.visible) return;
+    const pos = node.geometry.attributes && node.geometry.attributes.position;
+    if (!pos) return;
+    const mats = Array.isArray(node.material) ? node.material : [node.material];
+    const groups = node.geometry.groups && node.geometry.groups.length && Array.isArray(node.material)
+      ? node.geometry.groups : [{ start: 0, count: Infinity, materialIndex: 0 }];
+    m.multiplyMatrices(inv, node.matrixWorld);
+    const idx = node.geometry.index;
+    const total = idx ? idx.count : pos.count;
+    for (const g of groups) {
+      const mat = mats[g.materialIndex || 0];
+      if (!mat || !mat.emissive || !mat.userData || !(mat.userData.emissiveStrength > 0)) continue;
+      const e = mat.emissive;
+      const power = mat.userData.emissiveStrength * Math.max(e.r, e.g, e.b);
+      const end = Math.min(total, g.start + g.count);
+      for (let i = g.start; i + 2 < end; i += 3) {
+        const i0 = idx ? idx.getX(i) : i, i1 = idx ? idx.getX(i + 1) : i + 1, i2 = idx ? idx.getX(i + 2) : i + 2;
+        a.fromBufferAttribute(pos, i0).applyMatrix4(m);
+        b.fromBufferAttribute(pos, i1).applyMatrix4(m);
+        c.fromBufferAttribute(pos, i2).applyMatrix4(m);
+        const area = ab.subVectors(b, a).cross(ac.subVectors(c, a)).length() / 2;
+        if (!(area > 0)) continue;
+        const cx = (a.x + b.x + c.x) / 3, cy = (a.y + b.y + c.y) / 3, cz = (a.z + b.z + c.z) / 3;
+        const key = `${Math.floor(cx / cell)},${Math.floor(cy / cell)},${Math.floor(cz / cell)}`;
+        let k = cells.get(key);
+        if (!k) {
+          k = { w: 0, x: 0, y: 0, z: 0, area: 0, power: 0, r: 0, g: 0, b: 0, min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+          cells.set(key, k);
+        }
+        const w = area * power;
+        k.w += w; k.area += area; k.power += w;
+        k.x += cx * w; k.y += cy * w; k.z += cz * w;
+        k.r += e.r * w; k.g += e.g * w; k.b += e.b * w;
+        k.min[0] = Math.min(k.min[0], cx); k.min[1] = Math.min(k.min[1], cy); k.min[2] = Math.min(k.min[2], cz);
+        k.max[0] = Math.max(k.max[0], cx); k.max[1] = Math.max(k.max[1], cy); k.max[2] = Math.max(k.max[2], cz);
+      }
+    }
+  });
+  const out = [];
+  for (const k of cells.values()) {
+    if (!(k.w > 0)) continue;
+    const peak = Math.max(k.r, k.g, k.b) || 1;
+    out.push({
+      position: { x: k.x / k.w, y: k.y / k.w, z: k.z / k.w },
+      radius: Math.hypot(k.max[0] - k.min[0], k.max[1] - k.min[1], k.max[2] - k.min[2]) / 2,
+      area: k.area,
+      power: k.power,
+      color: { r: k.r / peak, g: k.g / peak, b: k.b / peak },
+    });
+  }
+  return out;
+}
+
+// 映り込む周りの景色（環境マップ）が無いと、金属の面は光をほとんど返さず真っ黒に
+// なる（Blender では周りの景色や光る面が映り込むので見える）。そういう面は金属らしさを
+// maxMetalness までに抑え、太陽や光る面の光（点光源）で照らされて見えるようにする。
+function softenMetalsWithoutEnvironment(root, maxMetalness) {
+  if (!root) return;
+  const cap = maxMetalness ?? 0.5;
+  root.traverse((node) => {
+    if (!node.isMesh || !node.material) return;
+    for (const m of Array.isArray(node.material) ? node.material : [node.material]) {
+      if (!m || !m.isMeshStandardMaterial || m.envMap || !(m.metalness > cap)) continue;
+      if (m.userData.originalMetalness === undefined) m.userData.originalMetalness = m.metalness;
+      m.metalness = cap;
+      m.needsUpdate = true;
+    }
+  });
 }

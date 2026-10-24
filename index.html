@@ -819,6 +819,11 @@
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/MTLLoader.js"></script>
+<!-- v84: 光のにじみ（ブルーム）。26-post-fx.js -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
 
 <script src="01-state-and-config.js"></script>
 <script src="02-input.js"></script>
@@ -842,6 +847,7 @@
 <script src="20-small-bodies.js"></script>
 <script src="21-ship-design.js"></script>
 <script src="23-collision.js"></script>
+<script src="26-post-fx.js"></script>
 
 <script>
 // =============================================================
@@ -889,6 +895,7 @@ function onResize() {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  PostFx.setSize(renderer);
 }
 
 // v01時点では仮の箱メッシュ。実艦モデル(GLB/OBJ)は艦船建造画面
@@ -960,7 +967,8 @@ function parseShipModelData(data) {
         const manager = new THREE.LoadingManager();
         const loader = new THREE.GLTFLoader(manager);
         loader.textureLoader = new THREE.TextureLoader(manager);
-        loader.parse(buf, '', (gltf) => resolve(gltf.scene), reject);
+        // v84: 光る面の強さ（ブルーム用）を反映（01-state-and-config.js applyEmissiveStrength）
+        loader.parse(buf, '', (gltf) => { applyEmissiveStrength(gltf.scene); resolve(gltf.scene); }, reject);
       } else if (data.format === 'obj') {
         let materials = null;
         if (data.mtlText) {
@@ -1160,6 +1168,10 @@ function initGame() {
   // v08: RCS最大出力の主機推力に対する上限比率。settings.htmlのみで
   // 変更する運用（ゲーム内HUDには専用UIを設けない）。
   State.settings.rcsThrustCapRatio = persisted.rcsThrustCapRatio ?? 1.0;
+  // v84: 光のにじみ（ブルーム）。settings.html で切り替える（?bloom=0/1 で上書き可）
+  const bloomParam = params.get('bloom');
+  State.settings.bloomEnabled = bloomParam !== null ? bloomParam === '1' : (persisted.bloomEnabled ?? true);
+  PostFx.init(renderer, State.settings.bloomEnabled);
 
   // v08: 入港（オートドッキング）目的地の復元。settings.htmlを
   // 経由せず、HUDの「ここを目的地として保存」ボタンで設定・
@@ -1178,6 +1190,7 @@ function initGame() {
     autoDampingEnabled: State.settings.autoDampingEnabled,
     retroDampingEnabled: State.settings.retroDampingEnabled,
     rcsThrustCapRatio: State.settings.rcsThrustCapRatio,
+    bloomEnabled: State.settings.bloomEnabled,
     showApproachGuides: State.settings.showApproachGuides,
     showRouteLine: State.settings.showRouteLine,
   });
@@ -1226,13 +1239,19 @@ function animate() {
   HUD.update();
   SpaceHud.update();
 
-  renderer.clear();
-  Universe.render(renderer);
   if (mapOpen) {
+    renderer.setRenderTarget(null);
+    renderer.clear();
+    Universe.render(renderer);
     StarMap.postRender();
   } else {
-    renderer.clearDepth();
-    renderer.render(scene, camera);
+    // v84: ブルームが有効なら画面外に描いてから、明るい部分をにじませて画面へ（26-post-fx.js）
+    PostFx.render(renderer, () => {
+      renderer.clear();
+      Universe.render(renderer);
+      renderer.clearDepth();
+      renderer.render(scene, camera);
+    });
   }
 }
 

@@ -306,6 +306,13 @@
       </div>
       <switch-fake id="debugHudSwitch"></switch-fake>
     </div>
+    <div class="toggle-row" id="bloomToggle">
+      <div>
+        <div class="label">光のにじみ（ブルーム）</div>
+        <div class="sub">ポートや艦の光る面・噴射の明るいところをにじませる（動きが重いときは切ってください）</div>
+      </div>
+      <switch-fake id="bloomSwitch"></switch-fake>
+    </div>
   </section>
 
   <section>
@@ -355,6 +362,7 @@ let designs = [];
 // 保存値がnull（未選択）の場合は艦種プリセットのデフォルトを表示する。
 let selectedCapMode = persisted.speedCapMode || ShipClassPresets[selectedClass].speedCapMode;
 let debugHudOn = persisted.showDebugHud;
+let bloomOn = persisted.bloomEnabled ?? true;
 let rcsThrustCapRatio = persisted.rcsThrustCapRatio ?? 1.0;
 
 function renderShipClassOptions() {
@@ -464,6 +472,17 @@ function selectCapMode(value) {
   });
 }
 
+function initBloomToggle() {
+  const row = document.getElementById('bloomToggle');
+  const sw = document.getElementById('bloomSwitch');
+  const paint = () => { sw.style.background = bloomOn ? '#3a8fd6' : 'rgba(255,255,255,0.15)'; };
+  row.addEventListener('click', () => {
+    bloomOn = !bloomOn;
+    paint();
+  });
+  paint();
+}
+
 function initDebugToggle() {
   const row = document.getElementById('debugHudToggle');
   const sw = document.getElementById('debugHudSwitch');
@@ -503,6 +522,7 @@ function initApplyButton() {
       shipDesignId: selectedDesignId,
       speedCapMode: selectedCapMode,
       showDebugHud: debugHudOn,
+      bloomEnabled: bloomOn,
       rcsThrustCapRatio: rcsThrustCapRatio,
     });
 
@@ -511,6 +531,7 @@ function initApplyButton() {
     if (selectedDesignId) params.set('design', selectedDesignId);
     params.set('speedCapMode', selectedCapMode);
     params.set('debugHud', debugHudOn ? '1' : '0');
+    params.set('bloom', bloomOn ? '1' : '0');
     location.href = `index.html?${params.toString()}`;
   });
 }
@@ -720,6 +741,7 @@ updateShipBuilderLink();
 initSyncUi();
 initCapModeOptions();
 initDebugToggle();
+initBloomToggle();
 initRcsCapSlider();
 initApplyButton();
 </script>

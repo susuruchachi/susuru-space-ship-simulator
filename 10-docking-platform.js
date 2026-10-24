@@ -43,6 +43,16 @@ const DockingPlatform = {
   GATE_HEIGHT: 26, // 戦艦級全高18に対しマージン
   GATE_DEPTH: 40, // 入口〜出口の奥行き（四角柱の長さ）
 
+  // v84: ポートの光る面を光源として使う。光る面を近いもの同士でまとめた「光源の候補」
+  // （_lightClusters）のうち、艦に近いものから LIGHT_COUNT 個を点光源に割り当てる。
+  // 点光源の数を変えると全部の材質の作り直し（数秒止まる）になるので、数は固定にして、
+  // 割り当てが変わるときは明るさを徐々に入れ替える。
+  LIGHT_COUNT: 6,
+  LIGHT_FADE_TIME: 0.6,
+  _lightClusters: null,
+  _lightSlots: null,
+  _lightLastT: 0,
+
   init(scene) {
     this._scene = scene;
   },
@@ -68,6 +78,7 @@ const DockingPlatform = {
         if (typeof Collision !== 'undefined') Collision.setPortShape(null);
       }
       this._modelLoadedForPortId = null;
+      this._updatePortLights(); // 点光源を消していく
       return;
     }
 
@@ -87,6 +98,88 @@ const DockingPlatform = {
     );
 
     this._syncPortModel(target);
+    this._updatePortLights();
+  },
+
+  _ensureLightPool() {
+    if (this._lightSlots) return;
+    this._lightSlots = [];
+    for (let i = 0; i < this.LIGHT_COUNT; i++) {
+      const light = new THREE.PointLight(0xffffff, 0, 100, 2);
+      this._scene.add(light);
+      this._lightSlots.push({ light, cluster: null, level: 0 });
+    }
+  },
+
+  _updatePortLights() {
+    if (!this._lightSlots) return;
+    const now = performance.now();
+    const dt = Math.min(0.1, Math.max(0, (now - (this._lightLastT || now)) / 1000));
+    this._lightLastT = now;
+    const clusters = this._group && this._modelRoot ? this._lightClusters : null;
+    const ship = State.ship;
+    // 艦に近い候補（候補の広がりの分だけ近いとみなす）から LIGHT_COUNT 個
+    const want = new Set();
+    if (clusters && clusters.length && ship) {
+      const p = this._group.worldToLocal(new THREE.Vector3(ship.position.x, ship.position.y, ship.position.z));
+      const best = [];
+      for (const c of clusters) {
+        const d = Math.hypot(c.position.x - p.x, c.position.y - p.y, c.position.z - p.z) - c.radius;
+        if (d > c.reach) continue;
+        if (best.length < this.LIGHT_COUNT) best.push([d, c]);
+        else if (d < best[best.length - 1][0]) best[best.length - 1] = [d, c];
+        else continue;
+        best.sort((u, v) => u[0] - v[0]);
+      }
+      for (const [, c] of best) want.add(c);
+    }
+    const step = dt / this.LIGHT_FADE_TIME;
+    for (const s of this._lightSlots) {
+      if (s.cluster && want.has(s.cluster)) { want.delete(s.cluster); s.level = Math.min(1, s.level + step); }
+      else if (s.cluster) { s.level = Math.max(0, s.level - step); if (s.level === 0) s.cluster = null; }
+    }
+    for (const s of this._lightSlots) {
+      if (s.cluster || !want.size) continue;
+      const c = want.values().next().value;
+      want.delete(c);
+      s.cluster = c;
+      s.level = 0;
+    }
+    for (const s of this._lightSlots) {
+      const c = s.cluster;
+      if (!c) { s.light.intensity = 0; continue; }
+      const w = this._group.localToWorld(new THREE.Vector3(c.position.x, c.position.y, c.position.z));
+      s.light.position.copy(w);
+      s.light.color.setRGB(c.color.r, c.color.g, c.color.b);
+      s.light.distance = c.radius + c.reach;
+      s.light.intensity = c.intensity * s.level;
+    }
+  },
+
+  // v84: 光る面から光源の候補を作る（大きなポートは三角形が多いので、表示の次の
+  // フレーム以降に計算する）
+  _buildPortLights(loadedObject) {
+    setTimeout(() => {
+      if (this._modelRoot !== loadedObject || !this._group) return;
+      try {
+        const box = new THREE.Box3().setFromObject(loadedObject);
+        const size = box.isEmpty() ? 100 : Math.max(...box.getSize(new THREE.Vector3()).toArray());
+        const cell = clamp(size / 40, 5, 200);
+        const clusters = collectEmissiveLightClusters(loadedObject, this._group, { cell });
+        if (this._modelRoot !== loadedObject) return;
+        for (const c of clusters) {
+          // 明るさ: 光る面積×強さの平方根を、まとめた格子の大きさで割った値（0.08〜0.7。
+          // 6つ重なっても照らされた面が白く飛ばない程度）
+          c.intensity = clamp(Math.sqrt(c.power) / (cell * 7), 0.08, 0.7);
+          // 光が届く距離（ここで0になる）
+          c.reach = Math.max(cell * 4, 150) * Math.min(1.5, 0.5 + c.intensity * 1.5);
+        }
+        this._lightClusters = clusters;
+        if (clusters.length) this._ensureLightPool();
+      } catch (err) {
+        console.warn('ポートの光る面の光源を作れませんでした。', err);
+      }
+    }, 0);
   },
 
   // 現在の目的地(target)が保存済みポート一覧のどれかと一致するか調べ、
@@ -160,6 +253,12 @@ const DockingPlatform = {
       this._modelRoot = loadedObject;
       this._modelCorrectionGroup.add(loadedObject);
       applyAdjust(this._modelCorrectionGroup);
+      // v84: 光る面の強さ（ブルーム用）と、光る面を光源として使う
+      if (typeof applyEmissiveStrength === 'function') {
+        applyEmissiveStrength(loadedObject);
+        softenMetalsWithoutEnvironment(loadedObject, 0.5);
+        this._buildPortLights(loadedObject);
+      }
       // v79: ポートの当たり判定の形（ポートの座標系＝ゲートと同じ）を作る
       if (typeof Collision !== 'undefined' && typeof computeCollisionShapeAsync === 'function') {
         // v84: 細かさは乗っている艦の太さに合わせる（01-state-and-config.js portCollisionShapeOptions）。
@@ -229,6 +328,7 @@ const DockingPlatform = {
       this._disposeGroup(this._modelRoot);
     }
     this._modelRoot = null;
+    this._lightClusters = null;
     if (typeof Collision !== 'undefined') Collision.setPortShape(null);
   },
 
