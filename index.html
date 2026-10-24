@@ -303,7 +303,13 @@
     display: flex;
     align-items: flex-start;
     z-index: 20;
+    /* v85: 入れ物そのものはタップを受けない。閉じていても入れ物の箱（タブ＋隠れた
+       パネルの幅・高さ）が残っていて、小さな画面ではその下のスロットルレバーや
+       ロールボタン・スティックがさわれなかった。タブと開いたパネルだけが受ける */
+    pointer-events: none;
   }
+  #hud-root > .hud-side-menu { pointer-events: none; }
+  .side-menu-tab { pointer-events: auto; }
   .side-menu-tab {
     width: 36px;
     height: 56px;
