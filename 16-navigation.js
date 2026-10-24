@@ -417,6 +417,18 @@ const Navigation = {
       ship.position = { x: p.x, y: p.y, z: p.z };
       ship.quaternion = { x: qL.x, y: qL.y, z: qL.z, w: qL.w };
       ship.velocity = v;
+      // v86: 重力場機関の境界面（向き・高さの基準点）も同じように新しいフレームへ写す。
+      // 写していなかったため、ワープ・内空航行の出入りのあと、境界面が古いフレームの向きのまま
+      // 残り、艦が境界面からずれたままになっていた
+      if (ship.boundaryQuat) {
+        const b = ship.boundaryQuat;
+        const bL = newFrame.quat.clone().invert().multiply(old.quat.clone().multiply(new THREE.Quaternion(b.x, b.y, b.z, b.w))).normalize();
+        ship.boundaryQuat = { x: bL.x, y: bL.y, z: bL.z, w: bL.w };
+      }
+      if (ship.boundaryPoint) {
+        const bp = this.universeToLocal(this.localToUniverse(ship.boundaryPoint, old), newFrame);
+        ship.boundaryPoint = { x: bp.x, y: bp.y, z: bp.z };
+      }
       this._shiftEngineParticles(old, newFrame);
     }
     this.frame = newFrame;
@@ -613,13 +625,18 @@ const Navigation = {
         const steer = this._steerToward(ship, this._detourPoint(shipU, arrival.point));
         rotInput.rotatePitch = steer.pitch;
         rotInput.rotateYaw = steer.yaw;
+        rotInput.steerHold = true;
         alignCos = steer.alignCos;
       }
     }
+    // v86: 重力場機関の艦は、ワープ・内空航行中も境界面が姿勢を支える（05-ship-controller.js GravityDrive）
+    const gd = ship.gravityDrive && typeof GravityDrive !== 'undefined';
     ship.velocity = { x: 0, y: 0, z: 0 };
-    FlightPhysics.step(ship, rotInput, dt);
+    FlightPhysics.step(ship, gd ? GravityDrive.adjustInput(ship, rotInput) : rotInput, dt);
+    if (gd) GravityDrive.step(ship, rotInput, dt, true);
     ship.velocity = { x: 0, y: 0, z: 0 };
     ShipController._integratePose(ship, dt);
+    if (gd) GravityDrive.limit(ship);
     // v85: ワープ中も主エンジンの噴射を見せる（見た目だけ。強さはワープの速さの桁で決める）
     if (w.speed > 50) {
       const level = clamp(Math.log10(w.speed / this.WARP_MIN_SPEED) / Math.log10(this.WARP_MAX_SPEED / this.WARP_MIN_SPEED) * 0.7 + 0.3, 0.3, 1);

@@ -872,7 +872,9 @@ const ThrusterSolver = {
       Math.abs(input.rotatePitch) + Math.abs(input.rotateYaw) + Math.abs(input.rotateRoll);
 
     // v85: 周回中の姿勢合わせ（16-navigation.js）は、ごく小さな回り方でも入力として扱う
-    const hasNoRotationInput = rotationInputMagnitude < this.ROTATION_INPUT_DEADZONE && !input.attitudeHold;
+    // v86: 重力場機関の境界面の復元（05-ship-controller.js GravityDrive.adjustInput の rateCommand）も同じ。
+    // 小さな値を「回す力」のまま使うと、今の回転を押し続けて、揺れが収まらなくなっていた
+    const hasNoRotationInput = rotationInputMagnitude < this.ROTATION_INPUT_DEADZONE && !input.attitudeHold && !input.rateCommand;
 
     // v83: 回転入力は「目標の角速度」（入力 × 最大角速度）として扱い、今の角速度との
     // 差に応じたトルクを要求する。従来は入力のぶんのトルクを要求し続けていたため、
