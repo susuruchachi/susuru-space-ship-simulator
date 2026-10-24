@@ -303,6 +303,13 @@ const SpaceHud = {
     return `光速の${c < 10 ? c.toFixed(2) : Math.round(c).toLocaleString('ja-JP')}倍`;
   },
 
+  // v85: RMIS世界の速度単位 IKn（1 IKn = 525 km/s）。重力場機関の艦の速度表示に添える
+  IKN: 525000,
+  formatIKn(v) {
+    const n = v / this.IKN;
+    return `${n < 10 ? n.toFixed(2) : n.toLocaleString('ja-JP', { maximumFractionDigits: 1 })} IKn`;
+  },
+
   formatDuration(sec) {
     if (!Number.isFinite(sec)) return '-';
     if (sec < 60) return `${Math.ceil(sec)}秒`;
@@ -348,9 +355,12 @@ const SpaceHud = {
     }
     if (w.active) {
       const th = w.autopilot ? '' : ` ・ スロットル ${Math.round(w.throttle * 100)}%`;
-      this._els.speed.textContent = `${w.autopilot ? '自動航行' : 'ワープ'}中: ${this.formatSpeed(w.speed)}${th}`;
+      const ikn = ship.gravityDrive ? `（${this.formatIKn(w.speed)}）` : '';
+      this._els.speed.textContent = `${w.autopilot ? '自動航行' : 'ワープ'}中: ${this.formatSpeed(w.speed)}${ikn}${th}`;
     } else {
-      this._els.speed.textContent = `速度: ${this.formatSpeed(vecLength(ship.velocity))}${w.status ? ' ・ ' + w.status : ''}`;
+      const v = vecLength(ship.velocity);
+      const ikn = ship.gravityDrive && v >= 1000 ? `（${this.formatIKn(v)}）` : '';
+      this._els.speed.textContent = `速度: ${this.formatSpeed(v)}${ikn}${w.status ? ' ・ ' + w.status : ''}`;
     }
     const t = Navigation.target;
     if (t) {

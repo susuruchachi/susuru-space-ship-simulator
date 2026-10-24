@@ -382,6 +382,10 @@ function applyShipDesignToShip(ship, design) {
   ship.speedCapMode = spec.speedCapMode;
   ship.size = spec.size;
   ship.hullDims = { ...spec.dims }; // v84: ポートの当たり判定の細かさの目安
+  // v85: 主エンジンに重力場機関（三段圧縮・重力波共振）を積んだ艦は、重力場の密度境界面に
+  // 浮いて進む（05-ship-controller.js GravityDrive）
+  ship.gravityDrive = spec.thrusters.some((t) => t.kind === 'main' && (t.engineType === 'gravity3' || t.engineType === 'gwave'));
+  ship.boundaryQuat = null;
   ship.designId = design.id;
   // 推力の配分は重心まわりの力・トルクの釣り合いを解く方式（ShipAllocator）
   ship.allocation = 'balanced';

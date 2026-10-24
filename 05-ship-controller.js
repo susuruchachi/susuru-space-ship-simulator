@@ -47,7 +47,9 @@ const ShipController = {
       const steps = Math.max(1, Math.ceil(dt / this.MAX_PHYSICS_STEP - 1e-9));
       const h = dt / steps;
       for (let i = 0; i < steps; i++) {
-        FlightPhysics.step(ship, input, h);
+        // v85: 重力場機関の艦は、操作していない軸を境界面の姿勢へ戻す（GravityDrive）
+        const stepInput = ship.gravityDrive ? GravityDrive.adjustInput(ship, input) : input;
+        FlightPhysics.step(ship, stepInput, h);
         // v85: 天体の重力（16-navigation.js gravityAccel）。ドッキングして固定中は加えない
         if (typeof Navigation !== 'undefined' && Navigation.gravityAccel && !(ship.autoDockingEnabled && ship._dockingPhase === 'docked')) {
           const g = Navigation.gravityAccel(ship);
@@ -58,6 +60,7 @@ const ShipController = {
             ship.gravityAccel = g;
           }
         }
+        if (ship.gravityDrive) GravityDrive.step(ship, input, h);
         const prev = { x: ship.position.x, y: ship.position.y, z: ship.position.z };
         this._integratePose(ship, h);
         // v79: ドッキングポートとの当たり判定（めり込んだら押し戻す）
@@ -107,3 +110,91 @@ const ShipController = {
 // v62: eulerToQuatSmall/quatToEulerDegreesも同様の理由（port-builder.html
 // でも必要になったため）で01-state-and-config.jsへ移設し、ここでの定義は削除。
 // -----------------------------------------------------------
+
+// =============================================================
+// v85: 重力場機関（三段圧縮重力場機関・重力波共振機関）の艦の動き
+//
+// RMIS世界の設定: 艦は重力場の「密度境界面」に、水に浮かぶ船のように支えられている。
+// 機関の中の機械が境界面の向きを変え、面を傾けることで、艦は面に沿って滑るように進む。
+//   - 境界面の向き（boundaryQuat）が艦の「本来の姿勢」。ロールしたり、外から回されたりしても、
+//     入力をやめると境界面からの復元力で本来の姿勢に戻る（姿勢スラスターとは別の、面が支える力）
+//   - 転針（ピッチ・ヨーの操作）は、機械が境界面の向きを変えること。境界面は艦の新しい向きに
+//     付いてくるが、面が向きを変えたぶん、それまでの速度は一気に落ちる
+//   - 自動ドッキング中・ワープ中は、細かな姿勢合わせを妨げないよう、この動きはしない
+// =============================================================
+const GravityDrive = {
+  RESTORE_RATE: 1.4,      // 本来の姿勢へ戻る速さ（ずれの角度 × この値 [rad/s]）
+  RESTORE_MAX: 0.5,       // 戻る角速度の上限（最大角速度に対する割合）
+  RESTORE_GRIP: 3.0,      // 境界面が艦の回転を引き寄せる強さ [1/s]
+  TURN_SPEED_LOSS: 2.5,   // 転針で速度が落ちる強さ（1 rad 向きを変えると速度は e^-2.5 ≈ 8% に）
+  INPUT_DEADZONE: 0.05,
+
+  _active(ship) {
+    return ship.gravityDrive && !ship.autoDockingEnabled && !(typeof Navigation !== 'undefined' && Navigation.isWarping());
+  },
+
+  // 艦の姿勢 → 境界面の姿勢への回転（艦のローカル軸の回転ベクトル [rad]）
+  _error(ship) {
+    const qe = normalizeQuat(multiplyQuat(conjugateQuat(ship.quaternion), ship.boundaryQuat));
+    const sgn = qe.w < 0 ? -1 : 1;
+    const s = Math.sqrt(Math.max(0, 1 - qe.w * qe.w));
+    const ang = 2 * Math.acos(Math.min(1, Math.abs(qe.w)));
+    return s > 1e-9 ? { x: (qe.x * sgn / s) * ang, y: (qe.y * sgn / s) * ang, z: (qe.z * sgn / s) * ang } : { x: 0, y: 0, z: 0 };
+  },
+
+  // 操作していない軸の回転の目標を「本来の姿勢へ戻る角速度」にする（姿勢の自動制動が
+  // 復元の回転を止めようとして逆らわないように）
+  adjustInput(ship, input) {
+    if (!this._active(ship)) {
+      ship.boundaryQuat = null;
+      return input;
+    }
+    if (!ship.boundaryQuat) ship.boundaryQuat = { ...ship.quaternion };
+    const dz = this.INPUT_DEADZONE;
+    const turning = Math.abs(input.rotatePitch || 0) > dz || Math.abs(input.rotateYaw || 0) > dz;
+    const rolling = Math.abs(input.rotateRoll || 0) > dz;
+    const e = this._error(ship);
+    const maxW = Math.max(1e-6, ship.maxAngularSpeed);
+    const cmd = (v) => clamp((v * this.RESTORE_RATE) / maxW, -this.RESTORE_MAX, this.RESTORE_MAX);
+    const out = { ...input };
+    if (!turning) { out.rotatePitch = cmd(e.x); out.rotateYaw = cmd(e.y); }
+    if (!rolling) out.rotateRoll = cmd(e.z);
+    ship._gdTurning = turning;
+    ship._gdRolling = rolling;
+    ship._gdTarget = { x: out.rotatePitch * maxW, y: out.rotateYaw * maxW, z: out.rotateRoll * maxW };
+    return out;
+  },
+
+  step(ship, input, dt) {
+    if (!this._active(ship) || !ship.boundaryQuat) return;
+    const w = ship.angularVelocity;
+    if (ship._gdTurning) {
+      // 転針: 境界面の前方を艦の前方へ合わせる（面の「上」はできるだけ保つ）
+      const fwd = rotateVecByQuat({ x: 0, y: 0, z: -1 }, ship.quaternion);
+      const bUp = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.boundaryQuat);
+      ship.boundaryQuat = this._quatFromForwardUp(fwd, bUp) || ship.boundaryQuat;
+      // 面の向きを変えたぶん、それまでの速度が一気に落ちる
+      const turnRate = Math.hypot(w.x, w.y);
+      const k = Math.exp(-this.TURN_SPEED_LOSS * turnRate * dt);
+      ship.velocity.x *= k; ship.velocity.y *= k; ship.velocity.z *= k;
+    }
+    // 境界面の復元力: 操作していない軸の回転を、本来の姿勢へ戻る角速度へ引き寄せる
+    // （姿勢スラスターに頼らない、面が支える力）
+    const t = ship._gdTarget;
+    const g = 1 - Math.exp(-this.RESTORE_GRIP * dt);
+    if (!ship._gdTurning) { w.x += (t.x - w.x) * g; w.y += (t.y - w.y) * g; }
+    if (!ship._gdRolling) w.z += (t.z - w.z) * g;
+  },
+  _quatFromForwardUp(fwd, upHint) {
+    const f = vecNormalize(fwd);
+    let r = vecCross(f, upHint);
+    if (vecLength(r) < 1e-6) return null;
+    r = vecNormalize(r);
+    const u = vecCross(r, f);
+    // 列: X=右, Y=上, Z=後ろ（-前）
+    const m = new THREE.Matrix4().makeBasis(
+      new THREE.Vector3(r.x, r.y, r.z), new THREE.Vector3(u.x, u.y, u.z), new THREE.Vector3(-f.x, -f.y, -f.z));
+    const q = new THREE.Quaternion().setFromRotationMatrix(m);
+    return { x: q.x, y: q.y, z: q.z, w: q.w };
+  },
+};
