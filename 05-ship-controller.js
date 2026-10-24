@@ -128,6 +128,16 @@ const GravityDrive = {
   RESTORE_GRIP: 3.0,      // 境界面が艦の回転を引き寄せる強さ [1/s]
   TURN_SPEED_LOSS: 2.5,   // 転針で速度が落ちる強さ（1 rad 向きを変えると速度は e^-2.5 ≈ 8% に）
   INPUT_DEADZONE: 0.05,
+  // v85: 水上船のような横揺れ（ロールはばね。減衰を弱くして、起き上がりながら揺れる）
+  ROLL_OMEGA: 1.6,        // 横揺れの固有角振動数 [rad/s]（周期 約4秒）
+  ROLL_DAMPING: 0.22,     // 減衰比（1 で揺れずに戻る。小さいほど揺れが続く）
+  HEEL_GAIN: 0.004,       // 旋回中の傾き [rad] = この値 × 旋回の角速度 [rad/s] × 前進の速さ [m/s]
+  HEEL_MAX: 0.45,         // 傾きの上限 [rad]（約26°）
+  // v85: 浮力（境界面より沈む・浮くと、強い力で面の高さへ押し戻す）
+  BUOY_OMEGA: 3.0,        // [rad/s]
+  BUOY_DAMPING: 0.7,
+  // v85: 船の向きと進む向きのずれ（横・上下の速度）を打ち消す時間 [s]（竜骨のように）
+  KEEL_TIME: 1.5,
 
   _active(ship) {
     return ship.gravityDrive && !ship.autoDockingEnabled && !(typeof Navigation !== 'undefined' && Navigation.isWarping());
@@ -147,6 +157,7 @@ const GravityDrive = {
   adjustInput(ship, input) {
     if (!this._active(ship)) {
       ship.boundaryQuat = null;
+      ship.boundaryPoint = null;
       return input;
     }
     if (!ship.boundaryQuat) ship.boundaryQuat = { ...ship.quaternion };
@@ -158,7 +169,8 @@ const GravityDrive = {
     const cmd = (v) => clamp((v * this.RESTORE_RATE) / maxW, -this.RESTORE_MAX, this.RESTORE_MAX);
     const out = { ...input };
     if (!turning) { out.rotatePitch = cmd(e.x); out.rotateYaw = cmd(e.y); }
-    if (!rolling) out.rotateRoll = cmd(e.z);
+    // ロールはばね（step）で戻すので、姿勢の制御は今の回転を止めようとしない（今の角速度を目標にする）
+    if (!rolling) out.rotateRoll = clamp(ship.angularVelocity.z / maxW, -1, 1);
     ship._gdTurning = turning;
     ship._gdRolling = rolling;
     ship._gdTarget = { x: out.rotatePitch * maxW, y: out.rotateYaw * maxW, z: out.rotateRoll * maxW };
@@ -183,7 +195,33 @@ const GravityDrive = {
     const t = ship._gdTarget;
     const g = 1 - Math.exp(-this.RESTORE_GRIP * dt);
     if (!ship._gdTurning) { w.x += (t.x - w.x) * g; w.y += (t.y - w.y) * g; }
-    if (!ship._gdRolling) w.z += (t.z - w.z) * g;
+    // 横揺れ: 境界面に対して起き上がろうとするばね。旋回中は外側へ傾く
+    if (!ship._gdRolling) {
+      const e = this._error(ship);
+      const fwdSpeed = -rotateVecByQuat(ship.velocity, conjugateQuat(ship.quaternion)).z;
+      const heel = clamp(-this.HEEL_GAIN * w.y * fwdSpeed, -this.HEEL_MAX, this.HEEL_MAX);
+      const Wn = this.ROLL_OMEGA;
+      w.z += (Wn * Wn * (heel + e.z) - 2 * this.ROLL_DAMPING * Wn * w.z) * dt;
+    }
+
+    // 浮力: 境界面の高さからのずれ（面の法線の向き）を強く押し戻す
+    const n = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.boundaryQuat);
+    if (!ship.boundaryPoint || ship._gdTurning) ship.boundaryPoint = { ...ship.position };
+    const bp = ship.boundaryPoint;
+    const dn = (ship.position.x - bp.x) * n.x + (ship.position.y - bp.y) * n.y + (ship.position.z - bp.z) * n.z;
+    const vn = vecDot(ship.velocity, n);
+    const Wb = this.BUOY_OMEGA;
+    const an = -Wb * Wb * dn - 2 * this.BUOY_DAMPING * Wb * vn;
+    ship.velocity.x += n.x * an * dt; ship.velocity.y += n.y * an * dt; ship.velocity.z += n.z * an * dt;
+    ship.boundaryDepth = dn;
+
+    // 竜骨: 船の向き以外へ進む速度（横滑り・上下）を数秒で打ち消す
+    const f = rotateVecByQuat({ x: 0, y: 0, z: -1 }, ship.quaternion);
+    const vf = vecDot(ship.velocity, f);
+    const kk = 1 - Math.exp(-dt / this.KEEL_TIME);
+    ship.velocity.x -= (ship.velocity.x - f.x * vf) * kk;
+    ship.velocity.y -= (ship.velocity.y - f.y * vf) * kk;
+    ship.velocity.z -= (ship.velocity.z - f.z * vf) * kk;
   },
   _quatFromForwardUp(fwd, upHint) {
     const f = vecNormalize(fwd);

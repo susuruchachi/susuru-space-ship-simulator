@@ -900,7 +900,10 @@ const ThrusterSolver = {
     // 宇宙空間では角速度がそのまま残り続け「延々と回り続ける」体感
     // になるため、回転入力が実質ゼロの間はship.angularVelocityを
     // 打ち消す方向のトルク要求を代わりに発生させる。
-    if (autoDampingOn && hasNoRotationInput) {
+    // v85: 重力場機関の艦は、境界面の復元力・横揺れ（05-ship-controller.js GravityDrive）が
+    // 姿勢を受け持つので、自動の回転止めはしない（揺れの折り返しで止めてしまうため）
+    const boundaryHolds = ship && ship.gravityDrive && ship.boundaryQuat && !ship.autoDockingEnabled;
+    if (autoDampingOn && hasNoRotationInput && !boundaryHolds) {
       const angSpeed = vecLength(ship.angularVelocity);
       if (angSpeed > this.AUTO_DAMPING_MIN_ANGULAR_SPEED) {
         // v09: 艦の実際の制動能力（慣性・スラスター配置から概算した
