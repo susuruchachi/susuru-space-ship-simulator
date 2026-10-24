@@ -1225,6 +1225,10 @@ function animate() {
 
   ShipController.update(dt);
   Navigation.postUpdate();
+  // v85: postUpdate は原点の付け替え（母港以外で原点から20km離れるたび）や地表からの
+  // 押し戻しで艦の位置を書き換える。艦のメッシュを合わせ直さないと、その1フレームだけ
+  // 艦が古い位置（20km先）に描かれ、速いほど頻繁に艦が点滅して見えていた
+  if (State.ship) ShipController._syncMesh(State.ship);
   EngineFx.update(dt, camera, renderer);
   CameraSystem.update(camera);
   DockingPlatform.update();
