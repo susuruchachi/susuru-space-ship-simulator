@@ -192,8 +192,8 @@ function shipDesignNozzleDiameter(d, part, kind) {
 const SHIP_ENGINE_PLUME_SHAPE = {
   rocket: { length: 7, width: 3.2 },
   nuclear: { length: 8, width: 2.3 },
-  gravity3: { length: 6, width: 1 },
-  gwave: { length: 16, width: 1.3 },
+  gravity3: { length: 14, width: 1 },
+  gwave: { length: 32, width: 1.3 },
 };
 function shipDesignPlumeEstimate(d, part, kind) {
   const dia = shipDesignNozzleDiameter(d, part, kind);

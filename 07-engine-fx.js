@@ -130,7 +130,7 @@ const EngineFx = {
           float d = length(uv);
           if (d > 0.5) discard;
           float edge = smoothstep(0.5, 0.15, d);
-          gl_FragColor = vec4(uColor, vAlpha * edge);
+          gl_FragColor = vec4(uColor * 1.6, min(1.0, vAlpha * edge * 1.6)); // v85: 濃く明るく
         }
       `,
       transparent: true,

@@ -21,8 +21,9 @@
 const ENGINE_TYPES = {
   rocket: { label: '化学ロケット', length: 7 },
   nuclear: { label: '原子力（熱核）ロケット', length: 8 },
-  gravity3: { label: '三段圧縮重力場機関', length: 6 },
-  gwave: { label: '重力波共振機関', length: 16 },
+  // v85: 重力場機関系は炎を長く
+  gravity3: { label: '三段圧縮重力場機関', length: 14 },
+  gwave: { label: '重力波共振機関', length: 32 },
 };
 const DEFAULT_ENGINE_TYPE = 'rocket';
 function normalizeEngineType(t) {
@@ -30,6 +31,7 @@ function normalizeEngineType(t) {
 }
 
 const EnginePlumes = {
+  BRIGHTNESS: 2.0, // v85: 炎全体の明るさ・濃さの倍率
   _geoCache: {},
 
   // 炎の面のシェーダー。uv.y = 根元0 → 先端1 に沿った位置。
@@ -71,7 +73,8 @@ const EnginePlumes = {
           float along = pow(1.0 - t, uFade);
           float edge = pow(vFacing, uEdge);
           float flick = 1.0 - uFlicker + uFlicker * (0.5 + 0.5 * sin(uTime * 37.0 + t * 23.0) * sin(uTime * 23.0 + vUv.x * 40.0));
-          float a = along * edge * flick * uIntensity;
+          // v85: 全体に濃く明るく（BRIGHTNESS）、根元から先まで薄れにくく
+          float a = along * edge * flick * uIntensity * ${EnginePlumes.BRIGHTNESS.toFixed(2)};
           if (uDash > 0.0) {
             // 泡の筋: 後ろへ流れる点の並び
             float d = fract(t * uDash - uTime * uFlow);
@@ -156,20 +159,20 @@ const EnginePlumes = {
       // 外側の炎: 真空中では後ろへ大きく広がる
       const outer = add(this._lathe(nuclear ? 'nucOuter' : 'rocOuter', (z) => 0.5 * (1 + (nuclear ? 1.3 : 2.2) * Math.pow(z, 0.75))),
         this._material(nuclear
-          ? { a: 0xe6f0ff, b: 0x9fc4ff, c: 0x5a78ff, fade: 1.1, edge: 0.7, flicker: 0.08 }
-          : { a: 0xfff2cc, b: 0xffa040, c: 0xff3a10, fade: 1.2, edge: 0.6, flicker: 0.18 }));
+          ? { a: 0xe6f0ff, b: 0x9fc4ff, c: 0x5a78ff, fade: 0.77, edge: 0.7, flicker: 0.08 }
+          : { a: 0xfff2cc, b: 0xffa040, c: 0xff3a10, fade: 0.84, edge: 0.6, flicker: 0.18 }));
       // 芯: 根元の明るい部分（後ろへ細くなる）
       const core = add(this._lathe('core', (z) => 0.42 * Math.pow(1 - z, 0.6)),
         this._material(nuclear
-          ? { a: 0xffffff, b: 0xd0e4ff, c: 0x90b0ff, fade: 1.0, edge: 0.6, flicker: 0.05 }
-          : { a: 0xffffff, b: 0xfff0b0, c: 0xffb050, fade: 1.0, edge: 0.6, flicker: 0.1 }));
+          ? { a: 0xffffff, b: 0xd0e4ff, c: 0x90b0ff, fade: 0.7, edge: 0.6, flicker: 0.05 }
+          : { a: 0xffffff, b: 0xfff0b0, c: 0xffb050, fade: 0.7, edge: 0.6, flicker: 0.1 }));
       // ショックダイヤモンド（芯の中に並ぶ明るい節）
       const diamonds = [];
       for (let i = 0; i < 3; i++) {
         diamonds.push(add(this._lathe('diamond', (z) => 0.22 * Math.sin(Math.PI * z)),
           this._material(nuclear
-            ? { a: 0xffffff, b: 0xe0ecff, c: 0xc0d4ff, fade: 0.4, edge: 0.5, flicker: 0.05 }
-            : { a: 0xffffff, b: 0xffffe0, c: 0xfff0a0, fade: 0.4, edge: 0.5, flicker: 0.1 })));
+            ? { a: 0xffffff, b: 0xe0ecff, c: 0xc0d4ff, fade: 0.28, edge: 0.5, flicker: 0.05 }
+            : { a: 0xffffff, b: 0xffffe0, c: 0xfff0a0, fade: 0.28, edge: 0.5, flicker: 0.1 })));
       }
       update = (ratio, time) => {
         const L = L0 * (0.35 + 0.65 * ratio);
@@ -189,11 +192,11 @@ const EnginePlumes = {
     } else if (type === 'gravity3') {
       // 後ろへ閉じる円錐で、根元から少し後ろが細くくびれる
       const cone = add(this._lathe('g3cone', (z) => 0.5 * Math.pow(1 - z, 0.85) * (1 - 0.28 * Math.exp(-Math.pow((z - 0.22) / 0.1, 2)))),
-        this._material({ a: 0xffffff, b: 0xb8d8ff, c: 0x7fb0ff, fade: 0.9, edge: 1.0, flicker: 0.06 }));
+        this._material({ a: 0xffffff, b: 0xb8d8ff, c: 0x7fb0ff, fade: 0.63, edge: 1.0, flicker: 0.06 }));
       const rings = [];
       for (let i = 0; i < 3; i++) {
         rings.push(add(this._ring('g3ring', 0.5, 0.045),
-          this._material({ a: 0xffffff, b: 0xc8e0ff, c: 0xc8e0ff, fade: 1, edge: 0.4, flicker: 0.05 })));
+          this._material({ a: 0xffffff, b: 0xc8e0ff, c: 0xc8e0ff, fade: 0.7, edge: 0.4, flicker: 0.05 })));
       }
       const low = new THREE.Color(0xffd860), lowB = new THREE.Color(0xffb030);
       const high = new THREE.Color(0xd8ecff), highB = new THREE.Color(0x8fbcff);
@@ -225,13 +228,13 @@ const EnginePlumes = {
     } else {
       // 重力波共振機関: 完全な円錐で、とても長い
       const cone = add(this._lathe('gwcone', (z) => 0.5 * (1 - z)),
-        this._material({ a: 0xffffff, b: 0xbfdcff, c: 0x80aaff, fade: 0.8, edge: 1.1, flicker: 0.04 }));
+        this._material({ a: 0xffffff, b: 0xbfdcff, c: 0x80aaff, fade: 0.56, edge: 1.1, flicker: 0.04 }));
       const helixGroup = new THREE.Group();
       group.add(helixGroup);
       const lines = [];
       for (let i = 0; i < 3; i++) {
         const m = new THREE.Mesh(this._helix(`gwhelix${i}`, 4, (i * Math.PI * 2) / 3),
-          this._material({ a: 0xffffff, b: 0xd8ecff, c: 0x9cc4ff, fade: 0.7, edge: 0.0, flicker: 0, dash: 14, flow: 2.2 }));
+          this._material({ a: 0xffffff, b: 0xd8ecff, c: 0x9cc4ff, fade: 0.49, edge: 0.0, flicker: 0, dash: 14, flow: 2.2 }));
         m.frustumCulled = false;
         m.renderOrder = 6;
         helixGroup.add(m);
