@@ -529,10 +529,15 @@
       collisionDebugObj = null;
     }
     if (!collisionDebugOn || !modelRoot || !gateMesh) return;
-    const shape = computeCollisionShape(modelRoot, gateMesh, 40);
-    collisionDebugObj = buildCollisionShapeDebugObject(shape, 0xff8833);
-    gateMesh.add(collisionDebugObj);
-    if (shape) setModelStatus(`当たり判定: 直方体${shape.boxes.length}個（格子の1マス ${shape.cell.toFixed(2)} m）`, false);
+    // v84: ゲームと同じ細かさ（艦は分からないので、マスの総数の上限で決まる）。Web Worker で計算
+    setModelStatus('当たり判定を計算しています…', false);
+    const forRoot = modelRoot, forGate = gateMesh;
+    computeCollisionShapeAsync(modelRoot, gateMesh, portCollisionShapeOptions(null)).then((shape) => {
+      if (!collisionDebugOn || modelRoot !== forRoot || gateMesh !== forGate || collisionDebugObj) return;
+      collisionDebugObj = buildCollisionShapeDebugObject(shape, 0xff8833);
+      gateMesh.add(collisionDebugObj);
+      if (shape) setModelStatus(`当たり判定: 直方体${shape.boxes.length}個（格子の1マス ${shape.cell.toFixed(2)} m）`, false);
+    });
   }
   const collisionDebugBtn = document.getElementById('collisionDebugBtn');
   if (collisionDebugBtn) {

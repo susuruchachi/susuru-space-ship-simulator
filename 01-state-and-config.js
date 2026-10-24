@@ -8,7 +8,7 @@
 // v77: 表記を「0.000.000.000」形式に変更（CHANGELOG.md「バージョン番号の
 // 付け方」参照）。左から メジャー.機能バージョン.修正番号.ビルド番号。
 // 機能バージョンは従来の vNN の番号（v77 → 077）。
-const GAME_VERSION = '0.083.000.004';
+const GAME_VERSION = '0.084.000.000';
 
 // v83: iPad・iPhone の Safari は viewport の user-scalable=no を無視し、2本指の
 // ジェスチャーでページ全体を拡大・縮小してしまう（3Dビューのピンチズームと
@@ -1068,39 +1068,85 @@ function computeEffectiveShipDockingTarget(dockingTarget, ship) {
 //   bounds: { min, max },       // 全体の範囲
 // } | null（三角形が無い）
 // =============================================================
-function computeCollisionShape(root, frame, resolution) {
-  const res = resolution || 32;
+//
+// v84: 「ドッキングポートが狭くて一部の船が入れない」の修正。表面が通るマスを
+// 丸ごと中身ありにしていたため、薄い壁でも1マスぶん（大きなポートを40分割すると
+// 約67m）太り、入口の両側が狭まって大きな艦が入れなかった。
+//   - 表面のマスは、実際に表面の点があった範囲（マスの中のどこからどこまで）を
+//     覚えておき、直方体をその範囲までぴったり縮める（薄い壁は最低限の厚みだけ残す）。
+//   - マスの細かさは、resolution（最大辺の分割数）の代わりに opts で決められる:
+//       opts.resolution: 最大辺の分割数
+//       opts.minCell:    マスの1辺の下限（艦の太さの1/4など）
+//       opts.maxCells:   マスの総数の上限（メモリと時間の上限。初期値 400万）
+function computeCollisionShape(root, frame, resolutionOrOpts) {
+  const opts = typeof resolutionOrOpts === 'object' && resolutionOrOpts ? resolutionOrOpts : { resolution: resolutionOrOpts };
+  const tri = collectCollisionTriangles(root, frame);
+  return tri ? voxelizeCollisionTriangles(tri, opts) : null;
+}
+
+// 当たり判定用に、root 配下のメッシュの三角形を frame の座標系で集める（9個ずつ x,y,z×3）
+function collectCollisionTriangles(root, frame) {
   if (!root) return null;
   root.updateWorldMatrix(true, true);
   frame.updateWorldMatrix(true, false);
   const toFrame = new THREE.Matrix4().copy(frame.matrixWorld).invert();
   const m = new THREE.Matrix4();
   const v = new THREE.Vector3();
-  const tri = [];
+  // 三角形の頂点（frame の座標系）。大きなモデルでも配列の伸長が重くならないよう、先に数える
+  let triCount = 0;
+  root.traverse((node) => {
+    if (!node.isMesh || !node.geometry || !node.visible) return;
+    const pos = node.geometry.attributes && node.geometry.attributes.position;
+    if (!pos) return;
+    const idx = node.geometry.index;
+    triCount += Math.floor((idx ? idx.count : pos.count) / 3);
+  });
+  if (!triCount) return null;
+  const tri = new Float32Array(triCount * 9);
+  let tp = 0;
   root.traverse((node) => {
     if (!node.isMesh || !node.geometry || !node.visible) return;
     const pos = node.geometry.attributes && node.geometry.attributes.position;
     if (!pos) return;
     m.multiplyMatrices(toFrame, node.matrixWorld);
+    const e = m.elements;
     const idx = node.geometry.index;
-    const count = idx ? idx.count : pos.count;
-    for (let i = 0; i + 2 < count; i += 3) {
-      for (let j = 0; j < 3; j++) {
-        v.fromBufferAttribute(pos, idx ? idx.getX(i + j) : i + j).applyMatrix4(m);
-        tri.push(v.x, v.y, v.z);
-      }
+    const count = Math.floor((idx ? idx.count : pos.count) / 3) * 3;
+    // v84: 数百万の三角形でも速いよう、配列を直接読む（ふつうの位置属性の場合）
+    const fast = !pos.isInterleavedBufferAttribute && pos.itemSize === 3 && !pos.normalized && pos.array;
+    const P = fast ? pos.array : null;
+    const I = idx ? idx.array : null;
+    for (let i = 0; i < count; i++) {
+      const k = I ? I[i] : i;
+      let x, y, z;
+      if (P) { x = P[k * 3]; y = P[k * 3 + 1]; z = P[k * 3 + 2]; } else { v.fromBufferAttribute(pos, k); x = v.x; y = v.y; z = v.z; }
+      tri[tp++] = e[0] * x + e[4] * y + e[8] * z + e[12];
+      tri[tp++] = e[1] * x + e[5] * y + e[9] * z + e[13];
+      tri[tp++] = e[2] * x + e[6] * y + e[10] * z + e[14];
     }
   });
-  if (tri.length < 9) return null;
+  return tri;
+}
+
+// 三角形（Float32Array、9個ずつ）から当たり判定の形を作る。THREE を使わないので
+// Web Worker の中でも動く（computeCollisionShapeAsync）。
+function voxelizeCollisionTriangles(tri, opts) {
+  const res = opts.resolution || 32;
+  const tp = tri.length;
+  if (tp < 9) return null;
 
   let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-  for (let i = 0; i < tri.length; i += 3) {
+  for (let i = 0; i < tp; i += 3) {
     if (tri[i] < minX) minX = tri[i]; if (tri[i] > maxX) maxX = tri[i];
     if (tri[i + 1] < minY) minY = tri[i + 1]; if (tri[i + 1] > maxY) maxY = tri[i + 1];
     if (tri[i + 2] < minZ) minZ = tri[i + 2]; if (tri[i + 2] > maxZ) maxZ = tri[i + 2];
   }
   const span = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 1e-6);
-  const cell = span / res;
+  let cell = Math.max(span / res, opts.minCell || 0);
+  // マスの総数の上限
+  const maxCells = opts.maxCells || 4e6;
+  const volCells = ((maxX - minX) / cell + 3) * ((maxY - minY) / cell + 3) * ((maxZ - minZ) / cell + 3);
+  if (volCells > maxCells) cell *= Math.cbrt(volCells / maxCells) * 1.02;
   // 外側に1マスずつ余白を取る（塗りつぶしの起点）
   const ox = minX - cell, oy = minY - cell, oz = minZ - cell;
   const nx = Math.ceil((maxX - minX) / cell) + 3;
@@ -1110,6 +1156,11 @@ function computeCollisionShape(root, frame, resolution) {
   const at = (x, y, z) => (z * ny + y) * nx + x;
   const SURF = 1, OUT = 2;
   const grid = new Uint8Array(N);
+  // 表面のマスごとの、実際の表面の点の範囲（minX,minY,minZ,maxX,maxY,maxZ）
+  const slotOf = new Map();
+  let sb = new Float32Array(6 * 4096);
+  let slots = 0;
+  let lastK = -1, lastS = 0;
 
   // 2) 三角形の上に、マスの半分以下の間隔で点を打って表面のマスに印を付ける
   // 点は必ず範囲内にあるが、座標変換の丸め誤差でわずかに外へはみ出すと
@@ -1119,15 +1170,34 @@ function computeCollisionShape(root, frame, resolution) {
     const ix = Math.min(nx - 2, Math.max(1, Math.floor((x - ox) / cell)));
     const iy = Math.min(ny - 2, Math.max(1, Math.floor((y - oy) / cell)));
     const iz = Math.min(nz - 2, Math.max(1, Math.floor((z - oz) / cell)));
-    grid[at(ix, iy, iz)] = SURF;
+    const k = at(ix, iy, iz);
+    let s;
+    if (k === lastK) {
+      s = lastS;
+    } else {
+      s = slotOf.get(k);
+      if (s === undefined) {
+        grid[k] = SURF;
+        s = slots++;
+        if (s * 6 + 6 > sb.length) { const nb = new Float32Array(sb.length * 2); nb.set(sb); sb = nb; }
+        const o = s * 6;
+        sb[o] = x; sb[o + 1] = y; sb[o + 2] = z; sb[o + 3] = x; sb[o + 4] = y; sb[o + 5] = z;
+        slotOf.set(k, s);
+      }
+      lastK = k; lastS = s;
+    }
+    const o = s * 6;
+    if (x < sb[o]) sb[o] = x; if (x > sb[o + 3]) sb[o + 3] = x;
+    if (y < sb[o + 1]) sb[o + 1] = y; if (y > sb[o + 4]) sb[o + 4] = y;
+    if (z < sb[o + 2]) sb[o + 2] = z; if (z > sb[o + 5]) sb[o + 5] = z;
   };
   const step = cell * 0.5;
-  for (let i = 0; i < tri.length; i += 9) {
+  for (let i = 0; i < tp; i += 9) {
     const ax = tri[i], ay = tri[i + 1], az = tri[i + 2];
     const bx = tri[i + 3], by = tri[i + 4], bz = tri[i + 5];
     const cx = tri[i + 6], cy = tri[i + 7], cz = tri[i + 8];
     const longest = Math.max(Math.hypot(bx - ax, by - ay, bz - az), Math.hypot(cx - bx, cy - by, cz - bz), Math.hypot(ax - cx, ay - cy, az - cz));
-    const n = Math.min(400, Math.max(1, Math.ceil(longest / step)));
+    const n = Math.min(1200, Math.max(1, Math.ceil(longest / step)));
     for (let a = 0; a <= n; a++) {
       for (let b = 0; b <= n - a; b++) {
         const u = a / n, w = b / n, t = 1 - u - w;
@@ -1141,34 +1211,37 @@ function computeCollisionShape(root, frame, resolution) {
   let qh = 0, qt = 0;
   grid[0] = OUT;
   queue[qt++] = 0;
+  const nxy = nx * ny;
   while (qh < qt) {
     const k = queue[qh++];
-    const x = k % nx, y = Math.floor(k / nx) % ny, z = Math.floor(k / (nx * ny));
-    const nb = [x > 0 ? k - 1 : -1, x < nx - 1 ? k + 1 : -1, y > 0 ? k - nx : -1, y < ny - 1 ? k + nx : -1,
-      z > 0 ? k - nx * ny : -1, z < nz - 1 ? k + nx * ny : -1];
-    for (const j of nb) {
-      if (j >= 0 && grid[j] === 0) { grid[j] = OUT; queue[qt++] = j; }
-    }
+    const x = k % nx, y = Math.floor(k / nx) % ny, z = Math.floor(k / nxy);
+    if (x > 0 && grid[k - 1] === 0) { grid[k - 1] = OUT; queue[qt++] = k - 1; }
+    if (x < nx - 1 && grid[k + 1] === 0) { grid[k + 1] = OUT; queue[qt++] = k + 1; }
+    if (y > 0 && grid[k - nx] === 0) { grid[k - nx] = OUT; queue[qt++] = k - nx; }
+    if (y < ny - 1 && grid[k + nx] === 0) { grid[k + nx] = OUT; queue[qt++] = k + nx; }
+    if (z > 0 && grid[k - nxy] === 0) { grid[k - nxy] = OUT; queue[qt++] = k - nxy; }
+    if (z < nz - 1 && grid[k + nxy] === 0) { grid[k + nxy] = OUT; queue[qt++] = k + nxy; }
   }
-  // 中身あり = 表面、または外に届かない空きマス
-  const solid = new Uint8Array(N);
-  for (let k = 0; k < N; k++) solid[k] = grid[k] !== OUT ? 1 : 0;
 
-  // 4) 中身ありのマスを、X→Y→Zの順に伸ばせるだけ伸ばした直方体にまとめる
+  // 4) 中身ありのマス（表面、または外に届かない空きマス）を、X→Y→Zの順に
+  //    伸ばせるだけ伸ばした直方体にまとめる。直方体の範囲は、表面のマスでは
+  //    実際の表面の点の範囲、中身のマスではマス全体を合わせたもの。
+  const solidAt = (k) => grid[k] !== OUT;
   const used = new Uint8Array(N);
   const boxes = [];
+  const minThick = cell * 0.2; // 薄い壁にも最低限の厚みを残す
   for (let z = 0; z < nz; z++) {
     for (let y = 0; y < ny; y++) {
       for (let x = 0; x < nx; x++) {
         const k0 = at(x, y, z);
-        if (!solid[k0] || used[k0]) continue;
+        if (!solidAt(k0) || used[k0]) continue;
         let x1 = x;
-        while (x1 + 1 < nx && solid[at(x1 + 1, y, z)] && !used[at(x1 + 1, y, z)]) x1++;
+        while (x1 + 1 < nx && solidAt(at(x1 + 1, y, z)) && !used[at(x1 + 1, y, z)]) x1++;
         let y1 = y;
         grow_y: while (y1 + 1 < ny) {
           for (let xx = x; xx <= x1; xx++) {
             const k = at(xx, y1 + 1, z);
-            if (!solid[k] || used[k]) break grow_y;
+            if (!solidAt(k) || used[k]) break grow_y;
           }
           y1++;
         }
@@ -1177,16 +1250,39 @@ function computeCollisionShape(root, frame, resolution) {
           for (let yy = y; yy <= y1; yy++) {
             for (let xx = x; xx <= x1; xx++) {
               const k = at(xx, yy, z1 + 1);
-              if (!solid[k] || used[k]) break grow_z;
+              if (!solidAt(k) || used[k]) break grow_z;
             }
           }
           z1++;
         }
-        for (let zz = z; zz <= z1; zz++) for (let yy = y; yy <= y1; yy++) for (let xx = x; xx <= x1; xx++) used[at(xx, yy, zz)] = 1;
-        boxes.push({
-          min: { x: ox + x * cell, y: oy + y * cell, z: oz + z * cell },
-          max: { x: ox + (x1 + 1) * cell, y: oy + (y1 + 1) * cell, z: oz + (z1 + 1) * cell },
-        });
+        let bx0 = Infinity, by0 = Infinity, bz0 = Infinity, bx1 = -Infinity, by1 = -Infinity, bz1 = -Infinity;
+        for (let zz = z; zz <= z1; zz++) {
+          for (let yy = y; yy <= y1; yy++) {
+            for (let xx = x; xx <= x1; xx++) {
+              const k = at(xx, yy, zz);
+              used[k] = 1;
+              const s = grid[k] === SURF ? slotOf.get(k) : undefined;
+              if (s !== undefined) {
+                const o = s * 6;
+                if (sb[o] < bx0) bx0 = sb[o]; if (sb[o + 3] > bx1) bx1 = sb[o + 3];
+                if (sb[o + 1] < by0) by0 = sb[o + 1]; if (sb[o + 4] > by1) by1 = sb[o + 4];
+                if (sb[o + 2] < bz0) bz0 = sb[o + 2]; if (sb[o + 5] > bz1) bz1 = sb[o + 5];
+              } else {
+                const cx0 = ox + xx * cell, cy0 = oy + yy * cell, cz0 = oz + zz * cell;
+                if (cx0 < bx0) bx0 = cx0; if (cx0 + cell > bx1) bx1 = cx0 + cell;
+                if (cy0 < by0) by0 = cy0; if (cy0 + cell > by1) by1 = cy0 + cell;
+                if (cz0 < bz0) bz0 = cz0; if (cz0 + cell > bz1) bz1 = cz0 + cell;
+              }
+            }
+          }
+        }
+        const thick = (lo, hi) => {
+          if (hi - lo >= minThick) return [lo, hi];
+          const c = (lo + hi) / 2;
+          return [c - minThick / 2, c + minThick / 2];
+        };
+        const [X0, X1] = thick(bx0, bx1), [Y0, Y1] = thick(by0, by1), [Z0, Z1] = thick(bz0, bz1);
+        boxes.push({ min: { x: X0, y: Y0, z: Z0 }, max: { x: X1, y: Y1, z: Z1 } });
       }
     }
   }
@@ -1195,6 +1291,47 @@ function computeCollisionShape(root, frame, resolution) {
     boxes,
     bounds: { min: { x: minX, y: minY, z: minZ }, max: { x: maxX, y: maxY, z: maxZ } },
   };
+}
+
+// v84: 大きなポート（三角形が数百万）の当たり判定は数秒かかるので、三角形を集めた
+// あとの計算を Web Worker で行い、画面が止まらないようにする。Worker が使えない
+// ときはその場で計算する。
+function computeCollisionShapeAsync(root, frame, opts) {
+  const tri = collectCollisionTriangles(root, frame);
+  if (!tri) return Promise.resolve(null);
+  if (typeof Worker === 'undefined' || typeof Blob === 'undefined' || typeof URL === 'undefined') {
+    return Promise.resolve(voxelizeCollisionTriangles(tri, opts));
+  }
+  return new Promise((resolve) => {
+    let worker, url;
+    const fallback = () => {
+      try { if (worker) worker.terminate(); } catch (e) { /* ignore */ }
+      if (url) URL.revokeObjectURL(url);
+      // 三角形の配列は Worker に引き渡してしまったので、集め直してその場で計算する
+      const again = collectCollisionTriangles(root, frame);
+      resolve(again ? voxelizeCollisionTriangles(again, opts) : null);
+    };
+    try {
+      const src = `${voxelizeCollisionTriangles.toString()}\nonmessage = (e) => { postMessage(voxelizeCollisionTriangles(e.data.tri, e.data.opts)); };`;
+      url = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
+      worker = new Worker(url);
+      worker.onmessage = (e) => { worker.terminate(); URL.revokeObjectURL(url); resolve(e.data); };
+      worker.onerror = (e) => { if (e && e.preventDefault) e.preventDefault(); fallback(); };
+      // 三角形の配列は Worker に引き渡す（数十MBあるのでコピーしない）
+      worker.postMessage({ tri, opts }, [tri.buffer]);
+    } catch (e) {
+      fallback();
+    }
+  });
+}
+
+// v84: ポートの当たり判定のマスの細かさ。乗っている艦の細い方の太さの1/4を目安に
+// （艦が通れる隙間をつぶさないように）、マスの総数は上限（400万）で抑える。
+function portCollisionShapeOptions(ship) {
+  let cross = 3;
+  if (ship && ship.hullDims) cross = Math.min(ship.hullDims.x, ship.hullDims.y);
+  else if (ship && ship.size) cross = ship.size * 0.3;
+  return { resolution: 1024, minCell: Math.max(0.25, cross / 4), maxCells: 4e6 };
 }
 
 // 当たり判定の形を、確認用の線（直方体の辺）として表示するオブジェクトを作る

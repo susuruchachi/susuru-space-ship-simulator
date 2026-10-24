@@ -943,7 +943,7 @@ function createShipVisualRoot(classKey) {
 function refreshShipCollisionShape(root) {
   if (typeof Collision === 'undefined' || typeof computeCollisionShape !== 'function') return;
   try {
-    Collision.setShipShape(computeCollisionShape(root, root, 24));
+    Collision.setShipShape(computeCollisionShape(root, root, 48));
   } catch (err) {
     console.warn('艦の当たり判定の作成に失敗しました。', err);
   }

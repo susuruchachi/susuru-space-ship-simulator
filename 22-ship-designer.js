@@ -435,7 +435,7 @@
     if (!collisionDebugOn || !design) return;
     const target = core.getModelRoot() || boxHull;
     if (!target) return;
-    const shape = computeCollisionShape(target, scene, 32);
+    const shape = computeCollisionShape(target, scene, 48);
     collisionDebugObj = buildCollisionShapeDebugObject(shape, 0xff8833);
     scene.add(collisionDebugObj);
     core.setStatus(shape ? `当たり判定: 直方体${shape.boxes.length}個（格子の1マス ${fmtLen(shape.cell)}）` : '');

@@ -296,6 +296,7 @@ function applyShipDesignToShip(ship, design) {
   ship.maxAngularSpeed = spec.maxAngularSpeed;
   ship.speedCapMode = spec.speedCapMode;
   ship.size = spec.size;
+  ship.hullDims = { ...spec.dims }; // v84: ポートの当たり判定の細かさの目安
   ship.designId = design.id;
   // 推力の配分は重心まわりの力・トルクの釣り合いを解く方式（ShipAllocator）
   ship.allocation = 'balanced';

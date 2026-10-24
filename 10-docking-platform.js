@@ -161,9 +161,16 @@ const DockingPlatform = {
       this._modelCorrectionGroup.add(loadedObject);
       applyAdjust(this._modelCorrectionGroup);
       // v79: ポートの当たり判定の形（ポートの座標系＝ゲートと同じ）を作る
-      if (typeof Collision !== 'undefined' && typeof computeCollisionShape === 'function') {
+      if (typeof Collision !== 'undefined' && typeof computeCollisionShapeAsync === 'function') {
+        // v84: 細かさは乗っている艦の太さに合わせる（01-state-and-config.js portCollisionShapeOptions）。
+        // 大きなポートは計算に数秒かかるので Web Worker で行う（その間は当たり判定なし）
+        const portId = this._modelLoadedForPortId;
         try {
-          Collision.setPortShape(computeCollisionShape(loadedObject, this._group, 40), this._modelLoadedForPortId);
+          computeCollisionShapeAsync(loadedObject, this._group, portCollisionShapeOptions(State.ship))
+            .then((shape) => {
+              if (this._modelRoot === loadedObject && this._modelLoadedForPortId === portId) Collision.setPortShape(shape, portId);
+            })
+            .catch((err) => console.warn('ポートの当たり判定の作成に失敗しました。', err));
         } catch (err) {
           console.warn('ポートの当たり判定の作成に失敗しました。', err);
         }
