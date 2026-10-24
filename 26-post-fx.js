@@ -9,8 +9,8 @@
 //     （放射の強さで1より明るくなる。01-state-and-config.js applyEmissiveStrength）や、
 //     噴射の粒が重なって明るくなったところだけをにじませる。
 //     浮動小数の描画先が使えない端末では、しきい値を少し下げて同じように使う。
-//   - 画面の解像度が低い（1倍）ときは、描画先でもアンチエイリアス（4倍）をかける。
-//     高精細画面（2倍）では、ギザギザが目立たないのでメモリを節約してかけない。
+//   - 描画先でもアンチエイリアス（4倍。画素の多い画面では2倍）をかけ、深度は24ビットにする
+//     （v85。v84 では高精細画面でかけておらず、深度も16ビットで、表示が荒れていた）。
 //   - 設定（State.settings.bloomEnabled）で切ると、従来どおり画面に直接描く。
 //
 // 使い方: PostFx.render(renderer, draw) — draw() は今の描画先に1フレーム分描く関数。
@@ -44,12 +44,18 @@ const PostFx = {
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: this._hdr ? THREE.HalfFloatType : THREE.UnsignedByteType,
+        // v85: 深度を24ビットにする（stencilBuffer を付けると DEPTH24_STENCIL8 になる）。
+        // three.js r128 の描画先は、何も付けないと深度が16ビットしかなく、大きなポートの
+        // 面どうしがちらついたり、遠くの面が途中で切れたように見えたりしていた
+        stencilBuffer: true,
       };
-      const msaa = caps.isWebGL2 && typeof THREE.WebGLMultisampleRenderTarget === 'function' && renderer.getPixelRatio() < 1.5;
+      // v85: 高精細画面でもアンチエイリアスをかける（かけないと、細い線が点線のように
+      // ギザギザになっていた）。画素が多い画面では、メモリを抑えるため2倍にする
+      const msaa = caps.isWebGL2 && typeof THREE.WebGLMultisampleRenderTarget === 'function';
       this._target = msaa
         ? new THREE.WebGLMultisampleRenderTarget(size.x, size.y, params)
         : new THREE.WebGLRenderTarget(size.x, size.y, params);
-      if (msaa) this._target.samples = 4;
+      if (msaa) this._target.samples = size.x * size.y > 2.5e6 ? 2 : 4;
       this._target.texture.generateMipmaps = false;
       // ぼかしは画面の半分の解像度から（さらに内部で半分ずつ）にして軽くする
       this._bloom = new THREE.UnrealBloomPass(
