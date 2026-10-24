@@ -1172,6 +1172,7 @@ const Universe = {
 
     // 天体ごと
     let nearestSurface = Infinity;
+    let nearestFarSide = 0;
     const posAttr = this._bodyPoints.geometry.attributes.position;
     const magAttr = this._bodyPoints.geometry.attributes.aMag;
     const colAttr = this._bodyPoints.geometry.attributes.aColor;
@@ -1186,16 +1187,31 @@ const Universe = {
       const b = bodies[i];
       this.relPos(b, rel);
       const d = Math.hypot(rel.x, rel.y, rel.z);
-      const extent = b.rings ? b.rings.outer * 1000 : Math.max(b.rM, b.rpM, b.rbM);
-      const surf = d - extent * 1.02;
+      const R = Math.max(b.rM, b.rpM, b.rbM);
+      let surf = d - R * 1.02;
+      // v85: 環は球ではなく薄い円盤として、円盤までの距離を測る。以前は環の外径の球として
+      // 測っていたため、土星の環の外径（約14万km）より内側に入ると「表面の内側」とみなされ、
+      // near=1m・far=1万km になって、数万km先の土星ごと描かれなくなっていた
+      if (b.rings) {
+        const p = rotateVecByQuat({ x: -rel.x, y: -rel.y, z: -rel.z }, conjugateQuat(b.quat));
+        const rho = Math.hypot(p.x, p.z), h = Math.abs(p.y);
+        const ri = b.rings.inner * 1000, ro = b.rings.outer * 1000;
+        const dr = rho < ri ? ri - rho : rho > ro ? rho - ro : 0;
+        surf = Math.min(surf, Math.hypot(h, dr) * 0.98);
+      }
       b._camDist = d;
-      if (surf < nearestSurface) nearestSurface = surf;
+      if (surf < nearestSurface) {
+        nearestSurface = surf;
+        nearestFarSide = d + (b.rings ? b.rings.outer * 1000 : R);
+      }
     }
+    // 環の面の中にいるときも、近すぎる near でほかが描けなくならないよう下限を設ける
     let near = Math.max(1, nearestSurface * 0.45);
     // 星図では、カメラが注視している範囲に合わせて near を小さくする
     if (this._mapMode && this._mapNear) near = Math.min(near, this._mapNear);
     else near = Math.min(near, 1e10);
-    const far = Math.max(near * 5e6, 1e7);
+    // いちばん近い天体（環を含む）の向こう側の端までは必ず描く
+    const far = Math.max(near * 5e6, 1e7, nearestFarSide * 1.05);
     cam.near = near;
     cam.far = far;
     cam.updateProjectionMatrix();
