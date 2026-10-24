@@ -136,6 +136,9 @@ function createShipDesign(baseClass, name) {
     rcs: { thrust: auto.rcsThrust, pods: defaultRcsPodsForBox(dims) },
     // v85: 姿勢制御ジャイロ（リアクションホイール）。各軸の最大トルク [N·m]（0 なら無し）
     gyro: { torque: 0 },
+    // v85: 重力場の密度境界面の高さ [m]（船体の中心からの上下。重力場機関を積んだ艦だけが使う。
+    // null なら船体の中心）
+    boundary: { height: null },
     maxSpeed: auto.maxSpeed,       // v85: null なら速度は無制限
     maxAccel: null,                // v85: 最大加速度 [m/s²]（null なら推力のまま）
     maxAngularSpeed: auto.maxAngularSpeed,
@@ -251,6 +254,10 @@ function normalizeShipDesign(d) {
   }));
   out.rcs = { ...base.rcs, ...(d.rcs || {}) };
   out.gyro = { torque: Math.max(0, Number(d.gyro && d.gyro.torque) || 0) };
+  {
+    const h = d.boundary && d.boundary.height;
+    out.boundary = { height: h === null || h === undefined || h === '' || !Number.isFinite(Number(h)) ? null : Number(h) };
+  }
   if (!Array.isArray(out.rcs.pods)) out.rcs.pods = [];
   out.cog = { ...base.cog, ...(d.cog || {}) };
   // v85: 最高速度は空欄（null）なら無制限。最大加速度は無ければ制限なし
@@ -365,6 +372,8 @@ function buildShipSpecFromDesign(design) {
     size,
     dims: { ...dims },
     cog: { ...c },
+    // v85: 密度境界面の高さ（重心からの上下 [m]）
+    boundaryHeight: (d.boundary.height ?? 0) - c.y,
   };
 }
 
@@ -386,6 +395,7 @@ function applyShipDesignToShip(ship, design) {
   // 浮いて進む（05-ship-controller.js GravityDrive）
   ship.gravityDrive = spec.thrusters.some((t) => t.kind === 'main' && (t.engineType === 'gravity3' || t.engineType === 'gwave'));
   ship.boundaryQuat = null;
+  ship.boundaryHeight = spec.boundaryHeight;
   ship.designId = design.id;
   // 推力の配分は重心まわりの力・トルクの釣り合いを解く方式（ShipAllocator）
   ship.allocation = 'balanced';

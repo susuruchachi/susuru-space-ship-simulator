@@ -57,6 +57,50 @@ const EngineFx = {
     // v85: 主エンジン・逆噴射の炎（27-engine-plumes.js。機関の種類ごとの形）
     this._plumeRoot = new THREE.Group();
     scene.add(this._plumeRoot);
+
+    // v85: 重力場機関の艦が浮いている密度境界面（艦のまわりに淡く光る面と波紋）
+    this._boundary = new THREE.Mesh(new THREE.CircleGeometry(1, 96), new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 }, uLevel: { value: 0 } },
+      vertexShader: `
+        varying vec2 vP;
+        void main() { vP = position.xy; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+      `,
+      fragmentShader: `
+        uniform float uTime, uLevel;
+        varying vec2 vP;
+        void main() {
+          float r = length(vP);
+          float fade = smoothstep(1.0, 0.25, r);
+          float ripple = 0.5 + 0.5 * sin(r * 26.0 - uTime * 3.0);
+          float a = fade * (0.12 + 0.18 * ripple) * uLevel;
+          gl_FragColor = vec4(vec3(0.55, 0.85, 1.0) * a, a);
+        }
+      `,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    }));
+    this._boundary.frustumCulled = false;
+    this._boundary.visible = false;
+    scene.add(this._boundary);
+  },
+
+  _boundary: null,
+  _updateBoundary(ship) {
+    const b = this._boundary;
+    if (!b) return;
+    b.visible = !!ship.gravityDrive;
+    if (!b.visible) return;
+    const q = ship.boundaryQuat || ship.quaternion;
+    const off = rotateVecByQuat({ x: 0, y: ship.boundaryHeight || 0, z: 0 }, q);
+    b.position.set(ship.position.x + off.x, ship.position.y + off.y, ship.position.z + off.z);
+    // 円は XY 平面なので、境界面（艦の上下に垂直な面）へ倒す
+    b.quaternion.set(q.x, q.y, q.z, q.w).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2));
+    b.scale.setScalar((ship.size || 10) * 0.9);
+    b.material.uniforms.uTime.value = this._time;
+    // 主エンジンの出力が高いほど少し明るく
+    let out = 0, n = 0;
+    const ratios = ship.fxOutputRatios || ship.thrusterOutputRatios;
+    for (const t of ship.thrusters) if (t.kind === 'main') { out += ratios[t.id] || 0; n++; }
+    b.material.uniforms.uLevel.value = 0.6 + 0.8 * (n ? out / n : 0);
   },
 
   _plumeRoot: null,
@@ -186,6 +230,7 @@ const EngineFx = {
 
     this._time += dt;
     this._syncPlumes(ship);
+    this._updateBoundary(ship);
     this._plumeRoot.position.set(ship.position.x, ship.position.y, ship.position.z);
     this._plumeRoot.quaternion.set(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w);
     const ratios = ship.fxOutputRatios || ship.thrusterOutputRatios;

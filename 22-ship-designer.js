@@ -218,6 +218,21 @@
       markers.add(lineMesh([{ x: c.x, y: c.y, z: c.z }, { x: tc.x, y: tc.y, z: c.z }], 0xff6a4a, false));
     }
 
+    // v85: 重力場の密度境界面（重力場機関を積んだ艦だけ）
+    if (hasGravityEngine()) {
+      const R = Math.max(dims.x, dims.z) * 0.9;
+      const plane = new THREE.Mesh(new THREE.CircleGeometry(R, 64), new THREE.MeshBasicMaterial({
+        color: 0x7fd4ff, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthWrite: false,
+      }));
+      plane.rotation.x = -Math.PI / 2;
+      plane.position.set(0, design.boundary.height ?? 0, 0);
+      plane.renderOrder = 7;
+      markers.add(plane);
+      const ringPts = [];
+      for (let i = 0; i <= 96; i++) { const a = (i / 96) * Math.PI * 2; ringPts.push({ x: Math.cos(a) * R, y: design.boundary.height ?? 0, z: Math.sin(a) * R }); }
+      markers.add(lineMesh(ringPts, 0x7fd4ff, false));
+    }
+
     // 逆噴射（v84: ノズルごとに選んで動かせる）
     for (const n of design.retro.nozzles) {
       const sel = n.id === selectedRetroId;
@@ -800,6 +815,7 @@
     $('cogGizmoBtn').classList.toggle('active', !!(active && active.kind === 'cog'));
     renderPodList();
     renderRetroList();
+    syncBoundaryUi();
     if (document.activeElement !== $('gyroTorqueInput')) $('gyroTorqueInput').value = design.gyro.torque > 0 ? inputValue(design.gyro.torque / 1000) : '';
     {
       const I = buildShipSpecFromDesign(design).inertiaTensor;
@@ -1018,6 +1034,36 @@
   function markDirty() {
     dirty = true;
   }
+
+  // v85: 重力場の密度境界面の高さ（重力場機関を積んだ艦だけ）
+  function hasGravityEngine() {
+    return design.mains.some((e) => e.engineType === 'gravity3' || e.engineType === 'gwave');
+  }
+  function syncBoundaryUi() {
+    const on = hasGravityEngine();
+    $('boundarySection').style.display = on ? '' : 'none';
+    if (!on) return;
+    const h = design.boundary.height;
+    const lim = design.hull.dims.y * 0.75 + design.hull.size * 0.02;
+    const sl = $('boundaryHeightSlider');
+    sl.min = String(-lim); sl.max = String(lim); sl.step = String(design.hull.size / 2000);
+    if (document.activeElement !== sl) sl.value = String(h ?? 0);
+    if (document.activeElement !== $('boundaryHeightInput')) $('boundaryHeightInput').value = h === null ? '' : inputValue(h);
+    const y = h ?? 0;
+    const top = design.hull.dims.y / 2;
+    $('boundaryLine').textContent = `船体の中心から ${y >= 0 ? '上' : '下'} ${fmtLen(Math.abs(y))}（船底から ${fmtLen(y + top)}・重心から ${fmtLen(Math.abs(y - design.cog.y))} ${y >= design.cog.y ? '上' : '下'}）`;
+  }
+  $('boundaryHeightInput').addEventListener('change', () => {
+    const el = $('boundaryHeightInput');
+    design.boundary.height = el.value === '' || !Number.isFinite(Number(el.value)) ? null : Number(el.value);
+    onPhysicsEdit();
+  });
+  $('boundaryHeightSlider').addEventListener('input', () => {
+    design.boundary.height = Number($('boundaryHeightSlider').value);
+    rebuildMarkers();
+    markDirty();
+    syncBoundaryUi();
+  });
 
   function onPhysicsEdit() {
     if (!design.retro.custom) autoPlaceRetro();
