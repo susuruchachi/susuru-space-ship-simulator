@@ -65,10 +65,13 @@ const DockingPlatform = {
     // トグルボタン参照）。
     // v77: ポートの座標は母港（地球周回軌道）のローカル座標なので、ワープで
     // 母港を離れている間は表示しない（16-navigation.js参照）。
-    const atHome = typeof Navigation === 'undefined' || Navigation.isHome();
-    const visible = State.settings.showApproachGuides !== false && atHome;
+    // v85: ポートのモデルは、進入軸の表示を切っていても表示する（切り替わるのは
+    // ゲートの枠などの誘導表示だけ）。母港を離れている間（ワープ・自動航行中など）も、
+    // 母港フレームでのポートの位置を今のフレームに直して表示し続ける（以前はここで
+    // 消して、戻るたびに大きなモデルを読み込み直していた）。
+    const showGuides = State.settings.showApproachGuides !== false;
 
-    if (!target || !visible) {
+    if (!target) {
       if (this._group) {
         this._scene.remove(this._group);
         this._disposeGroup(this._group);
@@ -88,17 +91,29 @@ const DockingPlatform = {
       this._modelCorrectionGroup = new THREE.Group();
       this._group.add(this._modelCorrectionGroup);
     }
+    for (const c of this._group.children) c.visible = c === this._modelCorrectionGroup ? true : showGuides;
 
-    this._group.position.set(target.position.x, target.position.y, target.position.z);
-    this._group.quaternion.set(
-      target.quaternion.x,
-      target.quaternion.y,
-      target.quaternion.z,
-      target.quaternion.w
-    );
+    const pose = this._poseInCurrentFrame(target);
+    // 遠すぎる（描画の届く距離の外）ときは隠す（モデルは捨てずに持っておく）
+    const ship = State.ship;
+    const far = ship && Math.hypot(pose.position.x - ship.position.x, pose.position.y - ship.position.y, pose.position.z - ship.position.z) > 2e5;
+    this._group.visible = !far;
+    this._group.position.set(pose.position.x, pose.position.y, pose.position.z);
+    this._group.quaternion.set(pose.quaternion.x, pose.quaternion.y, pose.quaternion.z, pose.quaternion.w);
 
     this._syncPortModel(target);
     this._updatePortLights();
+  },
+
+  // 母港フレームでのポートの位置・向き → 今のフレームでの位置・向き
+  _poseInCurrentFrame(target) {
+    if (typeof Navigation === 'undefined' || !Navigation.frame || Navigation.isHome()) return target;
+    const u = Navigation.localToUniverse(target.position, Navigation.homeFrame);
+    const p = Navigation.universeToLocal(u);
+    const q = Navigation.frame.quat.clone().invert()
+      .multiply(Navigation.homeFrame.quat)
+      .multiply(new THREE.Quaternion(target.quaternion.x, target.quaternion.y, target.quaternion.z, target.quaternion.w));
+    return { position: p, quaternion: { x: q.x, y: q.y, z: q.z, w: q.w } };
   },
 
   _ensureLightPool() {
@@ -116,7 +131,7 @@ const DockingPlatform = {
     const now = performance.now();
     const dt = Math.min(0.1, Math.max(0, (now - (this._lightLastT || now)) / 1000));
     this._lightLastT = now;
-    const clusters = this._group && this._modelRoot ? this._lightClusters : null;
+    const clusters = this._group && this._group.visible && this._modelRoot ? this._lightClusters : null;
     const ship = State.ship;
     // 艦に近い候補（候補の広がりの分だけ近いとみなす）から LIGHT_COUNT 個
     const want = new Set();
