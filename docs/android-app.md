@@ -46,4 +46,4 @@ GitHub の **Actions → android-apk → Run workflow**。`android/` を変え�
 消すには、android-apk ワークフローの実行結果の画面（Summary）に出る項目を、
 `https://susuruchachi.github.io/.well-known/assetlinks.json`（`susuruchachi.github.io` リポジトリの
 `.well-known/assetlinks.json`）の配列に追加します。同じドメインのほかのアプリの項目は残したまま、項目を1つ足します。
-雛形は `android/assetlinks.json` にあります。
+今の内容（すするanki とこのアプリの2項目）の控えは `android/assetlinks.json` にあります。
