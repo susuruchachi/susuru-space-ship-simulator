@@ -34,6 +34,12 @@ const Navigation = {
   WARP_MAX_SPEED: 2000 * 299792458, // 太陽系内での最高速（光速の2000倍）
   WARP_ACCEL_DECADES: 1.8,       // 1秒あたりに速度が何桁上がるか
   WARP_DECEL_DECADES: 3.0,
+  // v83: 自動航行の到着（この距離・速さまで減速してからワープを抜ける）
+  ARRIVAL_DISTANCE: 25,          // [m]
+  ARRIVAL_SPEED: 25,             // [m/s]
+  // 到着後に天体のほうへ向き直るときの最大角速度 [rad/s]（ゆっくり回す）
+  ARRIVAL_TURN_RATE: 0.12,
+  arrivalHold: null, // 到着後の姿勢合わせ { kind: 'body', bodyId } | { kind: 'home' }
 
   frame: null,      // { bodyId, offset, rot(3x3 local→universe), rotT, quat(THREE), isHome }
   homeFrame: null,
@@ -296,6 +302,7 @@ const Navigation = {
     this._leverTouched = false;
     this.warp.speed = Math.max(this.WARP_MIN_SPEED, vecLength(ship.velocity));
     ship.autoDockingEnabled = false;
+    this.arrivalHold = null;
     // 母港フレームから出る（ポートの座標系を壊さないため、艦の位置に新しい原点を置く）
     this._rebaseToDominantBody(false);
     ship.velocity = { x: 0, y: 0, z: 0 };
@@ -305,6 +312,7 @@ const Navigation = {
 
   disengageWarp(reason) {
     const ship = State.ship;
+    this.arrivalHold = null;
     this.warp.active = false;
     this.warp.autopilot = false;
     this.warp.speed = 0;
@@ -363,9 +371,12 @@ const Navigation = {
       vTarget = Math.min(vLimit, distA * this.WARP_K_TARGET);
       // 機首が目的地を向くまでは加速しない
       const alignFactor = Math.max(0, (alignCos - 0.9) / 0.1);
-      vTarget = Math.max(this.WARP_MIN_SPEED * 0.2, vTarget * alignFactor * alignFactor);
+      // v83: 到着点の手前では、ゆっくり（最後は数十 m/s まで）減速してから到着する。
+      // 以前は到着点の数百〜数千km手前で、秒速数千kmから一瞬で止まっていた。
+      const floor = Math.min(this.WARP_MIN_SPEED * 0.2, Math.max(this.ARRIVAL_SPEED, distA * this.WARP_K_TARGET));
+      vTarget = Math.max(floor, vTarget * alignFactor * alignFactor);
       // 到着
-      if (distA < Math.max(500, arrival.arrivalDist * 0.06) || (distA < w.speed * dt * 1.5 && alignCos > 0.95)) {
+      if (distA < Math.max(this.ARRIVAL_DISTANCE, w.speed * dt * 1.5)) {
         this._arrive(arrival);
         return;
       }
@@ -409,45 +420,114 @@ const Navigation = {
     this._guardSurface(true);
   },
 
+  // v83: 到着したら、姿勢をいきなり切り替えるのをやめ、到着後に姿勢スラスターで
+  // ゆっくり向き直る（stepArrivalHold）。母港でドッキングポートが選ばれていれば、
+  // そのまま自動操船（ドッキング）に引き継ぎ、いつもどおり軸に乗せて入港する。
+  // （ワープの速度は到着点の手前で数十 m/s まで落としてあるので、ここで止めても
+  // 急停止には見えない。角速度はそのまま残して、自然に回し続ける）
   _arrive(arrival) {
     const ship = State.ship;
     this.warp.active = false;
     this.warp.autopilot = false;
     this.warp.speed = 0;
     ship.velocity = { x: 0, y: 0, z: 0 };
-    ship.angularVelocity = { x: 0, y: 0, z: 0 };
     if (this.target && this.target.kind === 'home') {
       this.switchFrame(this._cloneFrame(this.homeFrame));
-      // 母港ではポートの方（原点）を向く
-      this._faceLocalPoint(ship, { x: 0, y: 0, z: 0 });
-      this.warp.status = '母港に到着しました';
+      if (State.dockingTarget) {
+        this.arrivalHold = null;
+        ship.autoDockingEnabled = true;
+        if (typeof HUD !== 'undefined' && HUD._refreshDockingUi) HUD._refreshDockingUi();
+        this.warp.status = '母港に到着しました。ドッキングポートへ自動で入港します';
+      } else {
+        // ポートが選ばれていなければ、ポートの方（原点）へゆっくり向き直る
+        this.arrivalHold = { kind: 'home', label: '母港に到着しました' };
+        this.warp.status = '母港に到着しました（姿勢を整えています）';
+      }
     } else {
       this._rebaseToDominantBody(false);
       const b = arrival.body;
-      if (b) {
-        const l = this.universeToLocal(b.pos);
-        // 天体の北極が画面の上になるようにする（環や赤道の縞が水平に見える）
-        const pole = b.poleThree || { x: 0, y: 1, z: 0 };
-        this._faceLocalPoint(ship, l, Astro.mat3MulVec(this.frame.rotT, pole));
-        // 追従カメラは艦の後ろ上方から見下ろすので、機首を少し上げて
-        // 天体が画面の中央付近に見えるようにする
-        const pitchUp = axisAngleQuat({ x: 1, y: 0, z: 0 }, (11 * Math.PI) / 180);
-        ship.quaternion = normalizeQuat(multiplyQuat(ship.quaternion, pitchUp));
-      }
-      this.warp.status = `${this.targetLabel()}に到着しました`;
+      const label = `${this.targetLabel()}に到着しました`;
+      this.arrivalHold = b ? { kind: 'body', bodyId: b.id, label } : null;
+      this.warp.status = b ? `${label}（姿勢を整えています）` : label;
     }
   },
 
-  // 艦の機首（-Z）を、ローカル座標の点 p の方向へ向ける。
-  // upLocal を渡すとその向きが画面の上になるようロールをそろえる（省略時は今の上方向を保つ）
-  _faceLocalPoint(ship, p, upLocal) {
+  // 到着後の姿勢合わせで向けたい姿勢（ローカル座標のクォータニオン）。対象が無ければ null
+  _arrivalHoldAttitude(ship) {
+    const h = this.arrivalHold;
+    if (!h) return null;
+    if (h.kind === 'home') {
+      return this._lookQuat(ship, { x: 0, y: 0, z: 0 }, null);
+    }
+    const b = SolarSystem.byId[h.bodyId];
+    if (!b) return null;
+    const l = this.universeToLocal(b.pos);
+    // 天体の北極が画面の上になるようにする（環や赤道の縞が水平に見える）
+    const pole = b.poleThree || { x: 0, y: 1, z: 0 };
+    const q = this._lookQuat(ship, l, Astro.mat3MulVec(this.frame.rotT, pole));
+    if (!q) return null;
+    // 追従カメラは艦の後ろ上方から見下ろすので、機首を少し上げて
+    // 天体が画面の中央付近に見えるようにする
+    const pitchUp = axisAngleQuat({ x: 1, y: 0, z: 0 }, (11 * Math.PI) / 180);
+    return normalizeQuat(multiplyQuat(q, pitchUp));
+  },
+
+  // 到着後の姿勢合わせ（ShipController.update から毎フレーム呼ぶ）。
+  // 操縦者が回転・移動の操作をしたら、そこで手を離す。
+  // 戻り値: 物理に渡す入力（姿勢合わせ中は回転入力を書き換えたコピー）
+  stepArrivalHold(ship, input) {
+    const h = this.arrivalHold;
+    if (!h || this.warp.active) return input;
+    const userInput = Math.abs(input.rotatePitch) + Math.abs(input.rotateYaw) + Math.abs(input.rotateRoll)
+      + Math.abs(input.thrustStrafeX) + Math.abs(input.thrustStrafeY) + Math.abs(input.thrustForward);
+    if (userInput > 0.05 || ship.autoDockingEnabled) {
+      this.arrivalHold = null;
+      return input;
+    }
+    const qd = this._arrivalHoldAttitude(ship);
+    if (!qd) { this.arrivalHold = null; return input; }
+    // 今の姿勢から目標の姿勢への回転（艦のローカル軸での回転ベクトル）
+    let qe = multiplyQuat(conjugateQuat(ship.quaternion), qd);
+    if (qe.w < 0) qe = { x: -qe.x, y: -qe.y, z: -qe.z, w: -qe.w };
+    const s = Math.hypot(qe.x, qe.y, qe.z);
+    const angle = 2 * Math.atan2(s, qe.w);
+    const w = ship.angularVelocity;
+    const wMag = Math.hypot(w.x, w.y, w.z);
+    // 0.6°以内に入ったら終わり（残った角速度は自動の姿勢制動で止まる）
+    if (angle < 0.01) {
+      this.arrivalHold = null;
+      this.warp.status = h.label;
+      return input;
+    }
+    // 目標の角速度: 誤差に比例し、止まり切れる速さ（√(2·角加速度·角度)）と
+    // ゆっくり回す上限で抑える。回転入力は「最大角速度に対する割合」で渡す。
+    const alpha = ThrusterSolver._estimateMaxAngularAccel(ship);
+    const aMin = Math.max(1e-6, Math.min(alpha.x, alpha.y, alpha.z));
+    const maxW = Math.max(1e-6, ship.maxAngularSpeed);
+    let rate = Math.min(this.ARRIVAL_TURN_RATE, maxW * 0.8, angle * 0.6, Math.sqrt(2 * aMin * angle * 0.5));
+    // 回転入力が小さすぎると「操作なし」（03-thruster-solver.js の ROTATION_INPUT_DEADZONE）と
+    // みなされて回らなくなるので、最後まで少しは回す
+    rate = Math.max(rate, maxW * 0.03);
+    const k = s > 1e-9 ? rate / s : 0;
+    return {
+      ...input,
+      rotatePitch: clamp((qe.x * k) / maxW, -1, 1),
+      rotateYaw: clamp((qe.y * k) / maxW, -1, 1),
+      rotateRoll: clamp((qe.z * k) / maxW, -1, 1),
+    };
+  },
+
+  // 艦の機首（-Z）をローカル座標の点 p に向ける姿勢。upLocal を渡すとその向きが
+  // 画面の上になるようロールをそろえる（省略時は今の上方向を保つ）
+  _lookQuat(ship, p, upLocal) {
     const dx = p.x - ship.position.x, dy = p.y - ship.position.y, dz = p.z - ship.position.z;
+    if (Math.hypot(dx, dy, dz) < 1e-6) return null;
     const dir = new THREE.Vector3(dx, dy, dz).normalize();
     const up = upLocal || rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
     const m = new THREE.Matrix4().lookAt(new THREE.Vector3(0, 0, 0), dir, new THREE.Vector3(up.x, up.y, up.z));
     // lookAt は -Z を dir に向ける（カメラ用）ので、そのまま艦の向きとして使える
     const q = new THREE.Quaternion().setFromRotationMatrix(m);
-    ship.quaternion = { x: q.x, y: q.y, z: q.z, w: q.w };
+    return { x: q.x, y: q.y, z: q.z, w: q.w };
   },
 
   // 自動航行の操舵: 目標点の方向へ機首を向けるピッチ・ヨー入力（-1..1）

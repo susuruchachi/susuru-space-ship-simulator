@@ -414,6 +414,8 @@ const HUD = {
         rollEl.value = euler.roll.toFixed(1);
       }
     };
+    // v83: ワープで母港に到着したときなど、ほかの場所から自動操船を切り替えたら表示を合わせる
+    this._refreshDockingUi = refresh;
 
     setCoordsBtn.addEventListener('click', () => {
       const ship = State.ship;

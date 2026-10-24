@@ -35,6 +35,10 @@ const ShipController = {
     if (!ship || State.paused) return;
 
     InputSystem.update();
+    // v83: ワープで到着した直後は、姿勢スラスターでゆっくり天体（母港）のほうへ向き直る
+    const input = typeof Navigation !== 'undefined' && Navigation.stepArrivalHold
+      ? Navigation.stepArrivalHold(ship, State.input)
+      : State.input;
     // v77: ワープ中は並進をワープ航法（16-navigation.js）が受け持ち、
     // 回転だけ通常の物理（RCSによる姿勢制御）で動かす。
     if (typeof Navigation !== 'undefined' && Navigation.isWarping()) {
@@ -43,7 +47,7 @@ const ShipController = {
       const steps = Math.max(1, Math.ceil(dt / this.MAX_PHYSICS_STEP - 1e-9));
       const h = dt / steps;
       for (let i = 0; i < steps; i++) {
-        FlightPhysics.step(ship, State.input, h);
+        FlightPhysics.step(ship, input, h);
         const prev = { x: ship.position.x, y: ship.position.y, z: ship.position.z };
         this._integratePose(ship, h);
         // v79: ドッキングポートとの当たり判定（めり込んだら押し戻す）
