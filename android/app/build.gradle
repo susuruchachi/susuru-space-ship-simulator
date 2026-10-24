@@ -1,0 +1,65 @@
+// v86: 宇宙船シミュレーターの Android アプリ（Trusted Web Activity）
+// すするanki と同じ作り。中身は Web 版（GitHub Pages）をそのまま Chrome で全画面表示する。
+// Chrome で動くので Google でのログインも Web 版と同じように使え、アプリの更新は Web 版を更新するだけで届く。
+// 一度開けば、Web 版のサービスワーカー（sw.js）でオフラインでも起動できる。
+plugins {
+    id 'com.android.application'
+}
+
+// バージョンは Web 版の GAME_VERSION（01-state-and-config.js）から取る（0.086.000.002 → versionCode 86000002）
+def stateFile = rootProject.file('../01-state-and-config.js')
+def appVersion = (stateFile.text =~ /GAME_VERSION\s*=\s*'([^']+)'/)[0][1]
+def parts = appVersion.tokenize('.').collect { it as int }
+def code = ((parts[0] * 1000 + parts[1]) * 1000 + parts[2]) * 1000 + parts[3]
+
+android {
+    namespace 'io.github.susuruchachi.spaceshipsim'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'io.github.susuruchachi.spaceshipsim'
+        minSdk 21
+        targetSdk 35
+        versionCode Math.max(code, 1)
+        versionName appVersion
+
+        def host = 'susuruchachi.github.io'
+        def path = '/susuru-space-ship-simulator/'
+        resValue 'string', 'appName', '宇宙船シミュレーター'
+        resValue 'string', 'launcherName', '宇宙船シム'
+        resValue 'string', 'launchUrl', "https://${host}${path}index.html?source=twa"
+        resValue 'string', 'hostName', host
+        resValue 'string', 'pathPrefix', path
+        resValue 'string', 'providerAuthority', 'io.github.susuruchachi.spaceshipsim.fileprovider'
+        resValue 'string', 'assetStatements', "[{ \\\"relation\\\": [\\\"delegate_permission/common.handle_all_urls\\\"], \\\"target\\\": {\\\"namespace\\\": \\\"web\\\", \\\"site\\\": \\\"https://${host}\\\"}}]"
+    }
+
+    signingConfigs {
+        release {
+            // 署名鍵は環境変数で渡す（GitHub Actions では Secrets から）。無ければデバッグ用の鍵で署名する
+            def ks = System.getenv('SUSURU_KEYSTORE')
+            if (ks) {
+                storeFile file(ks)
+                storePassword System.getenv('SUSURU_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('SUSURU_KEY_ALIAS') ?: 'susuruanki'
+                keyPassword System.getenv('SUSURU_KEY_PASSWORD') ?: System.getenv('SUSURU_KEYSTORE_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig System.getenv('SUSURU_KEYSTORE') ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'com.google.androidbrowserhelper:androidbrowserhelper:2.5.0'
+}

@@ -1,0 +1,18 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "io.github.susuruchachi.susuruanki",
+      "sha256_cert_fingerprints": ["BC:E6:69:9B:DF:08:DC:67:BB:64:6F:2E:0A:11:00:12:40:A6:B7:CD:76:47:F6:F9:43:00:DB:D9:C0:BA:8B:2A"]
+    }
+  },
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "io.github.susuruchachi.spaceshipsim",
+      "sha256_cert_fingerprints": ["BC:E6:69:9B:DF:08:DC:67:BB:64:6F:2E:0A:11:00:12:40:A6:B7:CD:76:47:F6:F9:43:00:DB:D9:C0:BA:8B:2A"]
+    }
+  }
+]

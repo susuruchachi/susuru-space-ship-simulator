@@ -149,10 +149,6 @@ const GoogleSync = {
   // 「Googleでログイン」ボタンから直接呼ぶ（ログイン用の画面はボタンを押した
   // その場で開かないとブラウザに止められるので、この前に await を挟まない）
   signIn() {
-    // v86: Android アプリ（Capacitor）の中では、Google のログイン画面がアプリ内の表示を受け付けない
-    if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
-      return Promise.reject(new Error('Android アプリでは Google でのログインは使えません（Google の決まりで、アプリ内の画面からはログインできないため）。Web 版で同期するか、「GitHub で同期」を使ってください'));
-    }
     if (!this._auth) return Promise.reject(new Error('準備中です。少し待ってからもう一度押してください'));
     const provider = new firebase.auth.GoogleAuthProvider();
     provider.setCustomParameters({ prompt: 'select_account' });

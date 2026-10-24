@@ -8,6 +8,24 @@ v50以降、変更のたびにここへ追記していく想定です（それ�
 
 ## v86（0.086.000.000〜） - 2026-10-24
 
+### 変更: Android アプリを すするanki と同じ作り（Trusted Web Activity）に。Google ログインが使える（0.086.000.003）
+
+- **要望**: 「他のすするankiとかではログインできるように作れたけど」。
+- 0.086.000.002 の Android アプリ（Capacitor。ゲームのファイルをアプリの中の表示部品で開く）は、Google が
+  アプリ内の表示部品からのログインを受け付けないため、Google でログインできなかった。
+- すするanki と同じ Trusted Web Activity にした（`android/`）。Web 版（GitHub Pages の
+  https://susuruchachi.github.io/susuru-space-ship-simulator/ ）を、Chrome そのもので全画面表示する。Chrome で動くので
+  Google でのログインも Web 版と同じように使える。ゲームの更新は Web 版を更新するだけでアプリにも届く。
+  一度開けば、Web 版のサービスワーカーでオフラインでも起動できる。全画面（上下のバーを隠す）で、縦横どちらでも。
+- APK の作り方も すするanki と同じ: Actions → android-apk → Run workflow（`android/` を変えて push したときも作る）。
+  実行結果の Artifacts の `space-ship-simulator-apk` からダウンロード。
+  署名鍵は Secrets の ANDROID_KEYSTORE_BASE64・ANDROID_KEYSTORE_PASSWORD（無ければ使い捨ての鍵）。
+- アプリと Web 版のつながりの検証（画面上部のアドレスバーを出さない）には、ユーザーサイトの
+  `https://susuruchachi.github.io/.well-known/assetlinks.json` にこのアプリの項目が必要。すするanki と同じ署名鍵を
+  使う前提で、すするanki の項目に追加した版を `android/assetlinks.json` に用意した（検証できなくても、上部に
+  アドレスバーが出るだけで、ログインも含めて動く）。
+- Capacitor 版（`app/`）と、Android アプリで Google ログインを止めていた処理は外した。
+
 ### 追加: Android アプリ（APK）（0.086.000.002）
 
 - **要望**: 「APK化」。
