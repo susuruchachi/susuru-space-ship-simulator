@@ -48,6 +48,16 @@ const ShipController = {
       const h = dt / steps;
       for (let i = 0; i < steps; i++) {
         FlightPhysics.step(ship, input, h);
+        // v85: 天体の重力（16-navigation.js gravityAccel）。ドッキングして固定中は加えない
+        if (typeof Navigation !== 'undefined' && Navigation.gravityAccel && !(ship.autoDockingEnabled && ship._dockingPhase === 'docked')) {
+          const g = Navigation.gravityAccel(ship);
+          if (g) {
+            ship.velocity.x += g.x * h;
+            ship.velocity.y += g.y * h;
+            ship.velocity.z += g.z * h;
+            ship.gravityAccel = g;
+          }
+        }
         const prev = { x: ship.position.x, y: ship.position.y, z: ship.position.z };
         this._integratePose(ship, h);
         // v79: ドッキングポートとの当たり判定（めり込んだら押し戻す）

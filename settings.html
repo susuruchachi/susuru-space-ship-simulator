@@ -313,6 +313,13 @@
       </div>
       <switch-fake id="bloomSwitch"></switch-fake>
     </div>
+    <div class="toggle-row" id="gravityToggle">
+      <div>
+        <div class="label">天体の重力</div>
+        <div class="sub">惑星・衛星・恒星の重力を受ける（母港以外で止まっていると落ちていく。自動航行は軌道に乗せる）</div>
+      </div>
+      <switch-fake id="gravitySwitch"></switch-fake>
+    </div>
   </section>
 
   <section>
@@ -363,6 +370,7 @@ let designs = [];
 let selectedCapMode = persisted.speedCapMode || ShipClassPresets[selectedClass].speedCapMode;
 let debugHudOn = persisted.showDebugHud;
 let bloomOn = persisted.bloomEnabled ?? true;
+let gravityOn = persisted.gravityEnabled ?? true;
 let rcsThrustCapRatio = persisted.rcsThrustCapRatio ?? 1.0;
 
 function renderShipClassOptions() {
@@ -483,6 +491,17 @@ function initBloomToggle() {
   paint();
 }
 
+function initGravityToggle() {
+  const row = document.getElementById('gravityToggle');
+  const sw = document.getElementById('gravitySwitch');
+  const paint = () => { sw.style.background = gravityOn ? '#3a8fd6' : 'rgba(255,255,255,0.15)'; };
+  row.addEventListener('click', () => {
+    gravityOn = !gravityOn;
+    paint();
+  });
+  paint();
+}
+
 function initDebugToggle() {
   const row = document.getElementById('debugHudToggle');
   const sw = document.getElementById('debugHudSwitch');
@@ -523,6 +542,7 @@ function initApplyButton() {
       speedCapMode: selectedCapMode,
       showDebugHud: debugHudOn,
       bloomEnabled: bloomOn,
+      gravityEnabled: gravityOn,
       rcsThrustCapRatio: rcsThrustCapRatio,
     });
 
@@ -532,6 +552,7 @@ function initApplyButton() {
     params.set('speedCapMode', selectedCapMode);
     params.set('debugHud', debugHudOn ? '1' : '0');
     params.set('bloom', bloomOn ? '1' : '0');
+    params.set('gravity', gravityOn ? '1' : '0');
     location.href = `index.html?${params.toString()}`;
   });
 }
@@ -742,6 +763,7 @@ initSyncUi();
 initCapModeOptions();
 initDebugToggle();
 initBloomToggle();
+initGravityToggle();
 initRcsCapSlider();
 initApplyButton();
 </script>

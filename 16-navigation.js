@@ -61,7 +61,7 @@ const Navigation = {
   },
 
   _cloneFrame(f) {
-    return { ...f, offset: { ...f.offset }, rot: f.rot.slice(), rotT: f.rotT.slice(), quat: f.quat.clone() };
+    return { ...f, offset: { ...f.offset }, rot: f.rot.slice(), rotT: f.rotT.slice(), quat: f.quat.clone() }; // orbit・lagrange は共有でよい（変更しない）
   },
 
   isHome() {
@@ -110,8 +110,216 @@ const Navigation = {
       if (!best || score > best.score) best = { score, X, Y, Z };
     }
     const rot = Astro.mat3FromColumns(best.X, best.Y, best.Z);
-    const offset = scale(u, earth.rM + this.HOME_ALTITUDE_KM * 1000);
-    return this._makeFrame('earth', offset, rot, true);
+    const r0 = earth.rM + this.HOME_ALTITUDE_KM * 1000;
+    const offset = scale(u, r0);
+    const f = this._makeFrame('earth', offset, rot, true);
+    // v85: 母港は地球を回る円軌道に乗っている。フレームの原点（ポートの付近）が軌道を回り、
+    // 軸も一緒に回る（地球が常に同じ向きに見える）。ポートの座標はこのフレームの値のまま
+    const nrm = norm(add(north, u, -dot(north, u)));
+    f.orbit = {
+      r0, u0: u, nrm, rot0: rot.slice(), jd0: SimClock.jd,
+      n: Math.sqrt((earth.gm * 1e9) / (r0 * r0 * r0)), // 平均運動 [rad/s]
+    };
+    return f;
+  },
+
+  // -----------------------------------------------------------
+  // v85: 天体の重力
+  //
+  // 艦の物理は「フレーム」（ローカル座標）の中で計算するので、艦に働く重力から
+  // フレームの原点そのものの加速度を引いた分が、フレームの中で見た加速度になる。
+  //   天体と一緒に動くフレーム: 原点の加速度 = その天体が他の天体から受ける重力
+  //     （地上に静止している人が「重力で落ちる」のと同じ。止まっていれば天体へ落ちる）
+  //   母港（円軌道を回るフレーム）・ラグランジュ点: 原点は重力だけで動いている
+  //     （自由落下）ので、原点の近くでは重力がほぼ打ち消し合う。母港は回転するフレームなので
+  //     コリオリの力・遠心力も加える（ポートの近くで止まっていると、ゆっくり離れていく）
+  // -----------------------------------------------------------
+  GRAVITY_MIN_GM: 1e-3, // [km^3/s^2] これより小さな天体の重力は無視する
+
+  gravityOn() {
+    return State.settings.gravityEnabled !== false;
+  },
+
+  // 母港以外では、速度を保つ・止める補助（スロットル＝目標の速度、横滑りの自動停止、
+  // 最高速度）を使わない（重力で回っている軌道を壊してしまうため）。スロットルは推力の割合
+  newtonianFlight() {
+    return this.gravityOn() && !!this.frame && !this.frame.isHome && !this.warp.active;
+  },
+
+  // 点 p（宇宙座標）での重力加速度の合計 [m/s^2]。skipId の天体は除く
+  _gAt(p, skipId) {
+    let ax = 0, ay = 0, az = 0;
+    for (const b of SolarSystem.bodies) {
+      if (b.id === skipId || !(b.gm > this.GRAVITY_MIN_GM)) continue;
+      const dx = b.pos.x - p.x, dy = b.pos.y - p.y, dz = b.pos.z - p.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      const rMin = b.rM * 0.5;
+      if (d2 < rMin * rMin) continue;
+      const k = (b.gm * 1e9) / (d2 * Math.sqrt(d2));
+      ax += dx * k; ay += dy * k; az += dz * k;
+    }
+    return { x: ax, y: ay, z: az };
+  },
+
+  _gOne(b, p) {
+    const dx = b.pos.x - p.x, dy = b.pos.y - p.y, dz = b.pos.z - p.z;
+    const d2 = dx * dx + dy * dy + dz * dz;
+    const k = (b.gm * 1e9) / (d2 * Math.sqrt(d2));
+    return { x: dx * k, y: dy * k, z: dz * k };
+  },
+
+  // フレームの原点の加速度（宇宙座標）
+  _frameOriginAccel(f) {
+    if (f.lagrange) return this._gAt(this.frameOrigin(f), null);
+    const body = SolarSystem.byId[f.bodyId];
+    const a = this._gAt(body.pos, body.id);
+    if (f.orbit) {
+      const g = this._gOne(body, this.frameOrigin(f));
+      a.x += g.x; a.y += g.y; a.z += g.z;
+    }
+    return a;
+  },
+
+  // フレームの回転の角速度ベクトル（宇宙座標）。回らないフレームは null
+  _frameOmega(f) {
+    if (!f.orbit) return null;
+    const o = f.orbit;
+    return { x: o.nrm.x * o.n, y: o.nrm.y * o.n, z: o.nrm.z * o.n };
+  },
+
+  // 艦（ローカル座標の位置・速度）に働く重力などの加速度（ローカル座標）
+  gravityAccel(ship) {
+    if (!this.gravityOn() || !this.frame || this.warp.active) return null;
+    const f = this.frame;
+    const u = this.localToUniverse(ship.position);
+    const aS = this._gAt(u, null);
+    const aO = this._frameOriginAccel(f);
+    let a = { x: aS.x - aO.x, y: aS.y - aO.y, z: aS.z - aO.z };
+    const w = this._frameOmega(f);
+    if (w) {
+      const r = Astro.mat3MulVec(f.rot, ship.position);
+      const v = Astro.mat3MulVec(f.rot, ship.velocity);
+      const cr = (p, q) => ({ x: p.y * q.z - p.z * q.y, y: p.z * q.x - p.x * q.z, z: p.x * q.y - p.y * q.x });
+      const cor = cr(w, v), cen = cr(w, cr(w, r));
+      a = { x: a.x - 2 * cor.x - cen.x, y: a.y - 2 * cor.y - cen.y, z: a.z - 2 * cor.z - cen.z };
+    }
+    return Astro.mat3MulVec(f.rotT, a);
+  },
+
+  // 天体の速度（前のフレームとの位置の差から）[m/s]
+  _bodyVel: {},
+  _prevBodyPos: null,
+  _prevJd: null,
+  _updateBodyVelocities() {
+    const jd = SolarSystem.jd;
+    if (this._prevBodyPos && this._prevJd !== null && jd !== this._prevJd) {
+      const dt = (jd - this._prevJd) * 86400;
+      for (const b of SolarSystem.bodies) {
+        const p = this._prevBodyPos[b.id];
+        if (p) this._bodyVel[b.id] = { x: (b.pos.x - p.x) / dt, y: (b.pos.y - p.y) / dt, z: (b.pos.z - p.z) / dt };
+      }
+    }
+    if (jd !== this._prevJd) {
+      this._prevBodyPos = {};
+      for (const b of SolarSystem.bodies) this._prevBodyPos[b.id] = { x: b.pos.x, y: b.pos.y, z: b.pos.z };
+      this._prevJd = jd;
+    }
+  },
+  bodyVelocity(id) {
+    return this._bodyVel[id] || { x: 0, y: 0, z: 0 };
+  },
+
+  // フレームの中の点 pLocal が宇宙座標で動く速度
+  _framePointVelocity(f, pLocal) {
+    let v;
+    if (f.lagrange) v = this._lagrangePoint(f.lagrange, true);
+    else {
+      const bv = this.bodyVelocity(f.bodyId);
+      v = { x: bv.x, y: bv.y, z: bv.z };
+    }
+    const w = this._frameOmega(f);
+    if (w) {
+      const r = { x: f.offset.x, y: f.offset.y, z: f.offset.z };
+      const rp = Astro.mat3MulVec(f.rot, pLocal);
+      r.x += rp.x; r.y += rp.y; r.z += rp.z;
+      v.x += w.y * r.z - w.z * r.y; v.y += w.z * r.x - w.x * r.z; v.z += w.x * r.y - w.y * r.x;
+    }
+    return v;
+  },
+
+  // 母港フレームを、時刻に合わせて軌道上の位置・向きへ動かす
+  _applyHomeOrbit(f) {
+    const o = f.orbit;
+    if (!o) return;
+    const th = o.n * (SimClock.jd - o.jd0) * 86400;
+    const R = this._axisAngleMat(o.nrm, th);
+    const p = Astro.mat3MulVec(R, o.u0);
+    f.offset = { x: p.x * o.r0, y: p.y * o.r0, z: p.z * o.r0 };
+    f.rot = Astro.mat3Mul(R, o.rot0);
+    f.rotT = Astro.mat3Transpose(f.rot);
+    const q = Astro.quatFromMat3(f.rot);
+    f.quat.set(q.x, q.y, q.z, q.w);
+  },
+
+  // 軸 n（単位ベクトル）まわりに角度 a 回す回転行列（mat3、行優先）
+  _axisAngleMat(n, a) {
+    const c = Math.cos(a), s = Math.sin(a), t = 1 - c;
+    const { x, y, z } = n;
+    return [
+      t * x * x + c, t * x * y - s * z, t * x * z + s * y,
+      t * x * y + s * z, t * y * y + c, t * y * z - s * x,
+      t * x * z - s * y, t * y * z + s * x, t * z * z + c,
+    ];
+  },
+
+  // -----------------------------------------------------------
+  // v85: ラグランジュ点（主天体 primary と、それを回る天体 secondary の組）
+  //   L1・L2: secondary の手前・向こう（ヒル半径の距離）
+  //   L3: primary をはさんだ反対側
+  //   L4・L5: 公転の向きに60°前・後ろ（primary・secondary と正三角形）
+  // velocity=true なら、その点の速度を返す（位置と同じ式に天体の速度を入れる）
+  // -----------------------------------------------------------
+  _lagrangePoint(L, velocity) {
+    const P = SolarSystem.byId[L.primary], S = SolarSystem.byId[L.secondary];
+    const pp = velocity ? this.bodyVelocity(P.id) : P.pos, sp = velocity ? this.bodyVelocity(S.id) : S.pos;
+    const R = { x: sp.x - pp.x, y: sp.y - pp.y, z: sp.z - pp.z };
+    const mu = S.gm / (P.gm + S.gm);
+    const h = Math.cbrt(mu / 3);
+    switch (L.n) {
+      case 1: return { x: sp.x - R.x * h, y: sp.y - R.y * h, z: sp.z - R.z * h };
+      case 2: return { x: sp.x + R.x * h, y: sp.y + R.y * h, z: sp.z + R.z * h };
+      case 3: { const k = 1 + (5 * mu) / 12; return { x: pp.x - R.x * k, y: pp.y - R.y * k, z: pp.z - R.z * k }; }
+      default: {
+        const M = this._axisAngleMat(L.normal, (L.n === 4 ? 1 : -1) * Math.PI / 3);
+        const r = Astro.mat3MulVec(M, R);
+        return { x: pp.x + r.x, y: pp.y + r.y, z: pp.z + r.z };
+      }
+    }
+  },
+
+  // body を回る主天体（衛星なら親の惑星、惑星などは太陽）
+  lagrangePrimary(b) {
+    if (!b || b.type === 'star') return null;
+    return b.parent && SolarSystem.byId[b.parent] ? SolarSystem.byId[b.parent] : SolarSystem.byId.sun;
+  },
+
+  _lagrangeSpec(b, n) {
+    const P = this.lagrangePrimary(b);
+    if (!P) return null;
+    const R = { x: b.pos.x - P.pos.x, y: b.pos.y - P.pos.y, z: b.pos.z - P.pos.z };
+    const vp = this.bodyVelocity(P.id), vs = this.bodyVelocity(b.id);
+    const V = { x: vs.x - vp.x, y: vs.y - vp.y, z: vs.z - vp.z };
+    let nrm = { x: R.y * V.z - R.z * V.y, y: R.z * V.x - R.x * V.z, z: R.x * V.y - R.y * V.x };
+    let l = Math.hypot(nrm.x, nrm.y, nrm.z);
+    if (!(l > 0)) { nrm = { x: 0, y: 1, z: 0 }; l = 1; }
+    return { primary: P.id, secondary: b.id, n, normal: { x: nrm.x / l, y: nrm.y / l, z: nrm.z / l } };
+  },
+
+  // 毎フレーム（SolarSystem.update の後、艦の物理の前）
+  updateFrames() {
+    this._updateBodyVelocities();
+    this._applyHomeOrbit(this.homeFrame);
+    if (this.frame.orbit) this._applyHomeOrbit(this.frame);
   },
 
   _makeFrame(bodyId, offset, rot, isHome) {
@@ -131,6 +339,10 @@ const Navigation = {
   // -----------------------------------------------------------
   frameOrigin(frame) {
     const f = frame || this.frame;
+    if (f.lagrange) {
+      const L = this._lagrangePoint(f.lagrange, false);
+      return { x: L.x + f.offset.x, y: L.y + f.offset.y, z: L.z + f.offset.z };
+    }
     const b = SolarSystem.byId[f.bodyId];
     return { x: b.pos.x + f.offset.x, y: b.pos.y + f.offset.y, z: b.pos.z + f.offset.z };
   },
@@ -165,9 +377,15 @@ const Navigation = {
   buildView(camera) {
     const f = this.frame;
     const r = Astro.mat3MulVec(f.rot, camera.position);
+    // v85: ラグランジュ点のフレームは原点が天体の位置+offset ではないので、天体からの位置に直す
+    let off = f.offset;
+    if (f.lagrange) {
+      const o = this.frameOrigin(f), b = SolarSystem.byId[f.bodyId];
+      off = { x: o.x - b.pos.x, y: o.y - b.pos.y, z: o.z - b.pos.z };
+    }
     return {
       anchorId: f.bodyId,
-      offset: { x: f.offset.x + r.x, y: f.offset.y + r.y, z: f.offset.z + r.z },
+      offset: { x: off.x + r.x, y: off.y + r.y, z: off.z + r.z },
       quat: f.quat.clone().multiply(camera.quaternion),
       fov: camera.fov,
       aspect: camera.aspect,
@@ -177,7 +395,10 @@ const Navigation = {
   // -----------------------------------------------------------
   // フレームの切り替え（艦の宇宙座標・向きは変えずに、基準だけ付け替える）
   // -----------------------------------------------------------
-  switchFrame(newFrame) {
+  // carry: 艦の宇宙での速度を保つ（フレームどうしの動きの違いを速度に足す。重力で
+  // 軌道を回っている艦の原点の付け替え・影響圏の乗り換え用）。false なら従来どおり
+  // 「向きの違いの分だけ回す」（ワープの出入りなど、新しいフレームに対して止める場合）
+  switchFrame(newFrame, carry) {
     const ship = State.ship;
     const old = this.frame;
     if (ship) {
@@ -186,7 +407,13 @@ const Navigation = {
       const p = this.universeToLocal(u, newFrame);
       const qL = newFrame.quat.clone().invert().multiply(qU).normalize();
       // 速度・角速度はローカル（艦固定/フレーム）基準なので、向きの変化分だけ回す
-      const v = Astro.mat3MulVec(newFrame.rotT, Astro.mat3MulVec(old.rot, ship.velocity));
+      let v = Astro.mat3MulVec(newFrame.rotT, Astro.mat3MulVec(old.rot, ship.velocity));
+      if (carry) {
+        const vu = Astro.mat3MulVec(old.rot, ship.velocity);
+        const vo = this._framePointVelocity(old, ship.position);
+        const vn = this._framePointVelocity(newFrame, p);
+        v = Astro.mat3MulVec(newFrame.rotT, { x: vu.x + vo.x - vn.x, y: vu.y + vo.y - vn.y, z: vu.z + vo.z - vn.z });
+      }
       ship.position = { x: p.x, y: p.y, z: p.z };
       ship.quaternion = { x: qL.x, y: qL.y, z: qL.z, w: qL.w };
       ship.velocity = v;
@@ -213,12 +440,19 @@ const Navigation = {
   },
 
   // 艦の現在位置を原点とし、最寄りの天体と一緒に動くフレームへ乗り換える
-  _rebaseToDominantBody(keepRotation) {
+  _rebaseToDominantBody(keepRotation, carry) {
     const u = this.shipUniverse();
     const body = SolarSystem.dominantBody(u);
     const rot = keepRotation ? this.frame.rot : [1, 0, 0, 0, 1, 0, 0, 0, 1];
     const offset = { x: u.x - body.pos.x, y: u.y - body.pos.y, z: u.z - body.pos.z };
-    this.switchFrame(this._makeFrame(body.id, offset, rot, false));
+    this.switchFrame(this._makeFrame(body.id, offset, rot, false), carry);
+  },
+
+  // 決まった天体と一緒に動くフレームへ（艦の位置を原点に）
+  _rebaseToBody(body, carry) {
+    const u = this.shipUniverse();
+    const offset = { x: u.x - body.pos.x, y: u.y - body.pos.y, z: u.z - body.pos.z };
+    this.switchFrame(this._makeFrame(body.id, offset, [1, 0, 0, 0, 1, 0, 0, 0, 1], false), carry);
   },
 
   goHomeFrameIfNear() {
@@ -252,15 +486,25 @@ const Navigation = {
     const tg = t || this.target;
     if (!tg) return null;
     if (tg.kind === 'home') {
-      const p = this.localToUniverse({ x: 0, y: 150, z: 2500 }, this.homeFrame);
+      const local = { x: 0, y: 150, z: 2500 };
+      const p = this.localToUniverse(local, this.homeFrame);
       const c = this.frameOrigin(this.homeFrame);
-      return { point: p, center: c, arrivalDist: 0, body: SolarSystem.byId.earth };
+      // v85: 母港は軌道を回っているので、到着点も動いている（その速度）
+      return { point: p, center: c, arrivalDist: 0, body: SolarSystem.byId.earth, velocity: this._framePointVelocity(this.homeFrame, local) };
     }
     const b = SolarSystem.byId[tg.id];
     if (!b) return null;
+    // v85: ラグランジュ点へ
+    const mode = this.arrivalMode;
+    if (mode.kind === 'lagrange' && this.lagrangePrimary(b)) {
+      const spec = this._lagrangeSpec(b, mode.n);
+      const p = this._lagrangePoint(spec, false);
+      return { point: p, center: b.pos, arrivalDist: 0, body: b, lagrange: spec, velocity: this._lagrangePoint(spec, true) };
+    }
     const shipU = this._shipU;
     const sun = SolarSystem.byId.sun;
-    const arrivalDist = this.arrivalDistance(b);
+    // v85: 軌道に乗せる高度（指定が無ければ、天体全体が画面に収まる距離）
+    const arrivalDist = this.orbitRadius(b);
     // 到着方向: 艦のいる側と太陽の側の中間（昼側が見えるように）
     let dx = shipU.x - b.pos.x, dy = shipU.y - b.pos.y, dz = shipU.z - b.pos.z;
     let dl = Math.hypot(dx, dy, dz) || 1;
@@ -279,6 +523,18 @@ const Navigation = {
       arrivalDist,
       body: b,
     };
+  },
+
+  // v85: 自動航行の到着のしかた。{ kind: 'orbit', altitudeKm: null（自動）| 数値 } | { kind: 'lagrange', n: 1..5 }
+  arrivalMode: { kind: 'orbit', altitudeKm: null },
+
+  // 軌道に乗せる半径 [m]（天体の中心から）。高度の指定が低すぎるときは、地表への衝突防止の高さまで上げる
+  orbitRadius(b) {
+    const R = Math.max(b.rM, b.rpM, b.rbM);
+    const alt = this.arrivalMode.altitudeKm;
+    const minR = R + this.minAltitude(b) * 1.05;
+    if (alt > 0) return Math.max(minR, b.rM + alt * 1000);
+    return Math.max(minR, this.arrivalDistance(b));
   },
 
   // 到着地点の天体中心からの距離: 追従カメラの画面（縦60°）に天体全体が
@@ -338,7 +594,8 @@ const Navigation = {
     if (w.autopilot && this.target) {
       arrival = this.targetArrival();
       if (arrival) {
-        const steer = this._steerToward(ship, arrival.point);
+        // v85: まっすぐ進むと天体にぶつかるときは、天体の横を回る経由点へ向かう
+        const steer = this._steerToward(ship, this._detourPoint(shipU, arrival.point));
         rotInput.rotatePitch = steer.pitch;
         rotInput.rotateYaw = steer.yaw;
         alignCos = steer.alignCos;
@@ -383,7 +640,9 @@ const Navigation = {
       const floor = Math.min(this.WARP_MIN_SPEED * 0.2, Math.max(this.ARRIVAL_SPEED, distA * this.WARP_K_TARGET));
       vTarget = Math.max(floor, vTarget * alignFactor * alignFactor);
       // 到着
-      if (distA < Math.max(this.ARRIVAL_DISTANCE, w.speed * dt * 1.5)) {
+      // v85: ラグランジュ点は動いている（月の L 点で秒速約1km）ので、ゆっくり追いかけても
+      // 追いつかない。数km まで近づいたら、その点に合わせて到着する
+      if (distA < Math.max(arrival.lagrange ? 5000 : this.ARRIVAL_DISTANCE, w.speed * dt * 1.5)) {
         this._arrive(arrival);
         return;
       }
@@ -405,6 +664,15 @@ const Navigation = {
     // 表面への接近は常に上限で抑える（減速が間に合わない分）
     w.speed = Math.min(w.speed, vLimit * 1.05);
 
+    // v85: 動いている到着点（軌道を回る母港・ラグランジュ点）へは、その動きにも乗って進む
+    // （ワープの速さは「到着点に対して」の速さになり、近づくとちゃんと止まれる）
+    if (arrival && arrival.velocity) {
+      const fv = this._framePointVelocity(this.frame, ship.position);
+      this.frame.offset.x += (arrival.velocity.x - fv.x) * dt;
+      this.frame.offset.y += (arrival.velocity.y - fv.y) * dt;
+      this.frame.offset.z += (arrival.velocity.z - fv.z) * dt;
+    }
+
     // 機首方向（ローカル -Z）へ移動。ワープ中のフレームは軸=宇宙座標なので、
     // ローカルの移動量 = 宇宙座標の移動量。原点を艦に合わせて動かし続ける。
     const fwd = rotateVecByQuat({ x: 0, y: 0, z: -1 }, ship.quaternion);
@@ -425,6 +693,37 @@ const Navigation = {
       this.frame = this._makeFrame(dom.id, offset, this.frame.rot, false);
     }
     this._guardSurface(true);
+  },
+
+  // v85: 艦（p）から目的地（q）へまっすぐ進むと天体の安全な高さより内側を通るなら、
+  // その天体の横（艦がいる側）を回る経由点を返す。通らなければ q のまま
+  _detourPoint(p, q) {
+    const dx = q.x - p.x, dy = q.y - p.y, dz = q.z - p.z;
+    const L2 = dx * dx + dy * dy + dz * dz;
+    if (!(L2 > 0)) return q;
+    let best = null;
+    for (const b of SolarSystem.bodies) {
+      if (!(b.gm > this.GRAVITY_MIN_GM)) continue;
+      const R = Math.max(b.rM, b.rpM, b.rbM) + this.minAltitude(b) * 2;
+      const t = ((b.pos.x - p.x) * dx + (b.pos.y - p.y) * dy + (b.pos.z - p.z) * dz) / L2;
+      if (t <= 0 || t >= 1) continue;
+      const cx = p.x + dx * t - b.pos.x, cy = p.y + dy * t - b.pos.y, cz = p.z + dz * t - b.pos.z;
+      const miss = Math.hypot(cx, cy, cz);
+      if (miss >= R) continue;
+      if (!best || t < best.t) best = { b, t, cx, cy, cz, miss, R };
+    }
+    if (!best) return q;
+    let { cx, cy, cz, miss } = best;
+    if (miss < 1) {
+      // ちょうど中心を通る: 進む向きに垂直な適当な向きへよける
+      const l = Math.sqrt(L2);
+      const ux = dx / l, uy = dy / l, uz = dz / l;
+      const ax = Math.abs(uy) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+      cx = uy * ax.z - uz * ax.y; cy = uz * ax.x - ux * ax.z; cz = ux * ax.y - uy * ax.x;
+      miss = Math.hypot(cx, cy, cz);
+    }
+    const k = (best.R * 1.4) / miss;
+    return { x: best.b.pos.x + cx * k, y: best.b.pos.y + cy * k, z: best.b.pos.z + cz * k };
   },
 
   // v83: 到着したら、姿勢をいきなり切り替えるのをやめ、到着後に姿勢スラスターで
@@ -450,12 +749,40 @@ const Navigation = {
         this.arrivalHold = { kind: 'home', label: '母港に到着しました' };
         this.warp.status = '母港に到着しました（姿勢を整えています）';
       }
+    } else if (arrival.lagrange) {
+      // v85: ラグランジュ点に止まる（その点と一緒に動くフレームに乗る）
+      const L = arrival.lagrange;
+      const f = this._makeFrame(L.secondary, { x: 0, y: 0, z: 0 }, [1, 0, 0, 0, 1, 0, 0, 0, 1], false);
+      f.lagrange = L;
+      this.switchFrame(f);
+      ship.position = { x: 0, y: 0, z: 0 }; // その点ちょうどに合わせる（数km 以内の移動）
+      ship.velocity = { x: 0, y: 0, z: 0 };
+      const P = SolarSystem.byId[L.primary], S = SolarSystem.byId[L.secondary];
+      const label = `${P.ja}と${S.ja}の L${L.n} に到着しました`;
+      this.arrivalHold = { kind: 'body', bodyId: S.id, label };
+      this.warp.status = `${label}（その点に止まっています）`;
     } else {
-      this._rebaseToDominantBody(false);
       const b = arrival.body;
+      if (b) this._rebaseToBody(b); else this._rebaseToDominantBody(false);
+      let orbitNote = '';
+      if (b && this.gravityOn()) {
+        // v85: 円軌道に乗せる。天体の赤道面に沿った順行の向きに、円軌道の速さで
+        const u = this.shipUniverse();
+        const rv = { x: u.x - b.pos.x, y: u.y - b.pos.y, z: u.z - b.pos.z };
+        const r = Math.hypot(rv.x, rv.y, rv.z);
+        const rh = { x: rv.x / r, y: rv.y / r, z: rv.z / r };
+        const up = rotateVecByQuat({ x: 0, y: 1, z: 0 }, b.quat); // 自転軸（北）
+        let t = { x: up.y * rh.z - up.z * rh.y, y: up.z * rh.x - up.x * rh.z, z: up.x * rh.y - up.y * rh.x };
+        let tl = Math.hypot(t.x, t.y, t.z);
+        if (tl < 1e-3) { t = { x: -rh.z, y: 0, z: rh.x }; tl = Math.hypot(t.x, t.z) || 1; }
+        const vc = Math.sqrt((b.gm * 1e9) / r);
+        const vu = { x: (t.x / tl) * vc, y: (t.y / tl) * vc, z: (t.z / tl) * vc };
+        ship.velocity = Astro.mat3MulVec(this.frame.rotT, vu);
+        orbitNote = `高度 ${Math.round((r - b.rM) / 1000).toLocaleString()} km の円軌道に乗りました（秒速 ${(vc / 1000).toFixed(2)} km）`;
+      }
       const label = `${this.targetLabel()}に到着しました`;
       this.arrivalHold = b ? { kind: 'body', bodyId: b.id, label } : null;
-      this.warp.status = b ? `${label}（姿勢を整えています）` : label;
+      this.warp.status = b ? `${label}${orbitNote ? '。' + orbitNote : '（姿勢を整えています）'}` : label;
     }
   },
 
@@ -626,7 +953,18 @@ const Navigation = {
     // （噴射粒子など float32 で保持される座標の精度を保つため）
     if (!this.frame.isHome && !this.warp.active) {
       const d = Math.hypot(ship.position.x, ship.position.y, ship.position.z);
-      if (d > 20e3) this._rebaseToDominantBody(false);
+      if (d > 20e3) {
+        if (this.frame.lagrange) {
+          // ラグランジュ点のフレームは、同じ点を基準にしたまま原点だけ艦へずらす
+          const f = this._cloneFrame(this.frame);
+          const r = Astro.mat3MulVec(f.rot, ship.position);
+          f.offset = { x: f.offset.x + r.x, y: f.offset.y + r.y, z: f.offset.z + r.z };
+          this.switchFrame(f, true);
+        } else {
+          // v85: 重力で動いている艦の速度を保ったまま付け替える（影響圏をまたぐときも）
+          this._rebaseToDominantBody(false, true);
+        }
+      }
     }
   },
 

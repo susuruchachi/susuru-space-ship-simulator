@@ -39,6 +39,12 @@ const SpaceHud = {
       <div class="space-nav-buttons">
         <button class="btn-space-map" title="星図を開く (M)">🗺<span class="snb-text"> 星図</span></button>
         <select class="space-target-select" title="目的地"></select>
+        <select class="space-arrival-mode" title="到着のしかた（自動航行）">
+          <option value="orbit">軌道に乗る</option>
+          <option value="L1">L1</option><option value="L2">L2</option><option value="L3">L3</option>
+          <option value="L4">L4</option><option value="L5">L5</option>
+        </select>
+        <label class="space-orbit-alt-wrap" title="軌道の高度（地表から）。空欄なら天体全体が見える高さ"><input type="number" class="space-orbit-alt" min="0" step="any" placeholder="高度"><span>km</span></label>
         <button class="btn-space-autopilot" title="目的地へ自動でワープ (G)">🎯<span class="snb-text"> 自動航行</span></button>
         <button class="btn-space-warp" title="手動ワープ。スロットルで速度、操縦桿で向き (J)">⚡<span class="snb-text"> ワープ</span></button>
         <button class="btn-space-labels" title="天体名の表示 (L)">🏷</button>
@@ -57,6 +63,28 @@ const SpaceHud = {
     this._els.select = el.querySelector('.space-target-select');
 
     this._fillTargetSelect();
+    // v85: 自動航行の到着のしかた（軌道の高度・ラグランジュ点）
+    this._els.mode = el.querySelector('.space-arrival-mode');
+    this._els.alt = el.querySelector('.space-orbit-alt');
+    this._els.altWrap = el.querySelector('.space-orbit-alt-wrap');
+    {
+      const saved = loadPersistedSettings().arrivalMode;
+      if (saved && (saved.kind === 'orbit' || (saved.kind === 'lagrange' && saved.n >= 1 && saved.n <= 5))) Navigation.arrivalMode = saved;
+      const m = Navigation.arrivalMode;
+      this._els.mode.value = m.kind === 'lagrange' ? `L${m.n}` : 'orbit';
+      this._els.alt.value = m.altitudeKm > 0 ? String(m.altitudeKm) : '';
+    }
+    const applyMode = () => {
+      const v = this._els.mode.value;
+      const alt = Number(this._els.alt.value);
+      Navigation.arrivalMode = v === 'orbit'
+        ? { kind: 'orbit', altitudeKm: this._els.alt.value !== '' && alt > 0 ? alt : null }
+        : { kind: 'lagrange', n: Number(v.slice(1)) };
+      savePersistedSettings({ arrivalMode: Navigation.arrivalMode });
+      this._syncArrivalUi();
+    };
+    this._els.mode.addEventListener('change', () => { applyMode(); this._els.mode.blur(); });
+    this._els.alt.addEventListener('change', applyMode);
     this._els.select.addEventListener('change', () => {
       const v = this._els.select.value;
       if (!v) Navigation.setTarget(null);
@@ -124,6 +152,22 @@ const SpaceHud = {
     const t = Navigation.target;
     const v = !t ? '' : t.kind === 'home' ? 'home' : t.id;
     if (this._els.select.value !== v) this._els.select.value = v;
+    this._syncArrivalUi();
+  },
+
+  // 天体が目的地のときだけ、到着のしかた・高度の欄を出す（恒星にはラグランジュ点が無い）
+  _syncArrivalUi() {
+    const t = Navigation.target;
+    const b = t && t.kind === 'body' ? SolarSystem.byId[t.id] : null;
+    const show = !!b;
+    this._els.mode.style.display = show ? '' : 'none';
+    const hasL = !!(b && Navigation.lagrangePrimary(b));
+    for (const o of this._els.mode.options) if (o.value !== 'orbit') o.disabled = !hasL;
+    if (!hasL && this._els.mode.value !== 'orbit') this._els.mode.value = 'orbit';
+    this._els.altWrap.style.display = show && this._els.mode.value === 'orbit' ? '' : 'none';
+    if (b && this._els.mode.value === 'orbit' && document.activeElement !== this._els.alt) {
+      this._els.alt.placeholder = `高度（自動 ${Math.round((Navigation.arrivalDistance(b) - b.rM) / 1000).toLocaleString()}）`;
+    }
   },
 
   toggleWarp() {

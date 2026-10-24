@@ -821,7 +821,10 @@ const ThrusterSolver = {
     //     時はboostMult倍）。現在のローカルZ速度との差分を比例制御で
     //     埋め、目標に近づくほど推力を弱める。shipが無い場合（テスト等）
     //     は従来通りスロットル値をそのまま推力として使う後方互換。
-    if (ship && !Number.isFinite(ship.maxSpeed)) {
+    // v85: 母港以外で重力があるときは、スロットル = 推力の割合（速度を保つ補助は使わない。
+    // 補助が速度を0へ戻そうとすると、重力で回っている軌道が壊れるため）
+    const newtonian = typeof Navigation !== 'undefined' && Navigation.newtonianFlight && Navigation.newtonianFlight();
+    if (ship && (!Number.isFinite(ship.maxSpeed) || newtonian)) {
       // v85: 最高速度が無制限の艦は、スロットル = 推力の割合（離せば慣性で進み続ける）
       desiredForce.z = clamp(-input.thrustForward * boostMult, -1, 1);
     } else if (ship) {
@@ -843,7 +846,7 @@ const ThrusterSolver = {
     const hasStrafeXInput = Math.abs(input.thrustStrafeX) >= this.STRAFE_INPUT_DEADZONE;
     const hasStrafeYInput = Math.abs(input.thrustStrafeY) >= this.STRAFE_INPUT_DEADZONE;
 
-    if (retroDampingOn && ship && (!hasStrafeXInput || !hasStrafeYInput)) {
+    if (retroDampingOn && ship && !newtonian && (!hasStrafeXInput || !hasStrafeYInput)) {
       const localVel = rotateVecByQuat(ship.velocity, conjugateQuat(ship.quaternion));
 
       if (!hasStrafeXInput && Math.abs(localVel.x) > this.STRAFE_DAMPING_MIN_SPEED) {

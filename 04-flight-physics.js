@@ -42,6 +42,11 @@ const FlightPhysics = {
     // 減算する方が自然（ソルバーが「後方に投げたい力」を正しく
     // 解釈でき、該当スラスターだけ自動的に弱まる）。
     const adjustedForce = this._clampDesiredForceAtMaxSpeed(ship, desiredForce);
+    // v85: 自動ドッキング中は、重力など（母港の軌道のコリオリの力など）を打ち消す推力を
+    // あらかじめ足す（打ち消さないと、ずれてから直すので入港に倍以上かかっていた）
+    if (ship.autoDockingEnabled && ship._dockingPhase !== 'docked' && ship.gravityAccel) {
+      this._addGravityFeedForward(ship, adjustedForce);
+    }
 
     // スラスター出力比を解いて艦の状態に保存（06-hud.js / 07-engine-fx.js が参照）
     let ratios = ThrusterSolver.solve(ship, adjustedForce, desiredTorque, { manualThrottle: !!manualThrottle });
@@ -68,6 +73,36 @@ const FlightPhysics = {
   // 加速する」成分を除去する。減速方向（進行方向と逆）の成分は
   // そのまま残すため、最高速到達後も逆噴射でちゃんと減速できる。
   // -----------------------------------------------------------
+  _addGravityFeedForward(ship, force) {
+    const g = rotateVecByQuat(ship.gravityAccel, conjugateQuat(ship.quaternion));
+    const caps = this._axisCaps(ship);
+    const comps = ['x', 'y', 'z'];
+    for (let i = 0; i < 3; i++) {
+      const F = -g[comps[i]] * ship.mass;
+      const cap = F >= 0 ? caps.pos[i] : caps.neg[i];
+      if (cap > 0) force[comps[i]] = clamp((force[comps[i]] || 0) + F / cap, -1, 1);
+    }
+  },
+
+  // 各軸（艦のローカル座標）の正・負の向きに出せる最大の力 [N]
+  _axisCaps(ship) {
+    if (ship.allocation === 'balanced' && typeof ShipAllocator !== 'undefined') {
+      const a = ShipAllocator.prepare(ship);
+      return { pos: [a.capPos[0], a.capPos[1], a.capPos[2]], neg: [a.capNeg[0], a.capNeg[1], a.capNeg[2]] };
+    }
+    if (ship._axisCapsFor === ship.thrusters) return ship._axisCaps;
+    const pos = [0, 0, 0], neg = [0, 0, 0];
+    for (const t of ship.thrusters) {
+      if (t.kind === 'gyro') continue;
+      const d = vecNormalize(t.direction);
+      const T = getEffectiveMaxThrust(ship, t);
+      [-d.x * T, -d.y * T, -d.z * T].forEach((f, i) => { if (f > 0) pos[i] += f; else neg[i] -= f; });
+    }
+    ship._axisCaps = { pos, neg };
+    ship._axisCapsFor = ship.thrusters;
+    return ship._axisCaps;
+  },
+
   // v85: 出力比 → 艦のローカル座標での合力 [N]
   _forceOf(ship, ratios) {
     const f = { x: 0, y: 0, z: 0 };
@@ -100,6 +135,7 @@ const FlightPhysics = {
 
   _clampDesiredForceAtMaxSpeed(ship, desiredForce) {
     if (!ship.isAtMaxSpeed) return desiredForce;
+    if (typeof Navigation !== 'undefined' && Navigation.newtonianFlight && Navigation.newtonianFlight()) return desiredForce;
 
     const speed = vecLength(ship.velocity);
     if (speed <= 0) return desiredForce;
@@ -182,6 +218,11 @@ const FlightPhysics = {
   // 速度キャップ判定 + hard-capの場合はここで直接速度を丸める
   // -----------------------------------------------------------
   _applySpeedCap(ship, dt) {
+    // v85: 母港以外で重力があるときは最高速度で丸めない（軌道の速さは最高速度より速い）
+    if (typeof Navigation !== 'undefined' && Navigation.newtonianFlight && Navigation.newtonianFlight()) {
+      ship.isAtMaxSpeed = false;
+      return;
+    }
     const speed = vecLength(ship.velocity);
     ship.isAtMaxSpeed = speed >= ship.maxSpeed;
 

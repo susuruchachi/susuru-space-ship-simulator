@@ -494,6 +494,13 @@
     font-size: 12px;
   }
   .space-nav-buttons select { max-width: 170px; }
+  /* v85: 自動航行の到着のしかた・軌道の高度 */
+  .space-nav-buttons .space-arrival-mode { max-width: 110px; }
+  .space-orbit-alt-wrap { display: inline-flex; align-items: center; gap: 3px; color: #9fd8ff; font-size: 11px; }
+  .space-orbit-alt {
+    width: 92px; padding: 5px 6px; background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(108,195,255,0.4); border-radius: 6px; color: #dfefff; font-size: 12px;
+  }
   /* 画面幅が中くらい（iPadなど）: 左上のデバッグ表示と重ならないよう右へ寄せる */
   @media (max-width: 1150px) {
     .space-nav-panel {
@@ -517,6 +524,8 @@
   .space-nav-panel.is-compact .space-nav-location,
   .space-nav-panel.is-compact .space-nav-target,
   .space-nav-panel.is-compact .space-target-select,
+  .space-nav-panel.is-compact .space-arrival-mode,
+  .space-nav-panel.is-compact .space-orbit-alt-wrap,
   .space-nav-panel.is-compact .snb-text { display: none; }
   .space-nav-panel.is-compact .space-nav-buttons { margin-top: 3px; gap: 4px; flex-wrap: nowrap; }
   .space-nav-panel.is-compact .space-nav-buttons button { padding: 4px 7px; }
@@ -1178,6 +1187,9 @@ function initGame() {
   // v84: 光のにじみ（ブルーム）。settings.html で切り替える（?bloom=0/1 で上書き可）
   const bloomParam = params.get('bloom');
   State.settings.bloomEnabled = bloomParam !== null ? bloomParam === '1' : (persisted.bloomEnabled ?? true);
+  // v85: 天体の重力（settings.html で切り替える。?gravity=0/1 で上書き可）
+  const gravityParam = params.get('gravity');
+  State.settings.gravityEnabled = gravityParam !== null ? gravityParam === '1' : (persisted.gravityEnabled ?? true);
   PostFx.init(renderer, State.settings.bloomEnabled);
 
   // v08: 入港（オートドッキング）目的地の復元。settings.htmlを
@@ -1198,6 +1210,7 @@ function initGame() {
     retroDampingEnabled: State.settings.retroDampingEnabled,
     rcsThrustCapRatio: State.settings.rcsThrustCapRatio,
     bloomEnabled: State.settings.bloomEnabled,
+    gravityEnabled: State.settings.gravityEnabled,
     showApproachGuides: State.settings.showApproachGuides,
     showRouteLine: State.settings.showRouteLine,
   });
@@ -1224,6 +1237,7 @@ function animate() {
   SimClock.update(dt);
   SolarSystem.update(SimClock.jd);
 
+  Navigation.updateFrames(); // v85: 母港の軌道の位置・天体の速度
   ShipController.update(dt);
   Navigation.postUpdate();
   // v85: postUpdate は原点の付け替え（母港以外で原点から20km離れるたび）や地表からの
