@@ -595,6 +595,28 @@
       grid-row: 4;
     }
   }
+
+  /* -----------------------------------------------------------
+     v83: スマホなど小さな画面。3Dビューを少しでも広く使えるよう、
+     上下のバーを詰め、操作の説明は3Dビューの下側に小さく出す
+     （上側だと視点・見え方のボタンと重なっていた）。
+  ----------------------------------------------------------- */
+  @media (max-width: 700px), (max-height: 500px) {
+    .viewport-hint { top: auto; bottom: 24px; right: 10px; left: 10px; font-size: 9.5px; line-height: 1.35; }
+    .viewport-legend { font-size: 9.5px; }
+    .ortho-view-panel { top: 6px; right: 6px; gap: 4px; }
+    .ortho-view-btn { width: auto; min-width: 40px; padding: 0 7px; height: 28px; font-size: 11px; white-space: nowrap; }
+    .debug-panel { top: 40px; right: 6px; }
+    .topbar { padding: 6px 10px; }
+    .topbar h1 { font-size: 13px; }
+    .footer-bar { padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px)); gap: 8px; }
+    .btn { padding: 10px 6px; font-size: 12px; }
+  }
+  @media (max-height: 500px) {
+    #buildVersionLine { display: none; }
+    .topbar { padding: 4px 10px; }
+    .link-back { font-size: 11px; }
+  }
 </style>
 </head>
 <body>

@@ -83,10 +83,13 @@ const InputSystem = {
   },
 
   _bindStick(el, stickState) {
-    const radius = 48; // スティック可動半径(px)、06-hud.jsのCSSと合わせる
+    // スティック可動半径(px)。v83: 小さな画面ではスティックを小さく表示するので、
+    // 触れたときのスティックの大きさから決める
+    let radius = 48;
 
     const onStart = (clientX, clientY, id) => {
       const rect = el.getBoundingClientRect();
+      radius = Math.max(24, rect.width / 2);
       stickState.active = true;
       stickState.id = id;
       stickState.originX = rect.left + rect.width / 2;

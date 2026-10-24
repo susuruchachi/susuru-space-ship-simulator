@@ -54,6 +54,11 @@ const HUD = {
     el.className = 'hud-debug-panel';
     domRoot.appendChild(el);
     this._debugEl = el;
+    // v83: 小さな画面（スマホ）ではタップで畳める（最初は畳んだ状態。CSS の
+    // @media で、畳んだときは1行目だけ表示し、ログのボタンも隠す）
+    const small = window.matchMedia && window.matchMedia('(max-width: 700px), (max-height: 500px)').matches;
+    if (small) document.body.classList.add('hud-debug-collapsed');
+    el.addEventListener('click', () => document.body.classList.toggle('hud-debug-collapsed'));
     this._buildDockingLogButton(domRoot);
   },
 
@@ -65,7 +70,6 @@ const HUD = {
   _buildDockingLogButton(domRoot) {
     const wrap = document.createElement('div');
     wrap.className = 'hud-docking-log-controls';
-    wrap.style.cssText = 'position:fixed; top:8px; right:8px; z-index:9999; display:flex; gap:6px;';
     wrap.innerHTML = `
       <button class="btn-docking-log-dl" style="font-size:12px; padding:4px 8px;">ログDL</button>
       <button class="btn-docking-log-clear" style="font-size:12px; padding:4px 8px;">ログ消去</button>

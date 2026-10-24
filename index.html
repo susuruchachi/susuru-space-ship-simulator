@@ -155,6 +155,8 @@
     touch-action: none;
   }
 
+  .hud-docking-log-controls { position: fixed; top: 8px; right: 8px; z-index: 9999; display: flex; gap: 6px; }
+
   .hud-debug-panel {
     position: fixed;
     top: 12px;
@@ -325,12 +327,17 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    transform: translateX(-100%);
-    transition: transform 0.2s ease;
+    /* v83: 閉じているときは、タブの分（36px）も含めて画面の外へ出して隠す
+       （以前は -100% だけずらしていたため、パネルの右端がタブの下に見えていた） */
+    transform: translateX(calc(-100% - 40px));
+    visibility: hidden;
+    transition: transform 0.2s ease, visibility 0s linear 0.2s;
     pointer-events: none;
   }
   .hud-side-menu.is-open .side-menu-panel {
     transform: translateX(0);
+    visibility: visible;
+    transition: transform 0.2s ease, visibility 0s linear 0s;
     pointer-events: auto;
   }
   .side-menu-section-title {
@@ -379,6 +386,65 @@
     border-radius: 6px;
     color: #dfefff;
     font-size: 12px;
+  }
+
+  /* -----------------------------------------------------------
+     v83: スマホなど小さな画面のレイアウト
+     （幅700px以下＝縦持ち、高さ500px以下＝横持ち）。上部の航法パネル・
+     右上のボタン・デバッグ表示、下部の操縦系が重ならないよう並べ直し、
+     少し小さくする。デバッグ表示はタップで畳める（最初は畳んだ状態）。
+  ----------------------------------------------------------- */
+  @media (max-width: 700px), (max-height: 500px) {
+    .hud-debug-panel {
+      font-size: 10px;
+      line-height: 1.4;
+      padding: 5px 8px;
+      pointer-events: auto;
+      max-width: min(270px, 52vw);
+    }
+    body.hud-debug-collapsed .hud-debug-panel { max-height: 14px; line-height: 14px; overflow: hidden; }
+    body.hud-debug-collapsed .hud-docking-log-controls { display: none; }
+    .hud-settings-link, .btn-approach-guides-toggle, .btn-camera-mode { padding: 6px 9px; font-size: 11px; }
+    .hud-top-right-col { left: auto; gap: 6px; }
+    .hud-top-right-row { gap: 6px; }
+    .hud-docking-log-controls button { font-size: 10px !important; padding: 3px 6px !important; }
+  }
+  @media (max-width: 700px) and (min-height: 501px) {
+    .space-nav-panel, .space-nav-panel.is-compact {
+      left: 6px !important;
+      right: 6px !important;
+      transform: none !important;
+      width: auto !important;
+      max-width: none !important;
+      top: 6px;
+    }
+    .hud-top-right-col { top: 76px; right: 6px; max-width: calc(100vw - 12px); }
+    .hud-camera-controls { top: 150px; right: 6px; }
+    .hud-debug-panel { top: 76px; left: 6px; max-width: calc(100vw - 200px); }
+    .hud-docking-log-controls { top: auto; bottom: 236px; right: 6px; }
+    .hud-side-menu { top: 210px; }
+    .throttle-lever { left: 12px; bottom: 24px; width: 52px; height: 150px; }
+    .btn-roll-left, .btn-roll-right { left: 72px; width: 52px; height: 38px; }
+    .btn-roll-left { bottom: 70px; }
+    .btn-roll-right { bottom: 24px; }
+    .stick-move { left: 134px; bottom: 24px; width: 88px; height: 88px; }
+    .stick-look { right: 12px; bottom: 24px; width: 88px; height: 88px; }
+    .btn-boost { right: 12px; bottom: 124px; width: 88px; }
+  }
+  @media (max-height: 500px) {
+    .hud-top-right-col { top: 4px; right: 6px; max-width: 30vw; }
+    .hud-camera-controls { top: 92px; right: 6px; }
+    .hud-debug-panel { top: 4px; left: 6px; max-width: 28vw; }
+    .hud-docking-log-controls { top: auto; bottom: 150px; right: 6px; }
+    .hud-side-menu { top: 52px; }
+    .side-menu-panel { max-height: calc(100vh - 64px); overflow-y: auto; }
+    .throttle-lever { left: 12px; bottom: 22px; width: 48px; height: 118px; }
+    .btn-roll-left, .btn-roll-right { left: 68px; width: 52px; height: 36px; }
+    .btn-roll-left { bottom: 66px; }
+    .btn-roll-right { bottom: 22px; }
+    .stick-move { left: 132px; bottom: 18px; width: 86px; height: 86px; }
+    .stick-look { right: 16px; bottom: 18px; width: 86px; height: 86px; }
+    .btn-boost { right: 16px; bottom: 114px; width: 86px; height: 34px; }
   }
 
   /* -----------------------------------------------------------
