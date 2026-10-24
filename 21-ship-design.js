@@ -313,7 +313,7 @@ function applyShipDesignToShip(ship, design) {
 // 作り、
 //   最小化  Σ 重み × (B r − 目標)²  ＋ 小さな正則化
 //   制約    0 ≤ r ≤ 1
-// という箱制約付き最小二乗問題を、加速付きの射影勾配法（FISTA）で解く。
+// という箱制約付き最小二乗問題を解く（v83から有効制約法で厳密に）。
 // トルクの誤差に大きな重みを置くので、重心が主エンジンの推力線から
 // ずれていても、姿勢スラスターで回転を打ち消すように配分される
 // （打ち消しきれない場合は主エンジンの出力が自動的に絞られる）。
@@ -325,12 +325,36 @@ function applyShipDesignToShip(ship, design) {
 //
 // 従来の艦種プリセット（03-thruster-solver.js の貪欲法）とは別の方式で、
 // 自作の艦（ship.allocation === 'balanced'）にだけ使う。
+//
+// v83: 「姿勢スラスターで加減速してしまう」不具合の修正。力の誤差を
+// 「主エンジンまで含めた最大の力」で割って測っていたため、主エンジンが
+// 姿勢スラスターより何千倍も強い艦では、旋回のために主エンジンを左右で
+// 出力差をつけて吹かす（その副作用で大きく前進する）配分を「誤差が小さい」と
+// みなしていた。力の誤差は「要求した力」か「姿勢スラスターだけで出せる力」の
+// 大きい方で割るようにし、要求していない向きの力を厳しく抑える。
+// あわせて、解き方を反復法（FISTA）から厳密に解く有効制約法に変えた（_solveCore）。
 // =============================================================
 const ShipAllocator = {
-  ITERATIONS: 80,
-  CAP_ITERATIONS: 400,
+  ITERATIONS: 0,        // （v83: 厳密に解くようになったので使わない。呼び出しの互換のため残す）
+  CAP_ITERATIONS: 0,
   FORCE_WEIGHT: 1.0,
   TORQUE_WEIGHT: 3.0,
+  ZERO_FORCE_WEIGHT: 12.0, // v83: 力を要求していない軸の誤差の重み
+  // v83: 自動ドッキング中に使う加速度・角加速度の上限。自動ドッキングの制御は
+  // ふつうの艦（加速度 数〜20 m/s² 程度）に合わせて調整してあるため、主エンジンが
+  // 何百〜何万 m/s² も出る艦では、わずかな指示でも1フレームで行き過ぎて、
+  // 停止すべきところで速度が振動し続け、入港できなかった。
+  DOCKING_MAX_ACCEL: 15,        // [m/s²]
+  DOCKING_MAX_ANGULAR_ACCEL: 3, // [rad/s²]
+
+  // 自動ドッキング中なら、行（Fx Fy Fz Tx Ty Tz）ごとの上限（物理量）。それ以外は null
+  _dockingLimits(ship) {
+    if (!(ship && ship.autoDockingEnabled && typeof State !== 'undefined' && State.dockingTarget)) return null;
+    const I = ship.inertiaTensor || { x: ship.inertia, y: ship.inertia, z: ship.inertia };
+    const f = ship.mass * this.DOCKING_MAX_ACCEL;
+    const aa = this.DOCKING_MAX_ANGULAR_ACCEL;
+    return [f, f, f, I.x * aa, I.y * aa, I.z * aa];
+  },
   L2_REG: 2e-4,  // 出力比の2乗和の小さな正則化（解を一意にする）
 
   // 艦ごとの前計算（スラスター構成が変わったときだけやり直す）
@@ -383,8 +407,9 @@ const ShipAllocator = {
       ids: ts.map((t) => t.id),
       r: new Float64Array(N),
       capPos: new Float64Array(6), capNeg: new Float64Array(6),
-      _A: new Float64Array(6 * N), _y: new Float64Array(N), _x: new Float64Array(N),
-      _xPrev: new Float64Array(N), _res: new Float64Array(6),
+      // v83: 姿勢スラスターだけで出せる並進の力（力の誤差の物差しに使う）
+      rcsCapPos: new Float64Array(3), rcsCapNeg: new Float64Array(3),
+      _A: new Float64Array(6 * N), _colNorm: new Float64Array(N), _res: new Float64Array(6),
     };
     ship._alloc = a;
 
@@ -409,6 +434,14 @@ const ShipAllocator = {
           let achieved = 0;
           for (let k = 0; k < N; k++) achieved += B[k * 6 + row] * r[k];
           cap = Math.max(0, achieved * sign);
+          if (row < 3) {
+            // 同じ向きの力を、姿勢スラスターだけで（回転させずに）どこまで出せるか
+            const r2 = new Float64Array(N);
+            this._solveCore(a, target, scale, weight, this.CAP_ITERATIONS, r2, rcsOnly);
+            let ach2 = 0;
+            for (let k = 0; k < N; k++) ach2 += B[k * 6 + row] * r2[k];
+            if (sign > 0) a.rcsCapPos[row] = Math.max(0, ach2); else a.rcsCapNeg[row] = Math.max(0, -ach2);
+          }
         }
         if (sign > 0) a.capPos[row] = cap; else a.capNeg[row] = cap;
       }
@@ -416,92 +449,165 @@ const ShipAllocator = {
     return a;
   },
 
-  // 箱制約付き最小二乗（FISTA）。r は初期値として使い、結果で上書きする。
+  // 箱制約付き最小二乗を厳密に解く（有効制約法）。r は初期値として使い、結果で上書きする。
   //   mask: 使ってよい列（null なら全部）
+  // v83: 反復で少しずつ近づける方法（FISTA）は、主エンジンと姿勢スラスターの
+  // 強さが何千倍も違う艦や、複数の主エンジンをそろえて吹かす必要がある艦で
+  // 収束に何百フレームもかかった（全開まで数秒かかる・旋回で横滑りする）。
+  // 出力比が 0 か 1 に張り付いていないスラスター（自由な列）だけについて
+  // 最適解を式で求め（行が6つしかないので 6×6 の連立方程式で済む）、
+  // 範囲をはみ出すもの・張り付きを外すべきものを1つずつ入れ替える。
+  // 前フレームの解から始めるので、ふつうは数回の入れ替えで終わる。
   _solveCore(a, target, scale, weight, iterations, r, mask) {
     const { N, B } = a;
     const A = a._A;
-    const bvec = a._res; // 一時的に右辺を入れる
+    const res = a._res;
+    const colNorm = a._colNorm;
+    const lam = this.L2_REG;
     const rhs = [0, 0, 0, 0, 0, 0];
     for (let row = 0; row < 6; row++) {
       const c = weight[row] * scale[row];
       rhs[row] = c * target[row];
       for (let k = 0; k < N; k++) A[k * 6 + row] = mask && !mask[k] ? 0 : c * B[k * 6 + row];
     }
-    // リプシッツ定数 = (A Aᵀ) の最大固有値（6x6 なのでべき乗法で十分）
-    const M = new Float64Array(36);
-    for (let i = 0; i < 6; i++) {
-      for (let j = i; j < 6; j++) {
-        let s = 0;
-        for (let k = 0; k < N; k++) s += A[k * 6 + i] * A[k * 6 + j];
-        M[i * 6 + j] = s; M[j * 6 + i] = s;
-      }
+    // 列の状態: 0 = 自由、-1 = 0に固定、1 = 1に固定、2 = 使わない（0のまま）
+    const st = a._st || (a._st = new Int8Array(N));
+    for (let k = 0; k < N; k++) {
+      const o = k * 6;
+      colNorm[k] = A[o] * A[o] + A[o + 1] * A[o + 1] + A[o + 2] * A[o + 2]
+        + A[o + 3] * A[o + 3] + A[o + 4] * A[o + 4] + A[o + 5] * A[o + 5];
+      if ((mask && !mask[k]) || colNorm[k] <= 0) { r[k] = 0; st[k] = 2; continue; }
+      let v = r[k];
+      if (!(v > 1e-12)) { r[k] = 0; st[k] = -1; } else if (v >= 1 - 1e-12) { r[k] = 1; st[k] = 1; } else st[k] = 0;
     }
-    let v = [1, 1, 1, 1, 1, 1], lam = 0;
-    for (let it = 0; it < 40; it++) {
-      const w = [0, 0, 0, 0, 0, 0];
-      for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) w[i] += M[i * 6 + j] * v[j];
-      const n = Math.hypot(...w);
-      if (n < 1e-30) break;
-      lam = n / Math.max(1e-30, Math.hypot(...v));
-      v = w.map((x) => x / n);
-    }
-    const L = Math.max(lam, 1e-12) + this.L2_REG;
-    const step = 1 / L;
-    const y = a._y, xPrev = a._xPrev, x = a._x;
-    for (let k = 0; k < N; k++) { y[k] = r[k]; xPrev[k] = r[k]; }
-    let tk = 1;
-    for (let it = 0; it < iterations; it++) {
-      // 残差 = A y − rhs
-      for (let row = 0; row < 6; row++) bvec[row] = -rhs[row];
-      for (let k = 0; k < N; k++) {
-        const yk = y[k];
-        if (yk === 0) continue;
-        const o = k * 6;
-        bvec[0] += A[o] * yk; bvec[1] += A[o + 1] * yk; bvec[2] += A[o + 2] * yk;
-        bvec[3] += A[o + 3] * yk; bvec[4] += A[o + 4] * yk; bvec[5] += A[o + 5] * yk;
-      }
-      // 勾配ステップ → [0,1] へ射影
+    const G = new Float64Array(36);
+    const bp = new Float64Array(6);
+    const z = new Float64Array(6);
+    const rs = a._rs || (a._rs = new Float64Array(N));
+    const maxIter = Math.max(20, 4 * N + 20);
+    for (let iter = 0; iter < maxIter; iter++) {
+      // 自由な列だけの最適解: r_F = A_Fᵀ (A_F A_Fᵀ + λI)⁻¹ (右辺 − 1に固定した列の寄与)
+      for (let i = 0; i < 6; i++) bp[i] = rhs[i];
+      G.fill(0);
+      for (let i = 0; i < 6; i++) G[i * 7] = lam;
       for (let k = 0; k < N; k++) {
         const o = k * 6;
-        const g = A[o] * bvec[0] + A[o + 1] * bvec[1] + A[o + 2] * bvec[2]
-          + A[o + 3] * bvec[3] + A[o + 4] * bvec[4] + A[o + 5] * bvec[5]
-          + this.L2_REG * y[k];
-        let nx = y[k] - step * g;
-        if (nx < 0 || (mask && !mask[k])) nx = 0; else if (nx > 1) nx = 1;
-        x[k] = nx;
+        if (st[k] === 1) {
+          for (let i = 0; i < 6; i++) bp[i] -= A[o + i];
+        } else if (st[k] === 0) {
+          for (let i = 0; i < 6; i++) {
+            const ai = A[o + i];
+            if (ai === 0) continue;
+            for (let j = i; j < 6; j++) G[i * 6 + j] += ai * A[o + j];
+          }
+        }
       }
-      const tk1 = (1 + Math.sqrt(1 + 4 * tk * tk)) / 2;
-      const mom = (tk - 1) / tk1;
+      for (let i = 0; i < 6; i++) for (let j = 0; j < i; j++) G[i * 6 + j] = G[j * 6 + i];
+      this._solve6(G, bp, z);
+      // 今の点から最適解へ向かい、範囲（0..1）にぶつかるならそこで止めて固定する
+      let alpha = 1, block = -1, blockTo = 0;
       for (let k = 0; k < N; k++) {
-        y[k] = x[k] + mom * (x[k] - xPrev[k]);
-        if (y[k] < 0) y[k] = 0; else if (y[k] > 1) y[k] = 1;
-        xPrev[k] = x[k];
+        if (st[k] !== 0) continue;
+        const o = k * 6;
+        const v = A[o] * z[0] + A[o + 1] * z[1] + A[o + 2] * z[2] + A[o + 3] * z[3] + A[o + 4] * z[4] + A[o + 5] * z[5];
+        rs[k] = v;
+        if (v < 0) {
+          const t = r[k] / (r[k] - v);
+          if (t < alpha) { alpha = t; block = k; blockTo = -1; }
+        } else if (v > 1) {
+          const t = (1 - r[k]) / (v - r[k]);
+          if (t < alpha) { alpha = t; block = k; blockTo = 1; }
+        }
       }
-      tk = tk1;
+      for (let k = 0; k < N; k++) if (st[k] === 0) r[k] += alpha * (rs[k] - r[k]);
+      if (block >= 0) {
+        r[block] = blockTo > 0 ? 1 : 0;
+        st[block] = blockTo;
+        continue;
+      }
+      // 最適性の確認: 0に固定した列は増やすと得をしないか、1に固定した列は減らすと得をしないか
+      for (let row = 0; row < 6; row++) res[row] = -rhs[row];
+      for (let k = 0; k < N; k++) {
+        const rk = r[k];
+        if (!rk) continue;
+        const o = k * 6;
+        for (let row = 0; row < 6; row++) res[row] += A[o + row] * rk;
+      }
+      let worst = -1, worstV = 1e-10;
+      for (let k = 0; k < N; k++) {
+        if (st[k] !== -1 && st[k] !== 1) continue;
+        const o = k * 6;
+        const g = A[o] * res[0] + A[o + 1] * res[1] + A[o + 2] * res[2]
+          + A[o + 3] * res[3] + A[o + 4] * res[4] + A[o + 5] * res[5] + lam * r[k];
+        const viol = st[k] === -1 ? -g : g;
+        if (viol > worstV) { worstV = viol; worst = k; }
+      }
+      if (worst < 0) break;
+      st[worst] = 0;
     }
-    for (let k = 0; k < N; k++) r[k] = xPrev[k];
+    for (let k = 0; k < N; k++) {
+      if (r[k] < 0) r[k] = 0; else if (r[k] > 1) r[k] = 1;
+    }
     return r;
+  },
+
+  // 6×6 の対称正定値の連立方程式 G z = b（コレスキー分解）
+  _solve6(G, b, z) {
+    const L = this._L || (this._L = new Float64Array(36));
+    for (let i = 0; i < 6; i++) {
+      for (let j = 0; j <= i; j++) {
+        let sum = G[i * 6 + j];
+        for (let k = 0; k < j; k++) sum -= L[i * 6 + k] * L[j * 6 + k];
+        if (i === j) L[i * 6 + i] = Math.sqrt(Math.max(sum, 1e-300));
+        else L[i * 6 + j] = sum / L[j * 6 + j];
+      }
+    }
+    const y = [0, 0, 0, 0, 0, 0];
+    for (let i = 0; i < 6; i++) {
+      let sum = b[i];
+      for (let k = 0; k < i; k++) sum -= L[i * 6 + k] * y[k];
+      y[i] = sum / L[i * 6 + i];
+    }
+    for (let i = 5; i >= 0; i--) {
+      let sum = y[i];
+      for (let k = i + 1; k < 6; k++) sum -= L[k * 6 + i] * z[k];
+      z[i] = sum / L[i * 6 + i];
+    }
+    return z;
   },
 
   // 欲しい力・トルク（各成分 -1..1）→ 各スラスターの出力比
   solve(ship, desiredForce, desiredTorque) {
     const a = this.prepare(ship);
+    const lim = this._dockingLimits(ship);
     const comps = [desiredForce.x, desiredForce.y, desiredForce.z, desiredTorque.x, desiredTorque.y, desiredTorque.z];
     const target = new Float64Array(6), scale = new Float64Array(6), weight = new Float64Array(6);
     for (let row = 0; row < 6; row++) {
       const v = clamp(comps[row] || 0, -1, 1);
-      const cap = v >= 0 ? a.capPos[row] : a.capNeg[row];
+      let cap = v >= 0 ? a.capPos[row] : a.capNeg[row];
+      if (lim) cap = Math.min(cap, lim[row]);
       target[row] = v * cap;
-      scale[row] = 1 / Math.max(a.capPos[row], a.capNeg[row], a.naivePos[row] * 0.05, a.naiveNeg[row] * 0.05, 1e-9);
-      weight[row] = row < 3 ? this.FORCE_WEIGHT : this.TORQUE_WEIGHT;
+      if (row < 3) {
+        // 力の誤差の物差し: 要求した力か、姿勢スラスターだけで出せる力の大きい方
+        // （要求していない向きへの、主エンジンによる余計な加減速を厳しく抑える）
+        const rcs = Math.max(a.rcsCapPos[row], a.rcsCapNeg[row]);
+        const base = rcs > 0 ? rcs : Math.max(a.capPos[row], a.capNeg[row]) * 0.05;
+        scale[row] = 1 / Math.max(Math.abs(target[row]), base, 1e-9);
+      } else {
+        scale[row] = 1 / Math.max(a.capPos[row], a.capNeg[row], a.naivePos[row] * 0.05, a.naiveNeg[row] * 0.05, 1e-9);
+      }
+      // v83: 要求していない向きの力（旋回中の横滑り・加減速）はより強く嫌う
+      weight[row] = row < 3 ? (Math.abs(v) < 1e-6 ? this.ZERO_FORCE_WEIGHT : this.FORCE_WEIGHT) : this.TORQUE_WEIGHT;
     }
     const r = a.r; // 前フレームの解から始める（収束が速い）
     this._solveCore(a, target, scale, weight, this.ITERATIONS, r, null);
     const ratios = {};
     for (let i = 0; i < a.ids.length; i++) {
       const v = r[a.colOfThruster[i]];
-      ratios[a.ids[i]] = v < 1e-4 ? 0 : v;
+      // v83: 以前は 1e-4 未満を0に切り捨てていたが、主エンジンが極端に強い艦では
+      // 自動ドッキングの微調整に必要な出力比がそれより小さく、何も噴射しなく
+      // なって止まってしまった（噴射の見た目は 07-engine-fx.js で1%未満を出さない）
+      ratios[a.ids[i]] = v < 1e-12 ? 0 : v;
     }
     return ratios;
   },
@@ -509,22 +615,42 @@ const ShipAllocator = {
   // 自動ドッキング等が使う能力の見積もり（03-thruster-solver.js から呼ぶ）
   estimateMaxAngularAccel(ship) {
     const a = this.prepare(ship);
+    const lim = this._dockingLimits(ship);
     const I = ship.inertiaTensor || { x: ship.inertia, y: ship.inertia, z: ship.inertia };
     const f = 0.9;
+    const cap = (row) => Math.min(a.capPos[row], a.capNeg[row], lim ? lim[row] : Infinity);
     return {
-      x: (Math.min(a.capPos[3], a.capNeg[3]) / I.x) * f,
-      y: (Math.min(a.capPos[4], a.capNeg[4]) / I.y) * f,
-      z: (Math.min(a.capPos[5], a.capNeg[5]) / I.z) * f,
+      x: (cap(3) / I.x) * f,
+      y: (cap(4) / I.y) * f,
+      z: (cap(5) / I.z) * f,
     };
   },
   estimateMaxLinearDecel(ship) {
     const a = this.prepare(ship);
-    return Math.max(1e-3, (a.capPos[2] / ship.mass) * 0.85);
+    const lim = this._dockingLimits(ship);
+    return Math.max(1e-3, (Math.min(a.capPos[2], lim ? lim[2] : Infinity) / ship.mass) * 0.85);
   },
   estimateMaxLateralDecel(ship) {
     const a = this.prepare(ship);
-    const minForce = Math.min(a.capPos[0], a.capNeg[0], a.capPos[1], a.capNeg[1]);
+    const lim = this._dockingLimits(ship);
+    const minForce = Math.min(a.capPos[0], a.capNeg[0], a.capPos[1], a.capNeg[1], lim ? lim[0] : Infinity);
     return Math.max(1e-3, (minForce / ship.mass) * 0.6);
+  },
+
+  // v83: その向き（艦のローカル座標の単位ベクトル）に出せる最大の加速度 [m/s²]
+  maxAccelAlong(ship, dirLocal) {
+    const a = this.prepare(ship);
+    const lim = this._dockingLimits(ship);
+    let m = 0;
+    const comps = [dirLocal.x, dirLocal.y, dirLocal.z];
+    for (let i = 0; i < 3; i++) {
+      const d = comps[i];
+      if (Math.abs(d) < 0.05) continue;
+      let cap = d > 0 ? a.capPos[i] : a.capNeg[i];
+      if (lim) cap = Math.min(cap, lim[i]);
+      m = Math.max(m, cap / ship.mass);
+    }
+    return m;
   },
 
   // 出力比 → 実際に生じる力・トルク（艦のローカル座標、物理量）

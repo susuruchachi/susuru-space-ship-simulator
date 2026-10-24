@@ -337,6 +337,17 @@ const ThrusterSolver = {
   //   切りたい」という使い分けができなかったための対応。
   // -----------------------------------------------------------
   ROTATION_INPUT_DEADZONE: 0.02, // これ未満の合計入力量は「入力なし」とみなす
+  // v83: 回転入力を「目標の角速度」として追従するときの応答時間 [s]
+  ROTATION_RATE_RESPONSE_TIME: 0.12,
+
+  // v83: 速度の誤差がこれ以上で全開にする、という比例制御のしきい値を、
+  // 「その向きに全開で1フレーム（dt）吹かしたときの速度変化」の1.5倍より
+  // 小さくしない。主エンジンが極端に強い自作の艦で、目標速度の前後を
+  // 行き来して速度が振動するのを防ぐ（プリセットの艦は従来どおり）。
+  _deadbeatFullError(ship, dirLocal, fullError, dt) {
+    if (!ship || ship.allocation !== 'balanced' || typeof ShipAllocator === 'undefined' || !(dt > 0)) return fullError;
+    return Math.max(fullError, ShipAllocator.maxAccelAlong(ship, dirLocal) * dt * 1.5);
+  },
   AUTO_DAMPING_MIN_ANGULAR_SPEED: 0.01, // これ未満の角速度は制動不要（無限収束を防ぐ）
   // v09: 艦種依存のオーバーシュート/振り切れ不具合対応のため、固定閾値の
   // 比例制動は_computeOvershootSafeBrakeTorque()に置き換えて廃止した。
@@ -814,7 +825,8 @@ const ThrusterSolver = {
       const targetZSpeed = -input.thrustForward * ship.maxSpeed * boostMult;
       const localVelForZ = rotateVecByQuat(ship.velocity, conjugateQuat(ship.quaternion));
       const zError = targetZSpeed - localVelForZ.z;
-      const thrustStrength = Math.min(1, Math.abs(zError) / this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR);
+      const fullErr = this._deadbeatFullError(ship, { x: 0, y: 0, z: Math.sign(zError) || 1 }, this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR, dt);
+      const thrustStrength = Math.min(1, Math.abs(zError) / fullErr);
       desiredForce.z = Math.sign(zError) * thrustStrength;
     } else {
       desiredForce.z = -input.thrustForward * boostMult;
@@ -832,11 +844,13 @@ const ThrusterSolver = {
       const localVel = rotateVecByQuat(ship.velocity, conjugateQuat(ship.quaternion));
 
       if (!hasStrafeXInput && Math.abs(localVel.x) > this.STRAFE_DAMPING_MIN_SPEED) {
-        const brakeStrength = Math.min(1, Math.abs(localVel.x) / this.STRAFE_DAMPING_FULL_BRAKE_SPEED);
+        const fullX = this._deadbeatFullError(ship, { x: -Math.sign(localVel.x), y: 0, z: 0 }, this.STRAFE_DAMPING_FULL_BRAKE_SPEED, dt);
+        const brakeStrength = Math.min(1, Math.abs(localVel.x) / fullX);
         desiredForce.x = -Math.sign(localVel.x) * brakeStrength;
       }
       if (!hasStrafeYInput && Math.abs(localVel.y) > this.STRAFE_DAMPING_MIN_SPEED) {
-        const brakeStrength = Math.min(1, Math.abs(localVel.y) / this.STRAFE_DAMPING_FULL_BRAKE_SPEED);
+        const fullY = this._deadbeatFullError(ship, { x: 0, y: -Math.sign(localVel.y), z: 0 }, this.STRAFE_DAMPING_FULL_BRAKE_SPEED, dt);
+        const brakeStrength = Math.min(1, Math.abs(localVel.y) / fullY);
         desiredForce.y = -Math.sign(localVel.y) * brakeStrength;
       }
     }
@@ -852,6 +866,27 @@ const ThrusterSolver = {
       Math.abs(input.rotatePitch) + Math.abs(input.rotateYaw) + Math.abs(input.rotateRoll);
 
     const hasNoRotationInput = rotationInputMagnitude < this.ROTATION_INPUT_DEADZONE;
+
+    // v83: 回転入力は「目標の角速度」（入力 × 最大角速度）として扱い、今の角速度との
+    // 差に応じたトルクを要求する。従来は入力のぶんのトルクを要求し続けていたため、
+    // 最大角速度に達したあとも姿勢スラスターが噴射し続け、その副作用の力で艦が
+    // 少しずつ加減速していた（「姿勢制御のスラスターで加減速しちゃう」）。
+    // 入力していない軸は角速度を0に戻す向きになる。
+    if (ship && !hasNoRotationInput) {
+      const maxA = this._estimateMaxAngularAccel(ship);
+      const w = ship.angularVelocity;
+      const tau = this.ROTATION_RATE_RESPONSE_TIME;
+      const cmd = (inp, wi, a) => {
+        const v = clamp(inp || 0, -1, 1);
+        if (!(a > 0)) return v;
+        return clamp((v * ship.maxAngularSpeed - wi) / (a * tau), -1, 1);
+      };
+      desiredTorque = {
+        x: cmd(input.rotatePitch, w.x, maxA.x),
+        y: cmd(input.rotateYaw, w.y, maxA.y),
+        z: cmd(input.rotateRoll, w.z, maxA.z),
+      };
+    }
 
     // 自動姿勢制動（ダンピング）: v06で進行方向整列トルクは廃止した
     // ため、ここは角速度打ち消しのみを行うシンプルな形に戻った。
