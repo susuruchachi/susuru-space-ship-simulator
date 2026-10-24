@@ -1206,7 +1206,7 @@ function animate() {
 
   ShipController.update(dt);
   Navigation.postUpdate();
-  EngineFx.update(dt);
+  EngineFx.update(dt, camera, renderer);
   CameraSystem.update(camera);
   DockingPlatform.update();
   ApproachVisualizer.update();

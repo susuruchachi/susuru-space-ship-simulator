@@ -499,6 +499,8 @@
   .pod-chip.selected { background: rgba(255,200,120,0.35); color: #fff; }
   .pod-chip.main-chip { border-color: rgba(108,240,255,0.4); background: rgba(108,240,255,0.08); color: #bff6ff; }
   .pod-chip.main-chip.selected { background: rgba(108,240,255,0.32); color: #fff; }
+  .pod-chip.retro-chip { border-color: rgba(183,166,255,0.45); background: rgba(183,166,255,0.08); color: #ddd5ff; }
+  .pod-chip.retro-chip.selected { background: rgba(183,166,255,0.32); color: #fff; }
   .pod-editor.main-editor { background: rgba(108,240,255,0.05); border-color: rgba(108,240,255,0.22); }
   .pod-editor.main-editor .pod-editor-title { color: #bff6ff; }
   .btn-row button:disabled { opacity: 0.4; }
@@ -837,6 +839,12 @@
           <input type="number" id="mainThrustInput" class="num-input" min="0" step="any">
           <span class="unit">kN</span>
         </div>
+        <div class="field-row">
+          <label for="mainDiaInput">ノズルの直径</label>
+          <input type="number" id="mainDiaInput" class="num-input" min="0" step="any" placeholder="自動">
+          <span class="unit">m</span>
+        </div>
+        <div class="derived" id="mainDiaLine"></div>
         <h3>位置（噴射口）</h3>
         <div class="pos-rows" id="mainPosRows"></div>
         <div class="btn-row">
@@ -858,7 +866,26 @@
         <span class="unit">kN</span>
       </div>
       <div class="derived" id="retroAccelLine"></div>
-      <p class="hint">艦首の面の、重心をはさんだ左右対称の位置に2基置かれます（回転を生まない配置）。</p>
+      <div class="pod-list" id="retroList"></div>
+      <div class="btn-row">
+        <button type="button" id="retroPlaceBtn">＋ 船体をタップして追加</button>
+        <button type="button" id="retroAutoBtn">艦首の左右2基に戻す</button>
+      </div>
+      <div class="pod-editor retro-editor" id="retroEditor" style="display:none;">
+        <div class="pod-editor-title" id="retroEditorTitle"></div>
+        <div class="pos-rows" id="retroPosRows"></div>
+        <div class="field-row">
+          <label for="retroDiaInput">ノズルの直径</label>
+          <input type="number" id="retroDiaInput" class="num-input" min="0" step="any" placeholder="自動">
+          <span class="unit">m</span>
+        </div>
+        <div class="derived" id="retroDiaLine"></div>
+        <div class="btn-row">
+          <button type="button" id="retroSnapBtn">いちばん近い船体表面へ</button>
+          <button type="button" id="retroDeleteBtn" class="danger">このノズルを外す</button>
+        </div>
+      </div>
+      <p class="hint">逆噴射は前（艦首の向き）へ噴射して減速します。推力はノズルの数で等分します。ノズルは船体の表面に置け、ビューの紫の▲をタップすると選択でき、矢印（ギズモ）をドラッグすると船体の表面に沿って動かせます。重心をはさまない配置でも、ノズルごとの出力差と姿勢スラスターで回転しないように釣り合いをとります。</p>
     </details>
 
     <details class="adjust-section" id="cogSection" open>

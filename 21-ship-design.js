@@ -128,8 +128,10 @@ function createShipDesign(baseClass, name) {
     inertiaFactor: t.inertiaFactor,
     cog: { x: 0, y: 0, z: 0 },
     // v81: 主エンジンは複数持てる（初期は艦尾の中央に1基）
-    mains: [{ id: 'm1', position: { x: 0, y: 0, z: dims.z / 2 }, thrust: auto.mainThrust }],
-    retro: { thrust: auto.retroThrust },
+    // v84: diameter はノズルの直径 [m]（null なら大きさから自動で決める。噴射の太さ・長さに使う）
+    mains: [{ id: 'm1', position: { x: 0, y: 0, z: dims.z / 2 }, thrust: auto.mainThrust, diameter: null }],
+    // v84: 逆噴射のノズルは船体の表面の好きな位置に置ける（推力は全ノズルで等分）
+    retro: { thrust: auto.retroThrust, nozzles: defaultRetroNozzles(dims, { x: 0, y: 0, z: 0 }), custom: false },
     rcs: { thrust: auto.rcsThrust, pods: defaultRcsPodsForBox(dims) },
     maxSpeed: auto.maxSpeed,
     maxAngularSpeed: auto.maxAngularSpeed,
@@ -151,6 +153,39 @@ function defaultRcsPodsForBox(dims) {
     pods.push({ position: { x: -hx, y: 0, z }, normal: { x: -1, y: 0, z: 0 } });
   }
   return pods.map((p, i) => ({ id: `p${i + 1}`, ...p }));
+}
+
+// v84: 逆噴射ノズルの初期配置（v83までの固定位置と同じ）: 艦首の面の、重心をはさんだ左右対称の2か所
+function defaultRetroNozzles(dims, cog) {
+  const zFront = -dims.z / 2;
+  const dx = dims.x * 0.15;
+  return [['r1', -1], ['r2', 1]].map(([id, sx]) => ({
+    id, position: { x: cog.x + sx * dx, y: cog.y, z: zFront }, normal: { x: 0, y: 0, z: -1 }, diameter: null,
+  }));
+}
+
+// v84: ノズルの直径の自動の値 [m]。v83までの噴射の見た目（艦の大きさ・基数で決めていた
+// 太さ）とほぼ同じになる値。kind: 'main' | 'retro'
+function shipDesignAutoNozzleDiameter(d, kind) {
+  const size = Math.max(d.hull.dims.x, d.hull.dims.y, d.hull.dims.z);
+  const fx = Math.pow(Math.max(1, size / 8), 0.85);
+  if (kind === 'retro') {
+    const n = Math.max(1, ((d.retro && d.retro.nozzles) || []).length);
+    return 0.45 * fx / Math.sqrt(Math.max(1, n / 2));
+  }
+  return 0.9 * fx / Math.sqrt(Math.max(1, (d.mains || []).length));
+}
+function shipDesignNozzleDiameter(d, part, kind) {
+  return part && part.diameter > 0 ? part.diameter : shipDesignAutoNozzleDiameter(d, kind);
+}
+// v84: 全開のときの噴射のおよその太さ・長さ [m]（設定画面の表示用）。
+// 07-engine-fx.js の粒子の大きさ（直径の約1.3倍）・速さ・寿命・減衰から見積もった値
+function shipDesignPlumeEstimate(d, part, kind) {
+  const dia = shipDesignNozzleDiameter(d, part, kind);
+  const size = Math.max(d.hull.dims.x, d.hull.dims.y, d.hull.dims.z);
+  const lenFx = Math.max(1, size / 8) * dia / shipDesignAutoNozzleDiameter(d, kind);
+  const length = 8.8 * lenFx * (kind === 'retro' ? 0.6 : 1);
+  return { diameter: dia, width: dia * 1.3, length, endWidth: dia * 1.3 + length * 0.1 };
 }
 
 // 主エンジンの推力の合計と、推力の中心（推力で重み付けした噴射口の平均位置）。
@@ -182,10 +217,22 @@ function normalizeShipDesign(d) {
     id: e.id || `m${i + 1}`,
     position: { x: Number(e.position.x) || 0, y: Number(e.position.y) || 0, z: Number(e.position.z) || 0 },
     thrust: Math.max(0, Number(e.thrust) || 0),
+    diameter: Number(e.diameter) > 0 ? Number(e.diameter) : null,
   }));
   out.mains = mains.length ? mains : base.mains;
   delete out.main;
   out.retro = { ...base.retro, ...(d.retro || {}) };
+  // v84: ノズルの位置を持たない古いデータは、v83までと同じ位置（重心をはさむ左右）にする
+  if (!Array.isArray(d.retro && d.retro.nozzles)) {
+    out.retro.nozzles = defaultRetroNozzles(out.hull.dims, { ...base.cog, ...(d.cog || {}) });
+    out.retro.custom = false;
+  }
+  out.retro.nozzles = out.retro.nozzles.filter((n) => n && n.position).map((n, i) => ({
+    id: n.id || `r${i + 1}`,
+    position: { x: Number(n.position.x) || 0, y: Number(n.position.y) || 0, z: Number(n.position.z) || 0 },
+    normal: n.normal ? { x: Number(n.normal.x) || 0, y: Number(n.normal.y) || 0, z: Number(n.normal.z) || 0 } : { x: 0, y: 0, z: -1 },
+    diameter: Number(n.diameter) > 0 ? Number(n.diameter) : null,
+  }));
   out.rcs = { ...base.rcs, ...(d.rcs || {}) };
   if (!Array.isArray(out.rcs.pods)) out.rcs.pods = [];
   out.cog = { ...base.cog, ...(d.cog || {}) };
@@ -230,22 +277,27 @@ function buildShipSpecFromDesign(design) {
 
   // 主エンジン: 後方(+Z)へ噴射し、艦を前方(-Z)へ押す。複数あれば1基ずつ別に
   // 出力を決める（重心が推力線からずれていれば、左右・上下の出力差でも釣り合いをとる）
+  // v84: nozzleDiameter（ノズルの直径）と plumeScale（自動の直径に対する比。噴射の長さに
+  // 掛ける）は 07-engine-fx.js の噴射の見た目に使う
   for (const e of d.mains) {
+    const dia = shipDesignNozzleDiameter(d, e, 'main');
     thrusters.push({
       id: `main_${e.id}`, position: P(e.position), direction: { x: 0, y: 0, z: 1 },
       maxThrust: Math.max(0, e.thrust), kind: 'main',
+      nozzleDiameter: dia, plumeScale: dia / shipDesignAutoNozzleDiameter(d, 'main'),
     });
   }
-  // 逆噴射: 艦首の面に、重心の左右対称に2基（重心をはさむので回転を生まない）
-  if (d.retro.thrust > 0) {
-    const zFront = -dims.z / 2;
-    const dx = dims.x * 0.15;
-    for (const [id, sx] of [['retro_left', -1], ['retro_right', 1]]) {
-      thrusters.push({
-        id, position: P({ x: c.x + sx * dx, y: c.y, z: zFront }), direction: { x: 0, y: 0, z: -1 },
-        maxThrust: d.retro.thrust / 2, kind: 'rcs', group: 'retro',
-      });
-    }
+  // 逆噴射: 前（-Z）へ噴射して艦を後ろへ押す。v84: ノズルは船体表面の好きな位置に置け、
+  // 1基ずつ別に出力を決める（重心をはさまない配置でも、出力差と姿勢スラスターで
+  // 回転しないように釣り合いをとる）
+  const retroNozzles = d.retro.thrust > 0 ? d.retro.nozzles : [];
+  for (const n of retroNozzles) {
+    const dia = shipDesignNozzleDiameter(d, n, 'retro');
+    thrusters.push({
+      id: `retro_${n.id}`, position: P(n.position), direction: { x: 0, y: 0, z: -1 },
+      maxThrust: d.retro.thrust / retroNozzles.length, kind: 'rcs',
+      nozzleDiameter: dia, plumeScale: dia / shipDesignAutoNozzleDiameter(d, 'retro'),
+    });
   }
   // 姿勢スラスター
   for (const pod of d.rcs.pods) {
@@ -319,8 +371,8 @@ function applyShipDesignToShip(ship, design) {
 // ずれていても、姿勢スラスターで回転を打ち消すように配分される
 // （打ち消しきれない場合は主エンジンの出力が自動的に絞られる）。
 // 回転の能力（どれだけ強く回せるか）は姿勢スラスターだけで見積もる。
-// 逆噴射の左右2基は1組として同じ出力で吹かす（片側だけ吹かして回転に
-// 使うような配分をしない）。正則化は出力比の2乗の小さな項だけにする
+// （v83までは逆噴射の左右2基を1組として同じ出力で吹かしていた。v84 からノズルを
+// 好きな位置に置けるようになったので、主エンジンと同じく1基ずつ出力を決める）。正則化は出力比の2乗の小さな項だけにする
 // （出力比そのものに比例するコストを入れると、小さな要求に対して何も
 // 噴射しない「不感帯」ができ、自動ドッキングの微調整が効かなくなるため）。
 //

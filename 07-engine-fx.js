@@ -32,6 +32,12 @@ const EngineFx = {
   _mainPool: null, // { points, geometry, particles: [...] }
   _rcsPool: null,
 
+  // v84: 粒子の大きさは m（実際の大きさ）で持つ。v83までは画面のピクセル基準の値
+  // （画面の解像度で見た目の太さが変わっていた）だったので、ノズルの直径を持たない
+  // 艦種プリセットはその値にこの係数を掛けて、iPad（横向き）で見ていた太さに近くする
+  LEGACY_SIZE_TO_M: 0.25,
+  _pxPerUnit: 700,
+
   // -----------------------------------------------------------
   // 初期化: シーンにパーティクルシステムを追加
   // -----------------------------------------------------------
@@ -65,15 +71,18 @@ const EngineFx = {
       uniforms: {
         uColor: { value: new THREE.Color(color) },
         uBaseSize: { value: baseSize },
+        // 距離1のところで1mが何ピクセルになるか（update() で画面に合わせる）
+        uPxPerUnit: { value: this._pxPerUnit },
       },
       vertexShader: `
+        uniform float uPxPerUnit;
         attribute float psize;
         attribute float alpha;
         varying float vAlpha;
         void main() {
           vAlpha = alpha;
           vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-          gl_PointSize = psize * (300.0 / -mvPosition.z);
+          gl_PointSize = psize * (uPxPerUnit / -mvPosition.z);
           gl_Position = projectionMatrix * mvPosition;
         }
       `,
@@ -121,9 +130,17 @@ const EngineFx = {
   // -----------------------------------------------------------
   // 毎フレーム呼び出し
   // -----------------------------------------------------------
-  update(dt) {
+  update(dt, camera, renderer) {
     const ship = State.ship;
     if (!ship) return;
+
+    // v84: 粒子の大きさ（m）を画面のピクセルに直す係数 = 描画の高さ / (2 tan(視野角/2))
+    if (camera && renderer && camera.isPerspectiveCamera) {
+      const h = renderer.domElement.height || window.innerHeight;
+      this._pxPerUnit = h / (2 * Math.tan((camera.fov * Math.PI) / 360));
+      this._mainPool.material.uniforms.uPxPerUnit.value = this._pxPerUnit;
+      this._rcsPool.material.uniforms.uPxPerUnit.value = this._pxPerUnit;
+    }
 
     // 粒子は艦のローカル座標なので、描画オブジェクトを艦の位置・姿勢に置く
     for (const pool of [this._mainPool, this._rcsPool]) {
@@ -152,9 +169,14 @@ const EngineFx = {
     // v81: 主エンジンが4基以上あるときは1基あたりの粒子を減らし、全基の噴射が
     // 粒子の容量（MAX_MAIN_PARTICLES）に収まるようにする（減らさないと
     // 古い粒子から上書きされ、どの噴射も短く途切れて見える）
-    let mainCount = 0;
-    for (const t of ship.thrusters) if (t.kind === 'main') mainCount++;
+    let mainCount = 0, retroCount = 0;
+    for (const t of ship.thrusters) {
+      if (t.kind === 'main') mainCount++;
+      else if (t.nozzleDiameter > 0) retroCount++;
+    }
     const mainDensity = Math.min(1, 3 / Math.max(1, mainCount));
+    const retroDensity = Math.min(1, 3 / Math.max(1, retroCount));
+    const L = this.LEGACY_SIZE_TO_M;
     // v83: 粒子の大きさ（噴射の太さ）。大きな艦では艦の大きさほどには太くせず、
     // 主エンジンが複数あるときは1基あたりを細くする（ロケット級1基は従来どおり）
     const sizeFx = Math.pow(fx, 0.85);
@@ -165,22 +187,34 @@ const EngineFx = {
       if (ratio <= 0.01) continue;
 
       const isMain = t.kind === 'main';
-      const pool = isMain ? this._mainPool : this._rcsPool;
+      // v84: ノズルの直径を持つもの（自作の艦の主エンジン・逆噴射）は、エンジンの噴射
+      // として描き、太さ・長さを直径から決める
+      const dia = t.nozzleDiameter > 0 ? t.nozzleDiameter : 0;
+      const isEngine = isMain || dia > 0;
+      const isRetroEngine = !isMain && dia > 0;
+      const pool = isEngine ? this._mainPool : this._rcsPool;
+      const lenFx = fx * (t.plumeScale > 0 ? t.plumeScale : 1);
 
       // v83: 艦のローカル座標（ノズルの位置・噴射の向きをそのまま使う）
       const nozzle = t.position;
       const dir = vecNormalize(t.direction);
+      // v84: 噴射口の円の中に散らして出す（ノズルの直径ぶんの太さで出る）
+      let u1 = null, u2 = null;
+      if (dia > 0) {
+        u1 = vecNormalize(Math.abs(dir.y) < 0.9 ? vecCross(dir, { x: 0, y: 1, z: 0 }) : vecCross(dir, { x: 1, y: 0, z: 0 }));
+        u2 = vecCross(dir, u1);
+      }
 
       // 出力比に応じてスポーン数を可変（多いほど濃い噴射に見える）
       const spawnCount = isMain
         ? Math.round(ratio * 14 * mainDensity)
-        : Math.round(ratio * 6);
+        : isRetroEngine ? Math.round(ratio * 10 * retroDensity) : Math.round(ratio * 6);
 
       for (let i = 0; i < spawnCount; i++) {
         const p = this._acquireParticle(pool);
         if (!p) break;
 
-        const spread = isMain ? 0.35 : 0.5;  // 速度に掛けるので大きさの倍率は不要
+        const spread = isEngine ? 0.35 : 0.5;  // 速度に掛けるので大きさの倍率は不要
         const jitterX = (Math.random() - 0.5) * spread;
         const jitterY = (Math.random() - 0.5) * spread;
         const jitterZ = (Math.random() - 0.5) * spread;
@@ -189,16 +223,23 @@ const EngineFx = {
         p.x = nozzle.x;
         p.y = nozzle.y;
         p.z = nozzle.z;
+        if (dia > 0) {
+          const a = Math.random() * Math.PI * 2, rr = Math.sqrt(Math.random()) * dia * 0.3;
+          const ca = Math.cos(a) * rr, sa = Math.sin(a) * rr;
+          p.x += u1.x * ca + u2.x * sa;
+          p.y += u1.y * ca + u2.y * sa;
+          p.z += u1.z * ca + u2.z * sa;
+        }
 
-        const baseSpeed = (isMain
-          ? 12 + Math.random() * 8 + ratio * 10
-          : 6 + Math.random() * 4) * fx;
+        const baseSpeed = isEngine
+          ? (12 + Math.random() * 8 + ratio * 10) * (isRetroEngine ? 0.6 : 1) * (dia > 0 ? lenFx : fx)
+          : (6 + Math.random() * 4) * fx;
 
         p.vx = dir.x * baseSpeed + jitterX * baseSpeed * 0.3;
         p.vy = dir.y * baseSpeed + jitterY * baseSpeed * 0.3;
         p.vz = dir.z * baseSpeed + jitterZ * baseSpeed * 0.3;
 
-        p.maxLife = isMain
+        p.maxLife = isEngine
           ? 0.5 + Math.random() * 0.4
           : 0.2 + Math.random() * 0.15;
         p.life = p.maxLife;
@@ -209,9 +250,12 @@ const EngineFx = {
         p.x -= p.vx * back;
         p.y -= p.vy * back;
         p.z -= p.vz * back;
-        p.size = isMain
-          ? (2.2 + ratio * 2.4) * (0.7 + Math.random() * 0.6) * mainSizeFx
-          : (1.0 + Math.random() * 0.6) * rcsSizeFx;
+        // v84: 大きさは m。ノズルの直径があれば、全開で直径の約1.3倍の太さ
+        p.size = dia > 0
+          ? dia * (0.8 + ratio * 0.5) * (0.7 + Math.random() * 0.6)
+          : isMain
+            ? (2.2 + ratio * 2.4) * (0.7 + Math.random() * 0.6) * mainSizeFx * L
+            : (1.0 + Math.random() * 0.6) * rcsSizeFx * L;
       }
     }
   },

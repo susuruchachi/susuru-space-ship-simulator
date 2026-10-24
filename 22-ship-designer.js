@@ -26,8 +26,9 @@
   let dirty = false;        // 何か変更してから未保存か
   let selectedPodId = null;
   let selectedMainId = null; // v81: パネルで編集中の主エンジン
-  let active = null;         // v81: ギズモを出している部品 { kind: 'pod' | 'main' | 'cog', id }
-  let placing = false;
+  let active = null;         // v81: ギズモを出している部品 { kind: 'pod' | 'main' | 'cog' | 'retro', id }
+  let selectedRetroId = null; // v84: 選んでいる逆噴射ノズル
+  let placing = null;        // v84: 船体をタップして置くもの 'pod' | 'retro'（null なら置かない）
   let hullVersion = 0;      // 船体の形が変わるたびに+1（表面の三角形キャッシュの無効化）
   let triCache = null;
   let pendingLegacyScale = null; // 旧方式（艦種ごと）のモデルの倍率。大きさの引き継ぎに使う
@@ -82,6 +83,12 @@
     main: new THREE.MeshBasicMaterial({ color: 0x6cf0ff, depthTest: false, transparent: true }),
     mainSel: new THREE.MeshBasicMaterial({ color: 0xff7a3a, depthTest: false, transparent: true }),
     retro: new THREE.MeshBasicMaterial({ color: 0xb7a6ff, depthTest: false, transparent: true }),
+    retroSel: new THREE.MeshBasicMaterial({ color: 0xff7a3a, depthTest: false, transparent: true }),
+    // v84: ノズルの口（実際の直径）と、全開のときの噴射のおよその大きさ
+    mainMouth: new THREE.MeshBasicMaterial({ color: 0x6cf0ff, transparent: true, opacity: 0.45, side: THREE.DoubleSide, depthWrite: false }),
+    retroMouth: new THREE.MeshBasicMaterial({ color: 0xb7a6ff, transparent: true, opacity: 0.45, side: THREE.DoubleSide, depthWrite: false }),
+    mainPlume: new THREE.MeshBasicMaterial({ color: 0x6db8ff, transparent: true, opacity: 0.16, depthWrite: false }),
+    retroPlume: new THREE.MeshBasicMaterial({ color: 0xb7a6ff, transparent: true, opacity: 0.16, depthWrite: false }),
     pod: new THREE.MeshBasicMaterial({ color: 0xffd27a, depthTest: false, transparent: true }),
     podSel: new THREE.MeshBasicMaterial({ color: 0xff7a3a, depthTest: false, transparent: true }),
     hit: new THREE.MeshBasicMaterial({ visible: false }),
@@ -133,6 +140,34 @@
     return m;
   }
 
+  // v84: ノズルの口（実際の直径の円）と、全開のときの噴射のおよその大きさ（半透明の円すい台）。
+  // dir は噴射の向き
+  function nozzleMouth(pos, dir, plume, mouthMat, plumeMat) {
+    const g = new THREE.Group();
+    const r = plume.diameter / 2;
+    const disc = new THREE.Mesh(new THREE.RingGeometry(r * 0.72, r, 32), mouthMat);
+    disc.renderOrder = 9;
+    const ringPts = [];
+    for (let i = 0; i <= 48; i++) {
+      const a = (i / 48) * Math.PI * 2;
+      ringPts.push({ x: Math.cos(a) * r, y: Math.sin(a) * r, z: 0 });
+    }
+    const ring = lineMesh(ringPts, mouthMat.color.getHex(), false);
+    const mouth = new THREE.Group();
+    mouth.add(disc, ring);
+    mouth.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(dir.x, dir.y, dir.z).normalize());
+    g.add(mouth);
+    const L = plume.length;
+    const geo = new THREE.CylinderGeometry(plume.width / 2, plume.endWidth / 2, L, 24, 1, true);
+    const flame = new THREE.Mesh(geo, plumeMat);
+    flame.position.set(dir.x * L / 2, dir.y * L / 2, dir.z * L / 2);
+    flame.quaternion.setFromUnitVectors(new THREE.Vector3(0, -1, 0), new THREE.Vector3(dir.x, dir.y, dir.z).normalize());
+    flame.renderOrder = 8;
+    g.add(flame);
+    g.position.set(pos.x, pos.y, pos.z);
+    return g;
+  }
+
   function rebuildMarkers() {
     disposeGroup(markers);
     if (!design) return;
@@ -171,6 +206,7 @@
       g.add(hit);
       g.position.set(e.position.x, e.position.y, e.position.z);
       markers.add(g);
+      markers.add(nozzleMouth(e.position, { x: 0, y: 0, z: 1 }, shipDesignPlumeEstimate(design, e, 'main'), MAT.mainMouth, MAT.mainPlume));
     }
     const tc = shipDesignThrustCenter(design);
     markers.add(lineMesh([
@@ -183,12 +219,19 @@
       markers.add(lineMesh([{ x: c.x, y: c.y, z: c.z }, { x: tc.x, y: tc.y, z: c.z }], 0xff6a4a, false));
     }
 
-    // 逆噴射
-    if (design.retro.thrust > 0) {
-      const spec = buildShipSpecFromDesign(design);
-      for (const t of spec.thrusters.filter((x) => x.id.startsWith('retro'))) {
-        const p = { x: t.position.x + c.x, y: t.position.y + c.y, z: t.position.z + c.z };
-        markers.add(cone(p, { x: 0, y: 0, z: -1 }, u * 2, u * 0.8, MAT.retro));
+    // 逆噴射（v84: ノズルごとに選んで動かせる）
+    for (const n of design.retro.nozzles) {
+      const sel = n.id === selectedRetroId;
+      const g = new THREE.Group();
+      g.add(cone({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: -1 }, u * 2.2, u * 0.9, sel ? MAT.retroSel : MAT.retro));
+      const hit = new THREE.Mesh(new THREE.SphereGeometry(u * 2.4, 8, 6), MAT.hit);
+      hit.position.set(0, 0, -u * 1.1);
+      hit.userData.part = { kind: 'retro', id: n.id };
+      g.add(hit);
+      g.position.set(n.position.x, n.position.y, n.position.z);
+      markers.add(g);
+      if (design.retro.thrust > 0) {
+        markers.add(nozzleMouth(n.position, { x: 0, y: 0, z: -1 }, shipDesignPlumeEstimate(design, n, 'retro'), MAT.retroMouth, MAT.retroPlume));
       }
     }
 
@@ -390,11 +433,45 @@
     hullVersion++;
   }
 
+  // 姿勢スラスターと逆噴射ノズルを、いちばん近い船体表面へ寄せる（逆噴射ノズルを
+  // 自分で動かしていなければ、艦首の左右2か所に置き直す）
   function resnapPods() {
     for (const pod of design.rcs.pods) {
       const s = snapToHull(pod.position);
       if (s) { pod.position = s.position; pod.normal = s.normal; }
     }
+    if (!design.retro.custom) {
+      autoPlaceRetro();
+      return;
+    }
+    for (const n of design.retro.nozzles) {
+      const s = snapToHull(n.position);
+      if (s) { n.position = s.position; n.normal = s.normal; }
+    }
+  }
+
+  // v84: 逆噴射ノズルの初期配置（重心をはさんだ艦首の左右2か所）を、艦首の表面に置く
+  // （自分で動かしていない間は、重心を動かすとそれに合わせて動く。直径の設定は残す）
+  function autoPlaceRetro() {
+    const nozzles = defaultRetroNozzles(design.hull.dims, design.cog);
+    const old = new Map(design.retro.nozzles.map((n) => [n.id, n]));
+    for (const n of nozzles) {
+      const z = bowSurfaceZ(n.position.x, n.position.y);
+      const s = snapToHull({ x: n.position.x, y: n.position.y, z });
+      n.position = { x: n.position.x, y: n.position.y, z };
+      if (s) n.normal = s.normal;
+      if (old.has(n.id)) n.diameter = old.get(n.id).diameter;
+    }
+    design.retro.nozzles = nozzles;
+    design.retro.custom = false;
+    validateSelection();
+  }
+
+  function nextRetroId() {
+    let n = 1;
+    const used = new Set(design.retro.nozzles.map((x) => x.id));
+    while (used.has(`r${n}`)) n++;
+    return `r${n}`;
   }
 
   // 自動配置: 艦首寄り・艦尾寄りの断面の上下左右（計8基）を船体表面に吸着
@@ -458,8 +535,7 @@
     design.hull.size = size;
     design.hull.dims = sc(design.hull.dims);
     design.cog = sc(design.cog);
-    for (const e of design.mains) e.position = sc(e.position);
-    for (const pod of design.rcs.pods) pod.position = sc(pod.position);
+    scalePartsBy(k);
     const df = core.getDockingFace();
     if (df) core.setDockingFace({ ...df, offsetU: df.offsetU * k, offsetV: df.offsetV * k });
     if ($('sizeScalesSpec').checked) scaleSpecBySize(k);
@@ -473,6 +549,20 @@
     }
     hullVersion++;
     afterShapeChange(true);
+  }
+
+  // 大きさが k 倍になったときの部品の位置・ノズルの直径（直径を自分で決めたものだけ。自動は大きさに合わせて変わる）
+  function scalePartsBy(k) {
+    const sc = (p) => ({ x: p.x * k, y: p.y * k, z: p.z * k });
+    for (const e of design.mains) {
+      e.position = sc(e.position);
+      if (e.diameter > 0) e.diameter *= k;
+    }
+    for (const n of design.retro.nozzles) {
+      n.position = sc(n.position);
+      if (n.diameter > 0) n.diameter *= k;
+    }
+    for (const pod of design.rcs.pods) pod.position = sc(pod.position);
   }
 
   // 大きさが k 倍になったときの性能: 質量は体積に比例、推力は質量に比例
@@ -506,6 +596,7 @@
     // スラスターは新しい箱の表面へ（同じ側に留まるよう比率で移してから吸着）
     const k = design.hull.dims[axis] / Math.max(old, 1e-9);
     for (const pod of design.rcs.pods) pod.position[axis] *= k;
+    for (const n of design.retro.nozzles) n.position[axis] *= k;
     const half = design.hull.dims[axis] / 2;
     for (const e of design.mains) e.position[axis] = clamp(e.position[axis] * k, -half, half);
     hullVersion++;
@@ -600,8 +691,39 @@
     onPhysicsEdit();
   });
 
+  const retroPos = makePosRows($('retroPosRows'), () => {
+    const n = selectedRetro();
+    return n ? n.position : { x: 0, y: 0, z: 0 };
+  }, (v, commit) => {
+    const n = selectedRetro();
+    if (!n) return;
+    n.position = v;
+    design.retro.custom = true;
+    if (commit) snapSurfacePart(n);
+    onPhysicsEdit();
+  }, () => {
+    const n = selectedRetro();
+    if (n) snapSurfacePart(n);
+    onPhysicsEdit();
+  });
+
   function selectedPod() {
     return design && design.rcs.pods.find((p) => p.id === selectedPodId) || null;
+  }
+  function selectedRetro() {
+    return design && design.retro.nozzles.find((n) => n.id === selectedRetroId) || null;
+  }
+  // 船体の表面に置く部品（姿勢スラスター・逆噴射ノズル）
+  function isSurfaceKind(kind) { return kind === 'pod' || kind === 'retro'; }
+  function surfacePart(kind, id) {
+    if (!design) return null;
+    if (kind === 'pod') return design.rcs.pods.find((x) => x.id === id) || null;
+    if (kind === 'retro') return design.retro.nozzles.find((x) => x.id === id) || null;
+    return null;
+  }
+  function snapSurfacePart(part) {
+    const s = snapToHull(part.position);
+    if (s) { part.position = s.position; part.normal = s.normal; }
   }
 
   function findMain(id) {
@@ -680,6 +802,7 @@
     cogPos.sync(1.3);
     $('cogGizmoBtn').classList.toggle('active', !!(active && active.kind === 'cog'));
     renderPodList();
+    renderRetroList();
     schedulePerf();
   }
 
@@ -693,7 +816,7 @@
       chip.type = 'button';
       const on = sel && e.id === sel.id;
       chip.className = `pod-chip main-chip${on ? ' selected' : ''}`;
-      chip.textContent = `${i + 1}. ${mainSideLabel(e)}・${fmtForce(e.thrust)}`;
+      chip.textContent = `${i + 1}. ${mainSideLabel(e)}・${fmtForce(e.thrust)}・Ø${fmtLen(shipDesignNozzleDiameter(design, e, 'main'))}`;
       chip.addEventListener('click', () => {
         // 選んでいるエンジンのチップをもう一度押すとギズモを出し入れ
         if (on && active && active.kind === 'main' && active.id === e.id) setActive(null);
@@ -706,8 +829,55 @@
     if (sel) {
       const i = design.mains.indexOf(sel);
       $('mainEditorTitle').textContent = design.mains.length > 1 ? `${i + 1}基目（${mainSideLabel(sel)}）` : '主エンジン（1基）';
+      syncDiameterField($('mainDiaInput'), $('mainDiaLine'), sel, 'main');
       mainPos.sync(1.5);
     }
+  }
+
+  // v84: ノズルの直径の欄（空欄 = 自動）と、全開のときの噴射の大きさの目安
+  function syncDiameterField(input, line, part, kind) {
+    const auto = shipDesignAutoNozzleDiameter(design, kind);
+    input.placeholder = `自動（${inputValue(auto)}）`;
+    if (document.activeElement !== input) input.value = part.diameter > 0 ? inputValue(part.diameter) : '';
+    const p = shipDesignPlumeEstimate(design, part, kind);
+    line.textContent = `ノズルの口 Ø${fmtLen(p.diameter)}${part.diameter > 0 ? '' : '（自動）'}・全開の噴射は太さ 約${fmtLen(p.width)}、長さ 約${fmtLen(p.length)}（ビューの半透明の炎）`;
+  }
+  function diameterFromInput(input) {
+    const v = Number(input.value);
+    return input.value === '' || !(v > 0) ? null : v;
+  }
+
+  // v84: 逆噴射ノズルの一覧と、選んだノズルの編集欄
+  function renderRetroList() {
+    const list = $('retroList');
+    list.innerHTML = '';
+    design.retro.nozzles.forEach((n, i) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = `pod-chip retro-chip${n.id === selectedRetroId ? ' selected' : ''}`;
+      chip.textContent = `${i + 1}. ${retroSideLabel(n)}・Ø${fmtLen(shipDesignNozzleDiameter(design, n, 'retro'))}`;
+      chip.addEventListener('click', () => setActive(n.id === selectedRetroId ? null : 'retro', n.id));
+      list.appendChild(chip);
+    });
+    const n = selectedRetro();
+    $('retroEditor').style.display = n ? '' : 'none';
+    if (n) {
+      const i = design.retro.nozzles.indexOf(n);
+      $('retroEditorTitle').textContent = `${i + 1}つ目（${retroSideLabel(n)}）`;
+      syncDiameterField($('retroDiaInput'), $('retroDiaLine'), n, 'retro');
+      retroPos.sync(1.6);
+    }
+  }
+
+  // 「艦首・左」のような、前から見た位置の説明
+  function retroSideLabel(n) {
+    const d = design.hull.dims;
+    const tx = d.x * 0.05, ty = d.y * 0.05;
+    const h = n.position.x > tx ? '右' : n.position.x < -tx ? '左' : '';
+    const v = n.position.y > ty ? '上' : n.position.y < -ty ? '下' : '';
+    const zr = n.position.z / Math.max(d.z / 2, 1e-9);
+    const along = zr < -0.5 ? '艦首' : zr > 0.5 ? '艦尾寄り' : '中央';
+    return `${along}・${(h + v) || '中央'}`;
   }
 
   // 「右上」「中央」のような、艦尾から見たエンジンの位置の説明
@@ -756,6 +926,7 @@
   function setActive(kind, id) {
     active = kind ? { kind, id: kind === 'cog' ? null : id } : null;
     selectedPodId = kind === 'pod' ? id : null;
+    selectedRetroId = kind === 'retro' ? id : null;
     if (kind === 'main') selectedMainId = id;
     rebuildMarkers();
     syncUi();
@@ -765,8 +936,9 @@
   function validateSelection() {
     if (!design) return;
     if (selectedPodId && !selectedPod()) selectedPodId = null;
+    if (selectedRetroId && !selectedRetro()) selectedRetroId = null;
     if (!findMain(selectedMainId)) selectedMainId = design.mains.length ? design.mains[0].id : null;
-    if (active && ((active.kind === 'pod' && !design.rcs.pods.some((p) => p.id === active.id))
+    if (active && ((isSurfaceKind(active.kind) && !surfacePart(active.kind, active.id))
       || (active.kind === 'main' && !findMain(active.id)))) active = null;
   }
 
@@ -824,7 +996,7 @@
         `減速（逆噴射）: ${fmtNum(back)} m/s²・横/上下への移動: ${fmtNum(lat)} m/s²`,
         `90°向きを変える時間: ピッチ ${turn(3, I.x)}・ヨー ${turn(4, I.y)}・ロール ${turn(5, I.z)}`,
         `主エンジン全開時: ${balance}`,
-        `噴射口: 主エンジン${nMain}・逆噴射${design.retro.thrust > 0 ? 2 : 0}・姿勢スラスター${pods}基（各5方向）`,
+        `噴射口: 主エンジン${nMain}・逆噴射${design.retro.thrust > 0 ? design.retro.nozzles.length : 0}・姿勢スラスター${pods}基（各5方向）`,
         pods === 0 ? '<span class="warn">姿勢スラスターが無いと向きを変えられません。</span>' : '',
       ].filter(Boolean).join('<br>');
     } catch (e) {
@@ -841,6 +1013,7 @@
   }
 
   function onPhysicsEdit() {
+    if (!design.retro.custom) autoPlaceRetro();
     rebuildMarkers();
     markDirty();
     syncUi();
@@ -919,6 +1092,18 @@
     return h ? Math.min(h.point.z, zMax) : zMax;
   }
 
+  // v84: 艦首の表面のZ（その X・Y の位置で、前から船体に当たるところ）
+  function bowSurfaceZ(x, y) {
+    const zMin = -design.hull.dims.z / 2;
+    const target = core.getModelRoot() || boxHull;
+    if (!target) return zMin;
+    target.updateWorldMatrix(true, true);
+    const rc = new THREE.Raycaster(new THREE.Vector3(x, y, zMin - design.hull.size), new THREE.Vector3(0, 0, 1));
+    const hits = rc.intersectObject(target, true);
+    const h = hits.find((x) => x.object.isMesh && x.face && x.point.z <= zMin + design.hull.dims.z * 0.25);
+    return h ? Math.max(h.point.z, zMin) : zMin;
+  }
+
   function nextMainId() {
     let n = 1;
     const used = new Set(design.mains.map((e) => e.id));
@@ -945,6 +1130,7 @@
       id: nextMainId(),
       position: { x, y, z: base.z },
       thrust: src ? src.thrust : shipDesignAutoSpec(design.baseClass, design.hull.size).mainThrust,
+      diameter: src ? src.diameter : null,
     };
     design.mains.push(e);
     setActive('main', e.id);
@@ -1054,14 +1240,57 @@
   // -----------------------------------------------------------
   // タップ: 姿勢スラスターの配置・選択
   // -----------------------------------------------------------
-  function setPlacing(on) {
-    placing = on;
-    $('rcsPlaceBtn').classList.toggle('active', on);
-    $('rcsPlaceBtn').textContent = on ? '完了' : '＋ 船体をタップして追加';
-    $('placeBanner').style.display = on ? '' : 'none';
+  // kind: 'pod'（姿勢スラスター）| 'retro'（逆噴射ノズル）| null（置くのをやめる）
+  function setPlacing(kind) {
+    placing = kind || null;
+    for (const [btn, k] of [['rcsPlaceBtn', 'pod'], ['retroPlaceBtn', 'retro']]) {
+      $(btn).classList.toggle('active', placing === k);
+      $(btn).textContent = placing === k ? '完了' : '＋ 船体をタップして追加';
+    }
+    $('placeBanner').style.display = placing ? '' : 'none';
+    $('placeBanner').textContent = placing === 'retro'
+      ? '船体をタップして逆噴射ノズルを置きます（終わるときは「完了」）'
+      : '船体をタップして姿勢スラスターを置きます（終わるときは「完了」）';
     placeGizmo();
   }
-  $('rcsPlaceBtn').addEventListener('click', () => setPlacing(!placing));
+  $('rcsPlaceBtn').addEventListener('click', () => setPlacing(placing === 'pod' ? null : 'pod'));
+  $('retroPlaceBtn').addEventListener('click', () => setPlacing(placing === 'retro' ? null : 'retro'));
+
+  // v84: ノズルの直径・逆噴射ノズル
+  $('mainDiaInput').addEventListener('change', () => {
+    const e = selectedMain();
+    if (!e) return;
+    e.diameter = diameterFromInput($('mainDiaInput'));
+    onPhysicsEdit();
+  });
+  $('retroDiaInput').addEventListener('change', () => {
+    const n = selectedRetro();
+    if (!n) return;
+    n.diameter = diameterFromInput($('retroDiaInput'));
+    onPhysicsEdit();
+  });
+  $('retroAutoBtn').addEventListener('click', () => {
+    autoPlaceRetro();
+    onPhysicsEdit();
+    core.setStatus('逆噴射ノズルを、艦首の表面の重心をはさんだ左右2か所に置きました（重心を動かすとそれに合わせて動きます）。');
+  });
+  $('retroSnapBtn').addEventListener('click', () => {
+    const n = selectedRetro();
+    if (!n) return;
+    snapSurfacePart(n);
+    design.retro.custom = true;
+    onPhysicsEdit();
+  });
+  $('retroDeleteBtn').addEventListener('click', () => {
+    design.retro.nozzles = design.retro.nozzles.filter((n) => n.id !== selectedRetroId);
+    design.retro.custom = true;
+    selectedRetroId = null;
+    if (active && active.kind === 'retro') active = null;
+    onPhysicsEdit();
+    core.setStatus(design.retro.nozzles.length
+      ? `逆噴射ノズルを外しました（${design.retro.nozzles.length}つ）。`
+      : '逆噴射ノズルが無くなりました（逆噴射なし。減速は姿勢スラスターだけで行います）。');
+  });
 
   const raycaster = new THREE.Raycaster();
   let tapStart = null;
@@ -1106,15 +1335,24 @@
       if (hit) {
         const part = hit.object.userData.part;
         setActive(part.kind, part.id);
-        const sec = $({ pod: 'rcsSection', main: 'mainSection', cog: 'cogSection' }[part.kind]);
+        const sec = $({ pod: 'rcsSection', main: 'mainSection', cog: 'cogSection', retro: 'retroSection' }[part.kind]);
         if (sec) sec.open = true;
-      } else if (active || selectedPodId) {
+      } else if (active || selectedPodId || selectedRetroId) {
         setActive(null);
       }
       return;
     }
     const s = raycastHullAt(e.clientX, e.clientY);
     if (!s) return;
+    if (placing === 'retro') {
+      const n = { id: nextRetroId(), position: s.position, normal: s.normal, diameter: null };
+      design.retro.nozzles.push(n);
+      design.retro.custom = true;
+      selectedRetroId = n.id;
+      onPhysicsEdit();
+      core.setStatus(`逆噴射ノズルを追加しました（${design.retro.nozzles.length}つ）。推力（合計）はノズルの数で等分します。`);
+      return;
+    }
     const pod = { id: nextPodId(), position: s.position, normal: s.normal };
     design.rcs.pods.push(pod);
     selectedPodId = pod.id;
@@ -1202,7 +1440,7 @@
     if (!active || !design) return null;
     if (active.kind === 'cog') return design.cog;
     if (active.kind === 'main') { const e = findMain(active.id); return e ? e.position : null; }
-    if (active.kind === 'pod') { const pod = design.rcs.pods.find((x) => x.id === active.id); return pod ? pod.position : null; }
+    if (isSurfaceKind(active.kind)) { const part = surfacePart(active.kind, active.id); return part ? part.position : null; }
     return null;
   }
 
@@ -1218,6 +1456,7 @@
       const i = design.mains.findIndex((e) => e.id === id);
       return design.mains.length > 1 ? `主エンジン${i + 1}` : '主エンジン';
     }
+    if (kind === 'retro') return `逆噴射ノズル${design.retro.nozzles.findIndex((n) => n.id === id) + 1}`;
     return `姿勢スラスター${design.rcs.pods.findIndex((p) => p.id === id) + 1}`;
   }
 
@@ -1302,8 +1541,8 @@
       // 視線とほぼ平行な軸は、指の動きから位置が決まらないので動かさない
       d.t0 = Math.abs(d.dir.dot(ray.direction)) < 0.995 ? axisParam(ray, start, d.dir) : null;
     } else {
-      if (d.kind === 'pod') {
-        // 手前に見えている姿勢スラスターは、指の下の船体表面を滑らせる。
+      if (isSurfaceKind(d.kind)) {
+        // 手前に見えている姿勢スラスター・逆噴射ノズルは、指の下の船体表面を滑らせる。
         // つまんだ点と部品の中心の画面上のずれを覚えておく（つかんだ瞬間に飛ばないように）
         const c = toClient(start);
         d.grab = { x: c.x - e.clientX, y: c.y - e.clientY };
@@ -1339,11 +1578,11 @@
       const s = raycastHullAt(d.last.x + d.grab.x, d.last.y + d.grab.y);
       if (s) applyGizmoPosition(d, s.position, s.normal);
       return;
-    } else if (d.kind === 'pod') {
+    } else if (isSurfaceKind(d.kind)) {
       // 船体の陰にある姿勢スラスター: 指の動きを、いまいる点の表面に沿った
       // 向きに直して少しずつ動かし、そのたびに表面へ吸着する（角を回り込める）
       const h = setRayFromClient(d.last.x, d.last.y).intersectPlane(d.plane, new THREE.Vector3());
-      const pod = design.rcs.pods.find((x) => x.id === d.id);
+      const pod = surfacePart(d.kind, d.id);
       if (!h || !d.prevHit || !pod) return;
       const delta = h.clone().sub(d.prevHit);
       d.prevHit = h;
@@ -1363,7 +1602,7 @@
     const ext = d.kind === 'cog' ? 1.3 : d.kind === 'main' ? 1.5 : 1.6;
     const lim = (ax) => Math.max(design.hull.dims[ax] / 2 * ext, design.hull.size * 0.02);
     const q = { x: clamp(p.x, -lim('x'), lim('x')), y: clamp(p.y, -lim('y'), lim('y')), z: clamp(p.z, -lim('z'), lim('z')) };
-    if (d.kind === 'pod') {
+    if (isSurfaceKind(d.kind)) {
       const s = snapToHull(q);
       if (s) applyGizmoPosition(d, s.position, s.normal);
     } else {
@@ -1379,10 +1618,11 @@
       if (!e) return;
       e.position = pos;
     } else {
-      const pod = design.rcs.pods.find((x) => x.id === d.id);
+      const pod = surfacePart(d.kind, d.id);
       if (!pod) return;
       pod.position = pos;
       if (normal) pod.normal = normal;
+      if (d.kind === 'retro') design.retro.custom = true;
     }
     d.moved = true;
     rebuildMarkers();
@@ -1472,9 +1712,7 @@
       refitHullToModel({ native: true });
       const k = design.hull.size / Math.max(oldSize, 1e-9);
       if (Math.abs(k - 1) > 1e-9) {
-        const sc = (p) => ({ x: p.x * k, y: p.y * k, z: p.z * k });
-        for (const e of design.mains) e.position = sc(e.position);
-        for (const pod of design.rcs.pods) pod.position = sc(pod.position);
+        scalePartsBy(k);
         const df = core.getDockingFace();
         if (df) core.setDockingFace({ ...df, offsetU: df.offsetU * k, offsetV: df.offsetV * k });
         if ($('sizeScalesSpec').checked) scaleSpecBySize(k);
@@ -1547,9 +1785,10 @@
   async function openDesign(d, opts) {
     design = normalizeShipDesign(d);
     selectedPodId = null;
+    selectedRetroId = null;
     selectedMainId = design.mains.length ? design.mains[0].id : null;
     active = null;
-    setPlacing(false);
+    setPlacing(null);
     core.removeModel();
     const a = core.adjust;
     a.rotationDeg = { ...design.hull.rotationDeg };
@@ -1612,7 +1851,8 @@
       design.retro.thrust = auto.retroThrust;
       design.rcs.thrust = auto.rcsThrust;
       autoPlacePods();
-      design.mains = [{ id: 'm1', position: { x: 0, y: 0, z: sternSurfaceZ(0, 0) }, thrust: auto.mainThrust }];
+      design.mains = [{ id: 'm1', position: { x: 0, y: 0, z: sternSurfaceZ(0, 0) }, thrust: auto.mainThrust, diameter: null }];
+      autoPlaceRetro();
       selectedMainId = 'm1';
       rebuildMarkers();
       syncUi();
@@ -1763,7 +2003,7 @@
     partClientPoint(kind, id) {
       const p = kind === 'cog' ? design.cog
         : kind === 'main' ? (findMain(id) || {}).position
-          : (design.rcs.pods.find((x) => x.id === id) || {}).position;
+          : (surfacePart(kind, id) || {}).position;
       return p ? toClient(p) : null;
     },
   };
