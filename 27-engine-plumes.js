@@ -8,7 +8,7 @@
 //   rocket   化学ロケット: ノズルから後ろへ広がる炎。根元は白く、外へ・後ろへ行くほど
 //            橙→赤に薄れる。根元の内側に明るい芯（ショックダイヤモンド）が並ぶ。
 //   nuclear  原子力（熱核）ロケット: 形はロケットと同じで少し細く、色は淡い青白。
-//   gravity3 三段圧縮重力場機関: 後ろへ閉じる円錐で、根元近くが少しくびれた炎。
+//   gravity3 三段圧縮重力場機関: 後ろへ行くほど細く、円錐よりシュッと鋭く尖った炎。
 //            その後ろに輪が3本。輪の間隔は後ろほど広く、出力が高いほど全体に広がる。
 //            出力が高いと青白く、低いと黄色い。
 //   gwave    重力波共振機関: 後ろへ閉じる完全な円錐で、とても長い。その周りを
@@ -190,8 +190,8 @@ const EnginePlumes = {
         for (const p of parts) p.mat.uniforms.uTime.value = time;
       };
     } else if (type === 'gravity3') {
-      // 後ろへ閉じる円錐で、根元から少し後ろが細くくびれる
-      const cone = add(this._lathe('g3cone', (z) => 0.5 * Math.pow(1 - z, 0.85) * (1 - 0.28 * Math.exp(-Math.pow((z - 0.22) / 0.1, 2)))),
+      // 後ろへ行くほど細くなり、円錐よりも鋭く尖る（側面が内側へ反った形）
+      const cone = add(this._lathe('g3cone', (z) => 0.5 * Math.pow(1 - z, 2.2)),
         this._material({ a: 0xffffff, b: 0xb8d8ff, c: 0x7fb0ff, fade: 0.63, edge: 1.0, flicker: 0.06 }));
       const rings = [];
       for (let i = 0; i < 3; i++) {
