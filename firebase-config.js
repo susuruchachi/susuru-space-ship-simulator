@@ -17,4 +17,12 @@
 // };
 // =============================================================
 
-window.SHIP_SYNC_FIREBASE_CONFIG = null;
+// v86: このゲーム専用の Firebase プロジェクト（space-ships-a9ee8）。Android アプリも含め、どの端末でも貼り付け不要に
+window.SHIP_SYNC_FIREBASE_CONFIG = {
+  apiKey: 'AIzaSyBuPF-_sP7XnGkw9742r-4HuKE7G-gt95g',
+  authDomain: 'space-ships-a9ee8.firebaseapp.com',
+  projectId: 'space-ships-a9ee8',
+  storageBucket: 'space-ships-a9ee8.firebasestorage.app',
+  messagingSenderId: '707403781164',
+  appId: '1:707403781164:web:87f5d472dfe26ebefd2d89',
+};
