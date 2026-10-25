@@ -132,11 +132,18 @@ const SpaceHud = {
     const groups = [
       ['', [['', '目的地を選択']]],
       ['母港', [['home', '母港（地球周回軌道）']]],
-      ['恒星', SolarSystem.bodies.filter((b) => b.type === 'star').map((b) => [b.id, b.ja])],
-      ['惑星', SolarSystem.bodies.filter((b) => b.type === 'planet').map((b) => [b.id, b.ja])],
+      ['恒星', SolarSystem.bodies.filter((b) => b.type === 'star' && !b.sys).map((b) => [b.id, b.ja])],
+      ['惑星', SolarSystem.bodies.filter((b) => b.type === 'planet' && !b.sys).map((b) => [b.id, b.ja])],
       ['衛星', SolarSystem.bodies.filter((b) => b.type === 'moon').map((b) => [b.id, `${b.ja}（${SolarSystem.byId[b.parent].ja}）`])],
-      ['準惑星・小天体', SolarSystem.bodies.filter((b) => ['dwarf', 'asteroid', 'comet'].includes(b.type)).map((b) => [b.id, b.ja])],
+      ['準惑星・小天体', SolarSystem.bodies.filter((b) => ['dwarf', 'asteroid', 'comet'].includes(b.type) && !b.sys).map((b) => [b.id, b.ja])],
     ];
+    // v88: 系外の星系（恒星と惑星。ハビタブルゾーンの惑星に印）と、銀河のステーション
+    for (const sys of DeepSpace.systems) {
+      const items = SolarSystem.bodies.filter((b) => b.sys === sys.id).map((b) => [b.id,
+        b.type === 'station' ? `🛰 ${b.ja}` : b.type === 'star' ? `${b.ja}（恒星）` : `${b.ja}${b.hz ? '（ハビタブル）' : ''}`]);
+      const dist = sys.distLy >= 1e4 ? `${Math.round(sys.distLy / 1e4).toLocaleString('ja-JP')}万光年` : `${sys.distLy < 100 ? sys.distLy.toFixed(1) : Math.round(sys.distLy).toLocaleString('ja-JP')}光年`;
+      groups.push([sys.kind === 'galaxy' ? `銀河: ${sys.ja}（${dist}）` : `恒星系: ${sys.ja}（${dist}）`, items]);
+    }
     sel.innerHTML = '';
     for (const [label, items] of groups) {
       const parent = label ? document.createElement('optgroup') : sel;
@@ -302,14 +309,26 @@ const SpaceHud = {
       return `${au < 10 ? au.toFixed(3) : au.toFixed(1)} au`;
     }
     const ly = a / Astro.LY;
-    return `${ly < 100 ? ly.toFixed(2) : Math.round(ly).toLocaleString('ja-JP')} 光年`;
+    return `${ly < 100 ? ly.toFixed(2) : this.formatJaNumber(ly)} 光年`;
+  },
+
+  // v88: 大きな数を「万・億・兆」で
+  formatJaNumber(n) {
+    const units = [[1e16, '京'], [1e12, '兆'], [1e8, '億'], [1e4, '万']];
+    for (const [v, u] of units) {
+      if (n >= v) {
+        const x = n / v;
+        return `${x < 10 ? x.toFixed(2) : x < 100 ? x.toFixed(1) : Math.round(x).toLocaleString('ja-JP')}${u}`;
+      }
+    }
+    return Math.round(n).toLocaleString('ja-JP');
   },
 
   formatSpeed(v) {
     if (v < 1000) return `${v.toFixed(1)} m/s`;
     if (v < 0.01 * Astro.C) return `${(v / 1000).toLocaleString('ja-JP', { maximumFractionDigits: v < 1e5 ? 1 : 0 })} km/s`;
     const c = v / Astro.C;
-    return `光速の${c < 10 ? c.toFixed(2) : Math.round(c).toLocaleString('ja-JP')}倍`;
+    return `光速の${c < 10 ? c.toFixed(2) : this.formatJaNumber(c)}倍`;
   },
 
   // v85: RMIS世界の速度単位 IKn（1 IKn = 525 km/s）。重力場機関の艦の速度表示に添える
@@ -353,12 +372,28 @@ const SpaceHud = {
       const dom = info.dominant;
       let loc;
       if (Navigation.isHome()) loc = `母港 ・ 地球 上空 ${this.formatDistance(info.altitude)}`;
-      else if (dom.id !== 'sun' || info.altitude < b.rM * 50) loc = `${b.ja} 上空 ${this.formatDistance(info.altitude)}`;
+      else if (dom.type === 'star' && dom.sys) {
+        // v88: 系外の星系の中
+        const sys = DeepSpace.systems.find((s) => s.id === dom.sys);
+        const near = info.nearest && info.nearest.type !== 'star' && info.nearestDist < 0.05 * Astro.AU ? info.nearest : null;
+        loc = near ? `${near.ja} 上空 ${this.formatDistance(info.nearestDist)}`
+          : sys && sys.kind === 'galaxy' ? `${sys.ja} ・ ${dom.ja}から ${this.formatDistance(SolarSystem.distance(Navigation._shipU, dom))}`
+          : `${dom.ja}星系 ・ 恒星から ${this.formatDistance(SolarSystem.distance(Navigation._shipU, dom))}`;
+      } else if (dom.id !== 'sun' || info.altitude < b.rM * 50) loc = `${b.ja} 上空 ${this.formatDistance(info.altitude)}`;
       else {
-        const sunD = Math.hypot(Navigation._shipU.x, Navigation._shipU.y, Navigation._shipU.z);
+        const sun = SolarSystem.byId.sun;
+        const sunDist = SolarSystem.distance(Navigation._shipU, sun);
+        if (sunDist > 3000 * Astro.AU) {
+          // v88: 太陽系の外
+          const h = SolarSystem.uToHelio(Navigation._shipU);
+          const gc = typeof GalaxyModel !== 'undefined' && GalaxyModel.centerU ? Math.hypot(h.x - GalaxyModel.centerU.x, h.y - GalaxyModel.centerU.y, h.z - GalaxyModel.centerU.z) / KPC_M : 0;
+          loc = gc > 25 ? `銀河間空間 ・ 太陽から ${this.formatDistance(sunDist)}` : `恒星間空間 ・ 太陽から ${this.formatDistance(sunDist)}`;
+        } else {
+        const sunD = sunDist;
         loc = info.nearest && info.nearest.id !== 'sun' && info.nearestDist < 0.2 * Astro.AU
           ? `惑星間空間 ・ ${info.nearest.ja}まで ${this.formatDistance(info.nearestDist)}`
           : `惑星間空間 ・ 太陽から ${this.formatDistance(sunD)}`;
+        }
       }
       this._els.location.textContent = `現在地: ${loc}`;
     }
@@ -448,6 +483,13 @@ const SpaceHud = {
         show = dp < p.soiM * 1.5;
       }
       if (show && (b.type === 'asteroid' || b.type === 'comet') && b.id !== targetId) show = si.dist < 0.3 * Astro.AU;
+      // v88: 系外の天体は、その星系の中にいるとき（恒星・ステーションは目的地のときも）
+      if (show && b.sys && b.id !== targetId) {
+        const host = b.type === 'star' ? b : SolarSystem.byId[b.parent];
+        show = Math.hypot(camU.x - host.pos.x, camU.y - host.pos.y, camU.z - host.pos.z) < host.soiM;
+      }
+      // 太陽系の天体は、太陽系から遠く離れたら出さない
+      if (show && !b.sys && b.id !== targetId) show = SolarSystem.distance(camU, SolarSystem.byId.sun) < 3000 * Astro.AU;
       // 大きく写っている天体（画面の大部分を占める）にはラベルを出さない
       if (show && si.pxRadius > 260) show = false;
       // 手前の天体に隠れている場合は出さない

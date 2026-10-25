@@ -327,6 +327,7 @@ const SUN_FRAG = `
   uniform sampler2D uMap;
   uniform float uHasMap;
   uniform vec3 uCamPos;
+  uniform vec3 uTint;         // v88: 恒星の色（太陽は白）
   varying vec2 vUv;
   varying vec3 vPos;
   varying vec3 vNormal;
@@ -338,7 +339,7 @@ const SUN_FRAG = `
     float limb = 1.0 - 0.62 * (1.0 - mu) - 0.2 * (1.0 - mu) * (1.0 - mu);
     vec3 tex = uHasMap > 0.5 ? texture2D(uMap, vUv).rgb : vec3(1.0, 0.8, 0.5);
     vec3 warm = mix(vec3(1.0, 0.55, 0.25), vec3(1.0, 0.92, 0.75), mu);
-    vec3 col = (0.55 + 0.75 * tex) * warm * limb * 1.15;
+    vec3 col = (0.55 + 0.75 * tex) * warm * limb * 1.15 * uTint;
     gl_FragColor = vec4(min(col, vec3(1.0)), 1.0);
   }
 `;
@@ -400,6 +401,8 @@ const STAR_VERT = `
     if (aDist > 0.0) {
       rel = position * aDist - uObserver;
       float d = max(length(rel), 1e-6);
+      // v88: 観測者のすぐそば（その恒星系の中）にある星表の星は、天体として描くので出さない
+      if (d < 0.03 && uMode < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
       dir = rel / d;
       mag += 5.0 * log(d / aDist) / 2.302585;
     }
@@ -634,6 +637,10 @@ const Universe = {
     this.overlayScene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(60, 1, 1, 1e12);
     this.skyCamera = new THREE.PerspectiveCamera(60, 1, 0.01, 10);
+    // v88: 銀河・星団・星雲（とても遠い）は、近くの天体とは別のカメラ（遠くまで描ける）で、
+    // 星空の次に重ねて描く（操縦中に銀河の外や、ほかの銀河の中から見えるように）
+    this.deepScene = new THREE.Scene();
+    this.deepCamera = new THREE.PerspectiveCamera(60, 1, 1e8, 1e30);
 
     this._sphereGeo = new THREE.SphereGeometry(1, 128, 64);
     this._sphereGeoLow = new THREE.SphereGeometry(1, 48, 24);
@@ -644,7 +651,8 @@ const Universe = {
     this._buildBodyPoints();
     this._buildSunGlow();
     this._buildWarpStreaks();
-    if (typeof GalaxyModel !== 'undefined') GalaxyModel.build(this.scene, (opts && opts.galaxyPoints) || 90000);
+    if (typeof GalaxyModel !== 'undefined') GalaxyModel.build(this.deepScene, (opts && opts.galaxyPoints) || 90000);
+    if (typeof DeepSpaceFx !== 'undefined') DeepSpaceFx.build(this.deepScene);
     this.ready = true;
   },
 
@@ -751,9 +759,24 @@ const Universe = {
     const scale = new THREE.Vector3(b.rM / maxR, b.rpM / maxR, b.rbM / maxR);
     view.maxR = maxR;
 
+    if (b.type === 'station') {
+      // v88: 宇宙ステーション（28-deep-space.js StationModel）
+      view.mesh = StationModel.build(b);
+      view.mat = null;
+      view.isStation = true;
+      group.add(view.mesh);
+      this._views[b.id] = view;
+      return;
+    }
     if (b.type === 'star') {
+      // v88: 系外の恒星は有効温度の色（明るいほうの成分を1にそろえる）
+      const c = b.id === 'sun' ? [1, 1, 1] : b.color;
+      const cm = Math.max(c[0], c[1], c[2]) || 1;
       const mat = new THREE.ShaderMaterial({
-        uniforms: { uMap: { value: null }, uHasMap: { value: 0 }, uCamPos: { value: new THREE.Vector3() }, uScale: { value: scale } },
+        uniforms: {
+          uMap: { value: null }, uHasMap: { value: 0 }, uCamPos: { value: new THREE.Vector3() }, uScale: { value: scale },
+          uTint: { value: new THREE.Vector3(c[0] / cm, c[1] / cm, c[2] / cm).multiplyScalar(b.id === 'sun' ? 1 : 1.25) },
+        },
         vertexShader: PLANET_VERT,
         fragmentShader: SUN_FRAG,
       });
@@ -761,8 +784,8 @@ const Universe = {
       view.mat = mat;
     } else {
       let kind = 0;
-      if (b.id === 'earth') kind = 3;
-      else if (['jupiter', 'saturn', 'uranus', 'neptune'].includes(b.id)) kind = 2;
+      if (b.id === 'earth' || (b.earthLike && b.earthLike.proc)) kind = 3;
+      else if (['jupiter', 'saturn', 'uranus', 'neptune'].includes(b.id) || b.exoKind === 'mini') kind = 2;
       else if (b.atmo) kind = 1;
       const mat = new THREE.ShaderMaterial({
         uniforms: {
@@ -1088,14 +1111,14 @@ const Universe = {
 
   // 点 p（太陽中心の宇宙座標）から見た太陽の見え具合（0〜1、惑星による食を考慮）
   sunVisibilityAt(p, excludeId) {
-    const sun = SolarSystem.byId.sun;
+    const sun = SolarSystem.lightStarAt(p); // v88: その場所でいちばん明るい恒星
     const sx = sun.pos.x - p.x, sy = sun.pos.y - p.y, sz = sun.pos.z - p.z;
     const sd = Math.hypot(sx, sy, sz);
     if (sd < sun.rM) return 1;
     const sunAng = Math.asin(Math.min(1, sun.rM / sd));
     let vis = 1;
     for (const b of SolarSystem.bodies) {
-      if (b.id === 'sun' || b.id === excludeId) continue;
+      if (b.type === 'star' || b.id === excludeId) continue;
       const cx = b.pos.x - p.x, cy = b.pos.y - p.y, cz = b.pos.z - p.z;
       const cd = Math.hypot(cx, cy, cz);
       if (cd >= sd || cd < b.rM) continue;
@@ -1140,13 +1163,22 @@ const Universe = {
     this.skyCamera.updateMatrixWorld(true);
 
     const camU = this.cameraUniversePos();
-    const sun = SolarSystem.byId.sun;
+    // v88: 宇宙座標の原点は艦のいる星系に付け替わる。星表・銀河は太陽中心の座標で持っている
+    const camHelio = SolarSystem.uToHelio(camU);
+    // カメラの位置でいちばん明るい恒星（太陽系の中なら太陽）。光芒・まぶしさの基準
+    const sun = SolarSystem.lightStarAt(camU);
+    this._lightStar = sun;
+    this.deepCamera.fov = v.fov;
+    this.deepCamera.aspect = v.aspect;
+    this.deepCamera.quaternion.copy(v.quat);
+    this.deepCamera.updateProjectionMatrix();
+    this.deepCamera.updateMatrixWorld(true);
     const tanHalf = Math.tan((v.fov * Math.PI) / 360);
     // 画面中心付近での1ラジアンあたりの「デバイス」ピクセル数（描画の細かさの判断に使う）
     const pxPerRad = ((viewportH * pixelRatio) / 2) / tanHalf;
 
     // 星空（観測者の位置: 太陽から何pc離れているか）
-    const obsPc = v.observerPc || { x: camU.x / Astro.PC, y: camU.y / Astro.PC, z: camU.z / Astro.PC };
+    const obsPc = v.observerPc || { x: camHelio.x / Astro.PC, y: camHelio.y / Astro.PC, z: camHelio.z / Astro.PC };
     const su = this._starPoints.material.uniforms;
     su.uObserver.value.set(obsPc.x, obsPc.y, obsPc.z);
     su.uPixelRatio.value = pixelRatio;
@@ -1166,8 +1198,8 @@ const Universe = {
     su.uMagOffset.value = exposure + Math.log10(this.settings.starBrightness) * 2.5;
     this._milkyWay.material.uniforms.uIntensity.value = this.settings.milkyWayIntensity * (1 - 0.8 * glare);
 
-    // 太陽光の強さ（距離に応じて弱まるが、見やすさのため圧縮）
-    const sunDistAU = sunDist / Astro.AU;
+    // 太陽光の強さ（距離に応じて弱まるが、見やすさのため圧縮）。v88: 恒星の光度も考える
+    const sunDistAU = sunDist / Astro.AU / Math.sqrt(sun.lum ?? 1);
     const sunIntensityAtCam = Math.max(0.35, Math.min(1.6, Math.pow(1 / Math.max(sunDistAU, 0.05), 0.35)));
 
     // 天体ごと
@@ -1242,13 +1274,14 @@ const Universe = {
 
       // メッシュとして描くか、光点として描くか
       const meshAlpha = Math.max(0, Math.min(1, (pxR - 1.2) / 2.5));
-      // 太陽は光点ではなく光芒（_sunGlow）で表す
-      const pointAlpha = b.type === 'star' ? 0 : Math.max(0, Math.min(1, (4.0 - pxR) / 2.5));
+      // 太陽は光点ではなく光芒（_sunGlow）で表す。v88: 光芒はいちばん明るい恒星だけ。ほかの恒星は光点
+      const pointAlpha = b === sun ? 0 : Math.max(0, Math.min(1, (4.0 - pxR) / 2.5));
       const showMesh = meshAlpha > 0 && d < far * 0.9;
       view.group.visible = showMesh;
 
-      // 太陽の方向（この天体から見て）と、太陽光の強さ
-      const sdx = sun.pos.x - b.pos.x, sdy = sun.pos.y - b.pos.y, sdz = sun.pos.z - b.pos.z;
+      // 太陽の方向（この天体から見て）と、太陽光の強さ。v88: その天体を照らす恒星（系外の惑星はその恒星）
+      const ls = SolarSystem.lightOf(b);
+      const sdx = ls.pos.x - b.pos.x, sdy = ls.pos.y - b.pos.y, sdz = ls.pos.z - b.pos.z;
       const sdist = Math.hypot(sdx, sdy, sdz) || 1;
 
       if (showMesh) {
@@ -1264,11 +1297,13 @@ const Universe = {
       posAttr.setXYZ(i, rel.x * invD, rel.y * invD, rel.z * invD);
       let mag;
       if (b.type === 'star') {
-        mag = Astro.SUN_V_AT_1AU + 5 * Math.log10(Math.max(d, 1) / Astro.AU);
+        // v88: 系外の恒星は、地球から見た等級と距離から
+        mag = b.id === 'sun' ? Astro.SUN_V_AT_1AU + 5 * Math.log10(Math.max(d, 1) / Astro.AU)
+          : b.vMag + 5 * Math.log10(Math.max(d, 1) / (b.distPc * Astro.PC));
       } else {
-        const phaseCos = ((sun.pos.x - b.pos.x) * -rel.x + (sun.pos.y - b.pos.y) * -rel.y + (sun.pos.z - b.pos.z) * -rel.z) / (sdist * Math.max(d, 1));
+        const phaseCos = (sdx * -rel.x + sdy * -rel.y + sdz * -rel.z) / (sdist * Math.max(d, 1));
         const alpha = Math.acos(Math.max(-1, Math.min(1, phaseCos)));
-        mag = Astro.apparentMagnitude(b.meanRadiusM, Math.min(1, b.albedo), sdist, Math.max(d, 1), alpha);
+        mag = Astro.apparentMagnitude(b.meanRadiusM, Math.min(1, b.albedo), sdist, Math.max(d, 1), alpha) - 2.5 * Math.log10(ls.lum ?? 1);
         if (b.rings && b.id === 'saturn') mag -= 0.8; // 環の明るさ
       }
       let alphaOut = pointAlpha;
@@ -1281,7 +1316,7 @@ const Universe = {
       magAttr.setX(i, mag);
       colAttr.setXYZ(i, b.color[0], b.color[1], b.color[2]);
       alphaAttr.setX(i, alphaOut);
-      if (b.id === 'sun') this._updateSunGlow(rel, d, angR, pxR / pixelRatio, sunVis, viewportW * pixelRatio, viewportH * pixelRatio, pixelRatio);
+      if (b === sun) this._updateSunGlow(rel, d, angR, pxR / pixelRatio, sunVis, viewportW * pixelRatio, viewportH * pixelRatio, pixelRatio, b);
     }
     // 手前の天体の円盤に隠れている光点は消す（深度テストの代わり）
     for (let i = 0; i < bodies.length; i++) {
@@ -1311,14 +1346,19 @@ const Universe = {
     this._sunIntensityAtCam = sunIntensityAtCam;
 
     // 太陽系から遠く離れたときの表示切り替え（星図の大縮尺表示）
-    const camDistSun = Math.hypot(camU.x, camU.y, camU.z);
+    const camDistSun = Math.hypot(camHelio.x, camHelio.y, camHelio.z);
     const ly = camDistSun / Astro.LY;
-    // 天球（天の川の写真・星表の星）は太陽の近くから見た姿なので、遠ざかったら消す
-    const skyFade = 1 - Math.max(0, Math.min(1, (Math.log10(Math.max(ly, 1e-9)) - Math.log10(30)) / (Math.log10(800) - Math.log10(30))));
-    this._milkyWay.visible = skyFade > 0.01;
+    // 天球（天の川の写真・星表の星）は太陽の近くから見た姿なので、遠ざかったら消す。
+    // v88: 恒星間の航行のため、星表の星（実際の3D位置で描く）は数千光年まで、天の川の写真は
+    // 遠くの天の川の見え方があまり変わらない千光年ほどまで残す
+    const fadeLog = (lo, hi) => 1 - Math.max(0, Math.min(1, (Math.log10(Math.max(ly, 1e-9)) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo))));
+    const mwFade = this._mapMode ? fadeLog(30, 800) : fadeLog(400, 3000);
+    const skyFade = this._mapMode ? mwFade : fadeLog(3000, 30000);
+    this._milkyWay.visible = mwFade > 0.01;
     // 星図で小惑星帯などを表示しているときは、点と紛れないよう背景の星空を暗くする
-    const skyK = skyFade * (this._mapMode ? this._mapSkyDim : 1);
-    this._milkyWay.material.uniforms.uIntensity.value *= skyK;
+    const dim = this._mapMode ? this._mapSkyDim : 1;
+    const skyK = skyFade * dim;
+    this._milkyWay.material.uniforms.uIntensity.value *= mwFade * dim;
     this._starPoints.visible = skyFade > 0.01;
     su.uMagOffset.value += skyK < 1 ? 2.5 * Math.log10(Math.max(skyK, 1e-3)) : 0;
     // 星図: 3Dの恒星（0.05光年〜数千光年の範囲で表示）
@@ -1327,7 +1367,7 @@ const Universe = {
     s3.visible = show3d;
     if (show3d) {
       const u3 = s3.material.uniforms;
-      u3.uObserver.value.set(camU.x / Astro.PC, camU.y / Astro.PC, camU.z / Astro.PC);
+      u3.uObserver.value.set(camHelio.x / Astro.PC, camHelio.y / Astro.PC, camHelio.z / Astro.PC);
       u3.uPixelRatio.value = pixelRatio;
       const fade3 = Math.min(1, (ly - 0.02) / 0.3) * (1 - Math.max(0, Math.min(1, (ly - 4000) / 20000)));
       u3.uMagOffset.value = 2.5 * Math.log10(Math.max(fade3, 1e-3)) + 1.0;
@@ -1336,8 +1376,31 @@ const Universe = {
     }
     // 星図: 銀河系モデル（数千光年より遠くから見るとき）
     if (typeof GalaxyModel !== 'undefined') {
-      const gv = this._mapMode ? Math.max(0, Math.min(1, (Math.log10(Math.max(ly, 1)) - Math.log10(1500)) / (Math.log10(12000) - Math.log10(1500)))) : 0;
-      GalaxyModel.update(camU, (viewportH * pixelRatio / 2) / tanHalf, gv);
+      let gv = this._mapMode ? Math.max(0, Math.min(1, (Math.log10(Math.max(ly, 1)) - Math.log10(1500)) / (Math.log10(12000) - Math.log10(1500)))) : 0;
+      // v88: 操縦中も、銀河系の外（銀河中心から 20 kpc より遠く）では銀河を描く（ほかの銀河の中では、
+      // 近くの点は消えて遠くの点だけ残るので、その銀河の帯のように見える）
+      if (!this._mapMode && GalaxyModel.centerU) {
+        const c = GalaxyModel.centerU;
+        const dGc = Math.hypot(camHelio.x - c.x, camHelio.y - c.y, camHelio.z - c.z) / KPC_M;
+        gv = Math.max(gv, Math.max(0, Math.min(1, (dGc - 20) / 15)));
+      }
+      GalaxyModel.update(camHelio, (viewportH * pixelRatio / 2) / tanHalf, gv);
+    }
+    if (typeof DeepSpaceFx !== 'undefined') DeepSpaceFx.update(camHelio, (viewportH * pixelRatio / 2) / tanHalf);
+    // v88: 遠景のカメラの近い面・遠い面: 星雲・銀河中心の光（板）の距離を挟む（点は奥行きを使わない）
+    {
+      let dMin = Infinity, dMax = 0;
+      const span = (g, r) => {
+        if (!g || !g.visible) return;
+        const d = Math.hypot(g.position.x, g.position.y, g.position.z);
+        dMin = Math.min(dMin, Math.max(0, d - r)); dMax = Math.max(dMax, d + r);
+      };
+      if (typeof GalaxyModel !== 'undefined' && GalaxyModel.group) span(GalaxyModel.group, 20 * KPC_M);
+      if (typeof DeepSpaceFx !== 'undefined') for (const it of DeepSpaceFx._items) span(it.group, it.unitM * 2);
+      const dc = this.deepCamera;
+      dc.near = Number.isFinite(dMin) ? Math.max(1e8, dMin * 0.5) : 1e8;
+      dc.far = Math.max(dc.near * 10, dMax * 2, 1e12);
+      dc.updateProjectionMatrix();
     }
   },
 
@@ -1352,14 +1415,30 @@ const Universe = {
     const maxR = view.maxR;
     const sunL = toLocal(sx, sy, sz);
     const camL = toLocal(-rel.x / maxR, -rel.y / maxR, -rel.z / maxR);
-    const sun = SolarSystem.byId.sun;
+    // v88: その天体を照らす恒星（系外の惑星はその恒星。光度も考える）
+    const sun = SolarSystem.lightOf(b);
     const sunAng = Math.asin(Math.min(1, sun.rM / sdist));
-    const sunI = Math.max(0.35, Math.min(1.6, Math.pow(Astro.AU / Math.max(sdist, 0.05 * Astro.AU), 0.35)));
+    const sunI = Math.max(0.35, Math.min(1.6, Math.pow((Astro.AU * Math.sqrt(sun.lum ?? 1)) / Math.max(sdist, 0.05 * Astro.AU), 0.35)));
+    if (view.isStation) {
+      StationModel.update(view.mesh, new THREE.Vector3(sx, sy, sz), sunI, performance.now() / 1000);
+      return;
+    }
 
     // テクスチャの解像度: 画面上の直径に応じて
     const diamPx = pxR * 2;
     const wanted = diamPx > 1100 ? '4k' : diamPx > 350 ? '2k' : '1k';
     const u = view.mat.uniforms;
+    // v88: 系外の惑星の表面（28-deep-space.js ExoTextures。最初に大きく写ったときに作る）
+    if (b.proc && pxR > 6) {
+      const size = diamPx > 700 ? 1024 : 512;
+      if (!view.proc || (view.procSize < size)) {
+        view.proc = ExoTextures.get(b, size);
+        view.procSize = size;
+        u.uMap.value = view.proc.day; u.uHasMap.value = 1;
+        if (view.proc.night) { u.uNight.value = view.proc.night; u.uHasNight.value = 1; }
+        if (view.proc.ocean) { u.uOcean.value = view.proc.ocean; u.uHasOcean.value = 1; }
+      }
+    }
     if (b.tex) {
       const tex = TextureLOD.best(b.tex, b.texLevels, wanted);
       if (tex && u.uMap.value !== tex) {
@@ -1375,7 +1454,17 @@ const Universe = {
     u.uSunAng.value = sunAng;
     u.uSunIntensity.value = sunI;
 
-    if (b.earthLike) {
+    if (b.earthLike && b.earthLike.proc) {
+      if (view.clouds) {
+        const cu = view.clouds.material.uniforms;
+        if (view.proc && view.proc.clouds) cu.uClouds.value = view.proc.clouds;
+        view.clouds.visible = !!(view.proc && view.proc.clouds);
+        cu.uSunDir.value.set(sunL.x, sunL.y, sunL.z);
+        cu.uSunAng.value = sunAng;
+        cu.uSunIntensity.value = sunI;
+        cu.uCamPos.value.set(camL.x, camL.y, camL.z);
+      }
+    } else if (b.earthLike) {
       const el = b.earthLike;
       const night = TextureLOD.best(el.night, el.nightLevels, wanted);
       if (night) { u.uNight.value = night; u.uHasNight.value = 1; }
@@ -1419,6 +1508,7 @@ const Universe = {
     if (parent) for (const s of parent.children) if (s !== b) candidates.push(s);
     const maxR = this._views[b.id].maxR;
     for (const c of candidates) {
+      if (c.type === 'star' || c.type === 'station') continue; // v88: 系外の惑星の親は恒星（光源）
       const dx = c.pos.x - b.pos.x, dy = c.pos.y - b.pos.y, dz = c.pos.z - b.pos.z;
       const along = dx * sx + dy * sy + dz * sz;
       if (along <= 0) continue; // 太陽と反対側にあれば影にはならない
@@ -1440,14 +1530,19 @@ const Universe = {
     if (view.clouds) apply(view.clouds.material.uniforms);
   },
 
-  _updateSunGlow(rel, d, angR, pxR, sunVis, vw, vh, pixelRatio) {
+  _updateSunGlow(rel, d, angR, pxR, sunVis, vw, vh, pixelRatio, star) {
     const g = this._sunGlow;
     // 天球用カメラで描くので、太陽の方向の単位ベクトル上に置く
     const k = 1 / Math.max(d, 1e-9);
     g.position.set(rel.x * k, rel.y * k, rel.z * k);
     const u = g.material.uniforms;
+    // v88: 系外の恒星の光芒は、その星の色・明るさで
+    if (star && star.id !== 'sun') {
+      const c = star.color, cm = Math.max(c[0], c[1], c[2]) || 1;
+      u.uColor.value.setRGB(0.35 + 0.65 * c[0] / cm, 0.35 + 0.65 * c[1] / cm, 0.35 + 0.65 * c[2] / cm);
+    } else u.uColor.value.setRGB(1.0, 0.92, 0.8);
     // 遠くの太陽ほど小さく暗く、ただし最低限の大きさは保つ
-    const distAU = d / Astro.AU;
+    const distAU = d / Astro.AU / Math.sqrt((star && star.lum) ?? 1);
     let sizeCss = Math.max(Math.max(90, Math.min(900, 520 / Math.pow(Math.max(distAU, 0.02), 0.45))), pxR * 7);
     if (this._mapMode) sizeCss = Math.max(40, sizeCss * 0.35); // 星図では控えめに
     u.uSizePx.value = sizeCss * pixelRatio;
@@ -1465,7 +1560,7 @@ const Universe = {
   // 軌道線
   // -----------------------------------------------------------
   _orbitParent(b) {
-    if (b.orbit.kind === 'origin') return null;
+    if (b.orbit.kind === 'origin' || b.orbit.kind === 'fixed') return null;
     if (b.parent) return SolarSystem.byId[b.parent];
     return SolarSystem.byId.sun;
   },
@@ -1499,6 +1594,7 @@ const Universe = {
     else if (b.orbit.kind === 'moon') period = 27.3217;
     else if (b.orbit.kind === 'pluto') period = 90560;
     else if (b.orbit.kind === 'osculating') period = 360 / b.orbit.el.n;
+    else if (b.orbit.kind === 'exo') period = b.orbit.pDays;
     else period = 360 / Math.abs(b.orbit.fit.n);
     const sample = (t) => {
       switch (b.orbit.kind) {
@@ -1522,6 +1618,7 @@ const Universe = {
           const p = Astro.osculatingHelioEcl(b.orbit.el, t);
           return { x: p.x * Astro.AU, y: p.y * Astro.AU, z: p.z * Astro.AU };
         }
+        case 'exo': return Astro.threeToEcl(DeepSpace.exoRel(b, t));
         default: {
           const p = Astro.fittedSatelliteEclKm(b.orbit.fit, t);
           return { x: p.x * 1000, y: p.y * 1000, z: p.z * 1000 };
@@ -1571,6 +1668,11 @@ const Universe = {
         visible = dp < Math.max(parent.soiM * 2, (b.orbitRadiusM || 1e9) * 30);
       }
       if (visible && this._mapMode && this._mapVisibleFilter) visible = this._mapVisibleFilter(b);
+      // v88: 系外の星系の軌道は、その星系の近くにいるときだけ
+      if (visible && b.sys) {
+        const dp = Math.hypot(camU.x - parent.pos.x, camU.y - parent.pos.y, camU.z - parent.pos.z);
+        visible = dp < (parent.soiM || 1e15);
+      }
       if (!visible) {
         if (entry) entry.line.visible = false;
         continue;
@@ -1600,7 +1702,7 @@ const Universe = {
   // -----------------------------------------------------------
   updateLocalLights(frameRotT, shipU, shipLocalPos) {
     if (!this._localLights) return;
-    const sun = SolarSystem.byId.sun;
+    const sun = SolarSystem.lightStarAt(shipU); // v88: 艦を照らすのは、その場所でいちばん明るい恒星
     const dx = sun.pos.x - shipU.x, dy = sun.pos.y - shipU.y, dz = sun.pos.z - shipU.z;
     const dist = Math.hypot(dx, dy, dz) || 1;
     const vis = this.sunVisibilityAt(shipU, null);
@@ -1614,7 +1716,7 @@ const Universe = {
     const sp = shipLocalPos || { x: 0, y: 0, z: 0 };
     L.sun.target.position.set(sp.x, sp.y, sp.z);
     L.sun.position.set(sp.x + sl.x * 1000, sp.y + sl.y * 1000, sp.z + sl.z * 1000);
-    const distAU = dist / Astro.AU;
+    const distAU = dist / Astro.AU / Math.sqrt(sun.lum ?? 1);
     L.sun.intensity = 1.35 * vis * Math.max(0.35, Math.min(1.5, Math.pow(1 / Math.max(distAU, 0.05), 0.35)));
     this.localSunDir = sl;
     this.localSunVisibility = vis;
@@ -1622,7 +1724,7 @@ const Universe = {
     // 惑星光: 見かけの立体角が最大の天体（太陽以外）からの反射光
     let best = null, bestScore = 0;
     for (const b of SolarSystem.bodies) {
-      if (b.type === 'star') continue;
+      if (b.type === 'star' || b.type === 'station') continue;
       const bx = b.pos.x - shipU.x, by = b.pos.y - shipU.y, bz = b.pos.z - shipU.z;
       const bd = Math.hypot(bx, by, bz);
       if (bd <= b.rM) continue;
@@ -1652,6 +1754,7 @@ const Universe = {
   render(renderer) {
     if (!this.ready || !this._view) return;
     renderer.render(this.skyScene, this.skyCamera);
+    renderer.render(this.deepScene, this.deepCamera); // v88: 銀河・星団・星雲
     renderer.clearDepth();
     renderer.render(this.scene, this.camera);
     renderer.render(this.overlayScene, this.skyCamera);

@@ -299,6 +299,10 @@ const SolarSystem = {
   bodies: [],   // 定義 + 実行時状態（pos, quat など）
   byId: {},
   jd: 0,
+  // v88: 宇宙座標の原点（太陽中心の座標）。艦のいる星系の恒星に付け替える（28-deep-space.js）。
+  // pos はすべて「太陽中心の座標 − origin」。太陽の pos は −origin になる
+  origin: { x: 0, y: 0, z: 0 },
+  _originListeners: [],
 
   init() {
     this.bodies = SOLAR_BODIES.map((def) => ({
@@ -339,8 +343,10 @@ const SolarSystem = {
       else if (b.orbit.kind === 'moon') aM = 384400e3;
       else if (b.orbit.kind === 'pluto') aM = Astro.PLANET_ELEMENTS.pluto.el[0] * Astro.AU;
       else if (b.orbit.kind === 'osculating') aM = b.orbit.el.a * Astro.AU;
+      else if (b.orbit.kind === 'fixed') { b.soiM = b.systemRadiusM || 1e15; b.orbitRadiusM = 0; continue; } // v88: 系外の恒星
+      else if (b.orbit.kind === 'exo') aM = b.orbit.aAU * Astro.AU;
       else aM = b.orbit.fit.a * 1000;
-      b.soiM = aM * Math.pow(b.gm / parent.gm, 0.4);
+      b.soiM = b.soiFixedM || aM * Math.pow(b.gm / parent.gm, 0.4); // v88: ステーションは決めた値
       b.orbitRadiusM = aM;
     }
   },
@@ -425,12 +431,55 @@ const SolarSystem = {
       };
     }
 
-    // 宇宙座標へ変換し、姿勢を計算
+    // 宇宙座標へ変換し、姿勢を計算（v88: 原点を引く。系外の恒星は太陽中心の位置から、
+    // その惑星・ステーションは恒星の位置から求める。原点がその恒星なら誤差なく 0 から積み上がる）
+    const O = this.origin;
     for (const b of this.bodies) {
-      const p = toThreeM(b.eclM, 1);
-      b.pos.x = p.x; b.pos.y = p.y; b.pos.z = p.z;
-      this._updateOrientation(b, jd);
+      const k = b.orbit.kind;
+      if (k === 'fixed') {
+        b.pos.x = b.orbit.helio.x - O.x; b.pos.y = b.orbit.helio.y - O.y; b.pos.z = b.orbit.helio.z - O.z;
+      } else if (k !== 'exo') {
+        const p = toThreeM(b.eclM, 1);
+        b.pos.x = p.x - O.x; b.pos.y = p.y - O.y; b.pos.z = p.z - O.z;
+      }
     }
+    for (const b of this.bodies) {
+      if (b.orbit.kind !== 'exo') continue;
+      const h = byId[b.parent];
+      const r = DeepSpace.exoRel(b, jd);
+      b.pos.x = h.pos.x + r.x; b.pos.y = h.pos.y + r.y; b.pos.z = h.pos.z + r.z;
+      b.relEcl = Astro.threeToEcl(r);
+    }
+    for (const b of this.bodies) this._updateOrientation(b, jd);
+  },
+
+  // v88: 宇宙座標の原点を付け替える（太陽中心の座標）。登録した関数に、ずれ（新 − 旧）を知らせる
+  setOrigin(o) {
+    const d = { x: o.x - this.origin.x, y: o.y - this.origin.y, z: o.z - this.origin.z };
+    if (d.x === 0 && d.y === 0 && d.z === 0) return;
+    this.origin = { x: o.x, y: o.y, z: o.z };
+    this.update(this.jd);
+    for (const fn of this._originListeners) fn(d);
+  },
+  onOriginShift(fn) { this._originListeners.push(fn); },
+  // 太陽中心の座標 ⇔ 宇宙座標
+  helioToU(p) { return { x: p.x - this.origin.x, y: p.y - this.origin.y, z: p.z - this.origin.z }; },
+  uToHelio(p) { return { x: p.x + this.origin.x, y: p.y + this.origin.y, z: p.z + this.origin.z }; },
+
+  // v88: 天体 b を照らす恒星（太陽系の天体は太陽）
+  lightOf(b) {
+    return this.byId[b.host || (b.type === 'star' ? b.id : 'sun')] || this.byId.sun;
+  },
+  // 点 p（宇宙座標）でいちばん明るい恒星（光度 / 距離^2 が最大）
+  lightStarAt(p) {
+    let best = this.byId.sun, bestF = -1;
+    for (const b of this.bodies) {
+      if (b.type !== 'star') continue;
+      const d2 = (p.x - b.pos.x) ** 2 + (p.y - b.pos.y) ** 2 + (p.z - b.pos.z) ** 2;
+      const f = (b.lum ?? 1) / Math.max(d2, 1);
+      if (f > bestF) { bestF = f; best = b; }
+    }
+    return best;
   },
 
   _updateOrientation(b, jd) {
@@ -460,10 +509,12 @@ const SolarSystem = {
     const r = b.relEcl;
     if (!r) return null;
     // 公転面の法線（少し先の時刻との外積）
-    const periodDays = b.orbit.fit ? 360 / Math.abs(b.orbit.fit.n) : 27.32;
+    const periodDays = b.orbit.fit ? 360 / Math.abs(b.orbit.fit.n) : b.orbit.pDays || 27.32;
     const dt = Math.max(1e-5, periodDays * 0.002);
     let r2;
-    if (b.orbit.kind === 'moon') {
+    if (b.orbit.kind === 'exo') {
+      r2 = Astro.threeToEcl(DeepSpace.exoRel(b, jd + dt));
+    } else if (b.orbit.kind === 'moon') {
       const m = Astro.moonGeoEclKm(jd + dt);
       r2 = { x: m.x * 1000, y: m.y * 1000, z: m.z * 1000 };
     } else {

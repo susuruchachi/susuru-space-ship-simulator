@@ -212,13 +212,15 @@ const SmallBodies = {
   // 群の名前を出す位置（宇宙座標）
   regionUniverse(r) {
     const b = SolarSystem.byId[r.ref];
+    const sun = SolarSystem.byId.sun; // v88: 原点が太陽とは限らない
+    const bx = b.pos.x - sun.pos.x, bz = b.pos.z - sun.pos.z;
     const th = (r.dLon * Math.PI) / 180;
     const c = Math.cos(th), s = Math.sin(th);
     // 黄道の北極（宇宙座標の+Y）まわりに黄経を dLon 度進める
-    const x = b.pos.x * c + b.pos.z * s;
-    const z = -b.pos.x * s + b.pos.z * c;
+    const x = bx * c + bz * s;
+    const z = -bx * s + bz * c;
     const len = Math.hypot(x, z) || 1;
     const R = r.rAU ? r.rAU * Astro.AU : len;
-    return { x: (x / len) * R, y: 0, z: (z / len) * R };
+    return { x: sun.pos.x + (x / len) * R, y: sun.pos.y, z: sun.pos.z + (z / len) * R };
   },
 };

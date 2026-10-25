@@ -32,6 +32,9 @@ const Navigation = {
   WARP_K_TARGET: 1.4,            // 自動航行時の目的地までの距離による上限 [1/s]
   WARP_MIN_SPEED: 1000,          // スロットル0%付近の速度 [m/s]
   WARP_MAX_SPEED: 2000 * 299792458, // 太陽系内での最高速（光速の2000倍）
+  // v88: 星系の外（恒星間・銀河間）では、いちばん近い恒星までの距離 × WARP_K_STAR まで速くできる（上限 WARP_DEEP_MAX）
+  WARP_DEEP_MAX: 1e13 * 299792458,
+  WARP_K_STAR: 1.0,
   WARP_ACCEL_DECADES: 1.8,       // 1秒あたりに速度が何桁上がるか
   WARP_DECEL_DECADES: 3.0,
   // v83: 自動航行の到着（この距離・速さまで減速してからワープを抜ける）
@@ -61,6 +64,7 @@ const Navigation = {
 
   init() {
     SolarSystem.update(SimClock.jd);
+    SolarSystem.onOriginShift((d) => this._onOriginShift(d));
     this.homeFrame = this._computeHomeFrame();
     this.frame = this._cloneFrame(this.homeFrame);
   },
@@ -233,6 +237,24 @@ const Navigation = {
   bodyVelocity(id) {
     return this._bodyVel[id] || { x: 0, y: 0, z: 0 };
   },
+  // v88: 原点を付け替えたら、前の時刻の位置も同じだけずらす（速度が跳ねないように）
+  _onOriginShift(d) {
+    if (!this._prevBodyPos) return;
+    for (const id in this._prevBodyPos) {
+      const p = this._prevBodyPos[id];
+      p.x -= d.x; p.y -= d.y; p.z -= d.z;
+    }
+  },
+  // v88: 点 p（宇宙座標）でのワープの最高速: 星系の中は WARP_MAX_SPEED、外はいちばん近い恒星までの距離に比例
+  warpMaxAt(p) {
+    let dStar = Infinity;
+    for (const b of SolarSystem.bodies) {
+      if (b.type !== 'star') continue;
+      const d = Math.hypot(p.x - b.pos.x, p.y - b.pos.y, p.z - b.pos.z);
+      if (d < dStar) dStar = d;
+    }
+    return Math.max(this.WARP_MAX_SPEED, Math.min(this.WARP_DEEP_MAX, dStar * this.WARP_K_STAR));
+  },
 
   // フレームの中の点 pLocal が宇宙座標で動く速度
   _framePointVelocity(f, pLocal) {
@@ -304,7 +326,7 @@ const Navigation = {
 
   // body を回る主天体（衛星なら親の惑星、惑星などは太陽）
   lagrangePrimary(b) {
-    if (!b || b.type === 'star') return null;
+    if (!b || b.type === 'star' || b.type === 'station') return null;
     return b.parent && SolarSystem.byId[b.parent] ? SolarSystem.byId[b.parent] : SolarSystem.byId.sun;
   },
 
@@ -322,6 +344,13 @@ const Navigation = {
 
   // 毎フレーム（SolarSystem.update の後、艦の物理の前）
   updateFrames() {
+    // v88: 宇宙座標の原点を、艦のいちばん近くの星系（または太陽）に付け替える（28-deep-space.js）
+    if (typeof DeepSpace !== 'undefined' && this.frame) {
+      const h = SolarSystem.uToHelio(this.shipUniverse());
+      const o = DeepSpace.originFor(h);
+      const O = SolarSystem.origin;
+      if (o.x !== O.x || o.y !== O.y || o.z !== O.z) SolarSystem.setOrigin(o);
+    }
     this._updateBodyVelocities();
     this._applyHomeOrbit(this.homeFrame);
     if (this.frame.orbit) this._applyHomeOrbit(this.frame);
@@ -519,14 +548,14 @@ const Navigation = {
       return { point: p, center: b.pos, arrivalDist: 0, body: b, lagrange: spec, velocity: this._lagrangePoint(spec, true) };
     }
     const shipU = this._shipU;
-    const sun = SolarSystem.byId.sun;
+    const sun = SolarSystem.lightOf(b); // v88: 系外の天体はその恒星の側から
     // v85: 軌道に乗せる高度（指定が無ければ、天体全体が画面に収まる距離）
     const arrivalDist = this.orbitRadius(b);
     // 到着方向: 艦のいる側と太陽の側の中間（昼側が見えるように）
     let dx = shipU.x - b.pos.x, dy = shipU.y - b.pos.y, dz = shipU.z - b.pos.z;
     let dl = Math.hypot(dx, dy, dz) || 1;
     dx /= dl; dy /= dl; dz /= dl;
-    if (b.id !== 'sun') {
+    if (b.type !== 'star') {
       let sx = sun.pos.x - b.pos.x, sy = sun.pos.y - b.pos.y, sz = sun.pos.z - b.pos.z;
       const sl = Math.hypot(sx, sy, sz) || 1;
       sx /= sl; sy /= sl; sz /= sl;
@@ -557,6 +586,7 @@ const Navigation = {
   // 到着地点の天体中心からの距離: 追従カメラの画面（縦60°）に天体全体が
   // 収まる程度（見かけの直径 約25°、環のある惑星は環まで収まる距離）
   arrivalDistance(b) {
+    if (b.type === 'station') return b.rM * 4 + 2000; // v88: ステーション全体が見える近さ
     if (b.type === 'star') return b.rM * 14;
     if (b.rings) return Math.max(b.rM * 4.5, b.rings.outer * 1000 * 3.4);
     const R = Math.max(b.rM, b.rpM, b.rbM);
@@ -825,7 +855,11 @@ const Navigation = {
       outward = Math.max(0, (fwd0.x * rx + fwd0.y * ry + fwd0.z * rz) / rl);
     }
     // v86: 内空航法は、その艦の最高船速 × 最大圧縮比まで
-    const vMaxDrive = this.isInterspace() ? ship.interspace.maxSpeed * ship.interspace.maxCompression : this.WARP_MAX_SPEED;
+    // v88: 星系の外では、もっと速く（内空航法は圧縮をもっと強くかけられる。値は仮）
+    const vMaxHere = this.warpMaxAt(shipU);
+    const deepK = vMaxHere / this.WARP_MAX_SPEED;
+    w.maxCompression = this.isInterspace() ? ship.interspace.maxCompression * deepK : 0;
+    const vMaxDrive = this.isInterspace() ? ship.interspace.maxSpeed * w.maxCompression : vMaxHere;
     let vLimit = Math.min(vMaxDrive, surf * this.WARP_K_SURFACE * (1 + 8 * outward * outward));
 
     // 目標速度
@@ -861,7 +895,7 @@ const Navigation = {
       const th = this._warpThrottle(input, dt);
       w.throttle = th;
       // 内空航法の最高（実効）速度 = 最高船速 × 最大圧縮比
-      const vMaxAll = this.isInterspace() ? ship.interspace.maxSpeed * ship.interspace.maxCompression : this.WARP_MAX_SPEED;
+      const vMaxAll = vMaxDrive;
       const vMaxThrottle = this.WARP_MIN_SPEED * Math.pow(vMaxAll / this.WARP_MIN_SPEED, th);
       vTarget = th <= 0.001 ? 0 : Math.min(vLimit, vMaxThrottle);
     }
@@ -962,7 +996,7 @@ const Navigation = {
     vs = Math.min(vs, Math.max(tgt, 0));
     w.shipSpeed = Math.max(0, vs);
     // 圧縮比: 目標の実効の速さ ÷ 船速（1〜最大）。ワープと同じく対数で滑らかに変える
-    const cTarget = clamp(tgt / Math.max(w.shipSpeed, 1), 1, is.maxCompression);
+    const cTarget = clamp(tgt / Math.max(w.shipSpeed, 1), 1, w.maxCompression || is.maxCompression);
     const cur = Math.max(w.compression || 1, 1);
     const step = clamp(Math.log10(cTarget) - Math.log10(cur), -this.WARP_DECEL_DECADES * dt, this.WARP_ACCEL_DECADES * dt);
     w.compression = Math.pow(10, Math.log10(cur) + step);
@@ -1010,7 +1044,7 @@ const Navigation = {
       const b = arrival.body;
       if (b) this._rebaseToBody(b); else this._rebaseToDominantBody(false);
       let orbitNote = '';
-      if (b && this.gravityOn()) {
+      if (b && b.type !== 'station' && this.gravityOn()) {
         // v85: 円軌道に乗せる。天体の赤道面に沿った順行の向きに、円軌道の速さで
         const u = this.shipUniverse();
         const rv = { x: u.x - b.pos.x, y: u.y - b.pos.y, z: u.z - b.pos.z };

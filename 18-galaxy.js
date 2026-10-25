@@ -168,9 +168,15 @@ const GalaxyModel = {
           // 小さすぎる点は面積比で暗く（全体の明るさを保つ）
           // 数万個の点を加算合成で重ねるので、1点あたりはごく淡くする
           vAlpha = uOpacity * min(1.0, (px * px) / (s * s)) * uPointGain;
+          // v88: すぐ近くの点（画面で大きく写る点）は描かない。銀河の中にいるとき、近くの点が
+          // 大きなぼやけた円になって画面を覆い、描画もとても重くなるため（遠くの点が帯のように残る）
+          float near = 1.0 - smoothstep(18.0, 40.0, px);
+          vAlpha *= near;
           vColor = aColor;
           gl_Position = projectionMatrix * mv;
-          gl_PointSize = mv.z < 0.0 ? s : 0.0;
+          // v88: 奥行きは使わない（とても遠い点は、遠くの面の精度が足りず捨てられてしまうため）
+          gl_Position.z = 0.0;
+          gl_PointSize = (mv.z < 0.0 && near > 0.0) ? s : 0.0;
         }
       `,
       fragmentShader: `

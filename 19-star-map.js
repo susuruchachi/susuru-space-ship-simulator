@@ -40,6 +40,7 @@ const StarMap = {
         <button data-preset="outer">太陽系</button>
         <button data-preset="kuiper">太陽系外縁</button>
         <button data-preset="stars">近くの恒星</button>
+        <button data-preset="exo">系外の星系</button>
         <button data-preset="galaxy">銀河系</button>
         <button data-preset="localgroup">局所銀河群</button>
       </div>
@@ -78,6 +79,13 @@ const StarMap = {
     });
     this._bindPointer(root);
     this._buildLabelEntries();
+    // v88: 宇宙座標の原点が付け替わったら、星図のカメラの位置も同じだけずらす
+    SolarSystem.onOriginShift((d) => {
+      const sh = (p) => { if (p) { p.x -= d.x; p.y -= d.y; p.z -= d.z; } };
+      sh(this._focusU);
+      if (this._anim) sh(this._anim.from);
+      if (this._lastCam) sh(this._lastCam.pos);
+    });
   },
 
   isOpen() {
@@ -100,6 +108,7 @@ const StarMap = {
     const dom = SolarSystem.dominantBody(u);
     if (Navigation.target && Navigation.target.kind === 'body') this.selected = { kind: 'body', id: Navigation.target.id };
     if (dom.id === 'sun') this.applyPreset('outer', true);
+    else if (dom.type === 'star' && dom.sys) this.setFocus({ kind: 'body', id: dom.id }, this._systemViewDist(dom), true);
     else this.setFocus({ kind: 'body', id: dom.id }, Math.max(dom.soiM * 0.6, dom.rM * 12), true);
     this._refreshTimeButtons();
     this._renderInfo();
@@ -125,10 +134,11 @@ const StarMap = {
     if (fo.kind === 'star') {
       const i = fo.index;
       const d = StarCatalog.dists[i] * Astro.PC;
-      return { x: StarCatalog.dirs[i * 3] * d, y: StarCatalog.dirs[i * 3 + 1] * d, z: StarCatalog.dirs[i * 3 + 2] * d };
+      return SolarSystem.helioToU({ x: StarCatalog.dirs[i * 3] * d, y: StarCatalog.dirs[i * 3 + 1] * d, z: StarCatalog.dirs[i * 3 + 2] * d });
     }
-    if (fo.kind === 'galaxyLabel') return GalaxyModel.labelUniverse(fo.label);
-    if (fo.kind === 'localGroup') return { ...fo.obj.center };
+    // v88: 星表・銀河は太陽中心の座標で持っているので、宇宙座標（原点は艦のいる星系）に直す
+    if (fo.kind === 'galaxyLabel') return SolarSystem.helioToU(GalaxyModel.labelUniverse(fo.label));
+    if (fo.kind === 'localGroup') return SolarSystem.helioToU(fo.obj.center);
     if (fo.kind === 'point') return { ...fo.u };
     return { x: 0, y: 0, z: 0 };
   },
@@ -161,11 +171,12 @@ const StarMap = {
       case 'outer': this.setFocus({ kind: 'body', id: 'sun' }, 70 * AU, instant); this._cam.el = 0.75; break;
       case 'kuiper': this.setFocus({ kind: 'body', id: 'sun' }, 250 * AU, instant); this._cam.el = 0.6; break;
       case 'stars': this.setFocus({ kind: 'body', id: 'sun' }, 40 * LY, instant); this._cam.el = 0.45; break;
+      case 'exo': this.setFocus({ kind: 'body', id: 'sun' }, 110 * LY, instant); this._cam.el = 0.5; break;
       case 'galaxy': this.setFocus({ kind: 'body', id: 'sun' }, 75000 * LY, instant); this._cam.el = 1.0; break;
       case 'localgroup': {
         // 銀河系とアンドロメダ銀河の間を中心に、2つを結ぶ線を横から見る
         const m31 = GalaxyModel.localGroup.find((g) => g.id === 'm31');
-        const c = m31 ? { x: m31.center.x * 0.45, y: m31.center.y * 0.45, z: m31.center.z * 0.45 } : { x: 0, y: 0, z: 0 };
+        const c = SolarSystem.helioToU(m31 ? { x: m31.center.x * 0.45, y: m31.center.y * 0.45, z: m31.center.z * 0.45 } : { x: 0, y: 0, z: 0 });
         this.setFocus({ kind: 'point', u: c }, 3.6e6 * LY, instant);
         this._cam.el = 0.45;
         if (m31) this._cam.az = this._azimuthPerpendicularTo(m31.center);
@@ -267,10 +278,23 @@ const StarMap = {
   },
 
   // 軌道線を出すかどうか（縮尺に合わせて間引く）
+  // v88: 系外の天体なら、その星系を見ているか
+  _nearSystem(b) {
+    const host = b.type === 'star' ? b : SolarSystem.byId[b.parent];
+    return !!(host && this._focusU && Math.hypot(this._focusU.x - host.pos.x, this._focusU.y - host.pos.y, this._focusU.z - host.pos.z) < Math.max(host.soiM || 0, 1e13));
+  },
+  // 系外の星系を見渡す距離（いちばん外の惑星の軌道の3倍）
+  _systemViewDist(star) {
+    let a = 0;
+    for (const c of star.children) a = Math.max(a, c.orbitRadiusM || 0);
+    return Math.max(a * 3, star.rM * 30, 1e9);
+  },
+
   _orbitVisible(b) {
     const d = this._cam.dist;
     const AU = Astro.AU;
     if (d > 3000 * AU) return false;
+    if (b.sys) return this._nearSystem(b);
     if (b.type === 'moon') {
       const p = SolarSystem.byId[b.parent];
       const camU = this._lastCam ? this._lastCam.pos : p.pos;
@@ -287,6 +311,7 @@ const StarMap = {
     const d = this._cam.dist;
     const AU = Astro.AU;
     if (d > 8000 * AU) return null;
+    if (b.sys) return this._nearSystem(b) ? 1.0 : null;
     if (b.type === 'planet') return 1.0;
     if (b.type === 'dwarf') return 2.5;
     if (b.type === 'asteroid' || b.type === 'comet') return d < 60 * AU ? 3.0 : null;
@@ -299,6 +324,12 @@ const StarMap = {
   // -----------------------------------------------------------
   _buildLabelEntries() {
     this._entries = [];
+    // v88: 局所銀河群の銀河の名前を先に（重なったときに、ステーションの名前より優先して出す）
+    if (typeof GalaxyModel !== 'undefined') {
+      for (const g of GalaxyModel.localGroup) {
+        this._entries.push({ key: `l:${g.id}`, kind: 'localGroup', obj: g, text: g.ja, cls: 'sm-galaxy' });
+      }
+    }
     for (const b of SolarSystem.bodies) {
       this._entries.push({ key: `b:${b.id}`, kind: 'body', id: b.id, text: b.ja, cls: `sm-${b.type}` });
     }
@@ -311,9 +342,6 @@ const StarMap = {
       for (const L of GalaxyModel.labels) {
         if (L.isSun) continue;
         this._entries.push({ key: `g:${L.id}`, kind: 'galaxyLabel', label: L, text: L.ja, cls: L.isArm ? 'sm-arm' : 'sm-gc' });
-      }
-      for (const g of GalaxyModel.localGroup) {
-        this._entries.push({ key: `l:${g.id}`, kind: 'localGroup', obj: g, text: g.ja, cls: 'sm-galaxy' });
       }
     }
     if (typeof SmallBodies !== 'undefined') {
@@ -329,8 +357,8 @@ const StarMap = {
     switch (e.kind) {
       case 'body': return SolarSystem.byId[e.id].pos;
       case 'star': return this._focusPoint({ kind: 'star', index: e.index });
-      case 'galaxyLabel': return GalaxyModel.labelUniverse(e.label);
-      case 'localGroup': return e.obj.center;
+      case 'galaxyLabel': return SolarSystem.helioToU(GalaxyModel.labelUniverse(e.label));
+      case 'localGroup': return SolarSystem.helioToU(e.obj.center);
       case 'region': return SmallBodies.regionUniverse(e.region);
       case 'ship': return Navigation.shipUniverse();
       case 'home': return Navigation.frameOrigin(Navigation.homeFrame);
@@ -345,6 +373,15 @@ const StarMap = {
     switch (e.kind) {
       case 'body': {
         const b = SolarSystem.byId[e.id];
+        // v88: 系外の天体。恒星は恒星を見渡す縮尺で、ステーションは局所銀河群の縮尺でも、
+        // 惑星はその星系を見ているときだけ
+        if (b.sys) {
+          const near = this._nearSystem(b);
+          const galaxy = DeepSpace.systems.find((s) => s.id === b.sys && s.kind === 'galaxy');
+          if (b.type === 'star') return (near && d < 2 * LY) || (!galaxy && d > 0.3 * LY && d < 6000 * LY && distFromCam < d * 3);
+          if (b.type === 'station') return near || d > 60000 * LY;
+          return near && d < 3000 * AU;
+        }
         if (b.type === 'star') return d < 2 * LY;
         if (b.type === 'planet') return d < 3000 * AU;
         if (b.type === 'dwarf') return d < 2000 * AU && (b.id !== 'sedna' || d > 20 * AU);
@@ -469,15 +506,19 @@ const StarMap = {
     let actions = [];
     if (s.kind === 'body') {
       const b = SolarSystem.byId[s.id];
-      const typeJa = { star: '恒星', planet: '惑星', dwarf: '準惑星', moon: '衛星', asteroid: '小惑星', comet: '彗星' }[b.type];
+      const typeJa = { star: '恒星', planet: '惑星', dwarf: '準惑星', moon: '衛星', asteroid: '小惑星', comet: '彗星', station: '宇宙ステーション' }[b.type];
       const parent = b.parent ? SolarSystem.byId[b.parent] : null;
       const dShip = SolarSystem.distance(shipU, b);
-      const dSun = Math.hypot(b.pos.x, b.pos.y, b.pos.z);
-      const R = Math.round(b.meanRadiusM / 1000).toLocaleString('ja-JP');
-      html += `<div class="smi-title">${b.ja} <span class="smi-en">${b.en}</span></div>`;
-      html += `<div class="smi-type">${typeJa}${parent ? `（${parent.ja}の衛星）` : ''}</div>`;
+      const dSun = SolarSystem.distance(b.pos, SolarSystem.byId.sun);
+      const R = b.meanRadiusM < 1e4 ? `${(b.meanRadiusM / 1000).toFixed(1)}` : Math.round(b.meanRadiusM / 1000).toLocaleString('ja-JP');
+      html += `<div class="smi-title">${b.ja}${b.en !== b.ja ? ` <span class="smi-en">${b.en}</span>` : ''}</div>`;
+      // v88: 系外の天体
+      const sub = b.sys ? (b.type === 'planet' ? `（${parent.ja}を回る${b.hz ? '・ハビタブルゾーン' : ''}）` : b.type === 'station' ? `（${b.galaxy}・${b.area}）` : `（地球から ${fmtD(dSun)}）`)
+        : parent ? `（${parent.ja}の衛星）` : '';
+      html += `<div class="smi-type">${typeJa}${sub}</div>`;
       html += `<div class="smi-row">半径: ${R} km</div>`;
-      if (b.type !== 'star') html += `<div class="smi-row">太陽からの距離: ${fmtD(dSun)}</div>`;
+      if (b.sys && b.type !== 'star') html += `<div class="smi-row">${parent.ja}からの距離: ${fmtD(SolarSystem.distance(b.pos, parent))}</div>`;
+      if (b.type !== 'star' && !b.sys) html += `<div class="smi-row">太陽からの距離: ${fmtD(dSun)}</div>`;
       html += `<div class="smi-row">自艦からの距離: ${fmtD(dShip)}</div>`;
       html += `<div class="smi-desc">${b.desc || ''}</div>`;
       actions = [['target', '🎯 目的地に設定'], ['go', '⚡ 自動航行で向かう'], ['focus', '◎ ここを中心に']];
@@ -508,6 +549,12 @@ const StarMap = {
       html += `<div class="smi-row">距離: ${Math.round(g.distM / Astro.LY).toLocaleString('ja-JP')} 光年</div>`;
       html += `<div class="smi-row">大きさ（半径）: 約${Math.round(g.radiusM / Astro.LY).toLocaleString('ja-JP')} 光年</div>`;
       actions = [['focus', '◎ ここを中心に']];
+      // v88: この銀河の宇宙ステーション
+      const st = typeof GALAXY_STATIONS !== 'undefined' ? GALAXY_STATIONS.find((x) => x.galaxyId === g.id) : null;
+      if (st) {
+        html += `<div class="smi-desc">🛰 ${st.ja}（${st.area}）: ${st.desc}</div>`;
+        actions = [['stationTarget', `🎯 ${st.ja}を目的地に`], ['stationGo', '⚡ 自動航行で向かう'], ['focus', '◎ ここを中心に']];
+      }
     } else if (s.kind === 'region') {
       const r = s.region;
       const n = SmallBodies.counts[r.group] || 0;
@@ -543,7 +590,7 @@ const StarMap = {
     if (act === 'focus') {
       if (s.kind === 'body') {
         const b = SolarSystem.byId[s.id];
-        const d = b.type === 'star' ? 30 * b.rM : b.type === 'moon' ? b.rM * 8 : Math.max(b.rM * 8, (b.rings ? b.rings.outer * 1000 * 4 : 0));
+        const d = b.type === 'star' ? (b.sys ? this._systemViewDist(b) : 30 * b.rM) : b.type === 'station' ? b.rM * 8 : b.type === 'moon' ? b.rM * 8 : Math.max(b.rM * 8, (b.rings ? b.rings.outer * 1000 * 4 : 0));
         this.setFocus({ kind: 'body', id: s.id }, Math.max(d, 2e5));
       } else if (s.kind === 'star') {
         this.setFocus({ kind: 'star', index: s.index }, Math.min(this._cam.dist, 8 * Astro.LY));
@@ -560,6 +607,13 @@ const StarMap = {
         this.applyPreset('ship');
       }
       return;
+    }
+    // v88: 銀河の宇宙ステーションへ
+    if ((act === 'stationTarget' || act === 'stationGo') && s.kind === 'localGroup') {
+      const st = GALAXY_STATIONS.find((x) => x.galaxyId === s.obj.id);
+      if (!st) return;
+      this.selected = { kind: 'body', id: st.id };
+      return this._doAction(act === 'stationGo' ? 'go' : 'target');
     }
     if (act === 'target' || act === 'go') {
       if (s.kind === 'body') Navigation.setTarget({ kind: 'body', id: s.id });

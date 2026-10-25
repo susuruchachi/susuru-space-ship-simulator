@@ -26,6 +26,8 @@
 | 天体の自転軸・自転 | IAU WGCCRE (Archinal et al. 2018) |
 | 天体の大きさ・質量・反射率 | IAU WGCCRE, JPL, NASA Planetary Fact Sheet |
 | 銀河系の渦巻腕 | Reid et al. (2019), ApJ 885, 131 |
+| 系外の星系の恒星・惑星（`28-deep-space.js`） | NASA Exoplanet Archive。TRAPPIST-1: Agol et al. (2021)、Proxima: Anglada-Escudé et al. (2016)・Faria et al. (2022)、Ross 128: Bonfils et al. (2018)、Teegarden's Star: Zechmeister et al. (2019)、LHS 1140: Cadieux et al. (2024)、TOI-700: Gilbert et al. (2023)、Kepler-186: Quintana et al. (2014)、Kepler-442: Torres et al. (2015)、Gliese 12: Kuzuhara et al. (2024)・Shukla et al. (2024)。惑星の表面の模様・街明かりは架空 |
+| 大マゼラン雲・小マゼラン雲・アンドロメダ銀河の星形成領域の位置 | SIMBAD（NGC 206・NGC 346・R136）。R136a1: Brands et al. (2022)。宇宙ステーションは架空 |
 
 データやテクスチャを作り直すスクリプトは `tools/` にあります。
 
