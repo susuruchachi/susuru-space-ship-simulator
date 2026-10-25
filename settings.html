@@ -260,7 +260,16 @@
         <button type="button" id="importShipsBtn">ファイルから読み込む</button>
         <input type="file" id="importShipsInput" accept=".json,application/json" style="display:none;">
       </div>
-      <p class="sync-hint">自作の艦すべて（3Dモデル込み）を1つのファイルにします。別の端末でこの画面から読み込むと、同じ艦が使えます（同じ艦は更新日時の新しい方を残します）。iCloud Drive などで受け渡しできます。</p>
+      <div class="sync-row" id="exportOneRow">
+        <select id="exportOneSelect" style="flex:1;min-width:140px;"></select>
+        <label class="sync-check" style="margin:0;"><input type="checkbox" id="exportOneModel"> 3Dモデルも含める</label>
+      </div>
+      <div class="sync-row">
+        <button type="button" id="exportOneBtn">この艦だけ書き出す</button>
+        <button type="button" id="shareOneBtn">この艦だけ送る（共有）</button>
+      </div>
+      <p class="sync-hint">1隻だけを1つのファイルにします（送る・受け渡す用）。「3Dモデルも含める」を外すと、設定だけの小さなファイル（数十KB）になります。読み込みは上の「ファイルから読み込む」で（3Dモデルを含めないファイルを読み込んでも、その端末の3Dモデルはそのままです）。</p>
+      <p class="sync-hint">「ファイルに書き出す」は、自作の艦すべて（3Dモデル込み）を1つのファイルにします。別の端末でこの画面から読み込むと、同じ艦が使えます（同じ艦は更新日時の新しい方を残します）。iCloud Drive などで受け渡しできます。</p>
       <div class="sync-status" id="fileStatus"></div>
 
       <details class="sync-help" id="githubSyncSection">
@@ -714,6 +723,37 @@ function initSyncUi() {
     document.getElementById('githubSyncSection').open = true;
     if (c.lastSyncAt) setGhStatus(`前回の同期: ${new Date(c.lastSyncAt).toLocaleString('ja-JP')}`);
   }
+
+  // v88: 1隻だけ書き出す
+  const oneSel = document.getElementById('exportOneSelect');
+  const fillOne = async () => {
+    const list = await listShipDesigns();
+    const cur = oneSel.value;
+    oneSel.innerHTML = list.length ? '' : '<option value="">（自作の艦がありません）</option>';
+    for (const d of list) {
+      const o = document.createElement('option');
+      o.value = d.id;
+      o.textContent = `${d.name}${d.hull.hasModel ? '（3Dモデルあり）' : ''}`;
+      oneSel.appendChild(o);
+    }
+    if (cur && list.some((d) => d.id === cur)) oneSel.value = cur;
+  };
+  fillOne();
+  oneSel.addEventListener('focus', fillOne);
+  const exportOne = async (share) => {
+    if (!oneSel.value) { setFileStatus('書き出す艦を選んでください。', true); return; }
+    try {
+      setFileStatus('書き出し中…');
+      const r = await ShipSync.exportOne(oneSel.value, document.getElementById('exportOneModel').checked, share);
+      if (r.cancelled) setFileStatus('送るのをやめました。');
+      else setFileStatus(`「${r.name}」を${r.shared ? '送りました' : '書き出しました'}（${r.bytes < 1e6 ? `${Math.max(1, Math.round(r.bytes / 1000))}KB` : `${(r.bytes / 1e6).toFixed(1)}MB`}）。`);
+    } catch (e) {
+      setFileStatus(`書き出しに失敗しました: ${e.message || e}`, true);
+    }
+  };
+  document.getElementById('exportOneBtn').addEventListener('click', () => exportOne(false));
+  document.getElementById('shareOneBtn').addEventListener('click', () => exportOne(true));
+  if (!(navigator.canShare)) document.getElementById('shareOneBtn').style.display = 'none';
 
   document.getElementById('exportShipsBtn').addEventListener('click', async () => {
     try {

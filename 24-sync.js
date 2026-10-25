@@ -103,15 +103,50 @@ const ShipSync = {
     }
     const data = { format: SHIP_SYNC_FILE_FORMAT, version: 1, exportedAt: Date.now(), gameVersion: GAME_VERSION, items, tombstones: loadShipDesignTombstones() };
     const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+    const name = `space-ships-${this._dateStamp()}.json`;
+    this._download(blob, name);
+    return { count: items.length, name, bytes: blob.size };
+  },
+
+  // v88: 1隻だけ書き出す（送る・受け渡す用）。withModel=false なら3Dモデルを含めない（設定だけの小さなファイル。
+  // 読み込んでも、その端末にある3Dモデルはそのまま）。share=true なら、端末の「共有」で送る（使えなければ保存）
+  async exportOne(id, withModel, share) {
+    const design = await loadShipDesign(id);
+    if (!design) throw new Error('艦が見つかりません');
+    const model = withModel && design.hull.hasModel ? await loadShipDesignModel(id) : null;
+    const item = { design, model };
+    if (!withModel && design.hull.hasModel) item.modelOmitted = true;
+    const data = { format: SHIP_SYNC_FILE_FORMAT, version: 1, exportedAt: Date.now(), gameVersion: GAME_VERSION, items: [item], tombstones: [] };
+    const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+    // ファイル名には文字（日本語も可）・数字・_ - だけを使う（記号があると保存できない端末がある）
+    const safe = (design.name || 'ship').replace(/[^\p{L}\p{N}_-]+/gu, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'ship';
+    const name = `ship-${safe}-${this._dateStamp()}${withModel ? '' : '-nomodel'}.json`;
+    if (share && typeof navigator !== 'undefined' && navigator.canShare) {
+      const file = new File([blob], name, { type: 'application/json' });
+      if (navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file], title: design.name });
+          return { name, bytes: blob.size, shared: true };
+        } catch (e) {
+          if (e && e.name === 'AbortError') return { name, bytes: blob.size, cancelled: true };
+        }
+      }
+    }
+    this._download(blob, name);
+    return { name, bytes: blob.size, shared: false };
+  },
+
+  _dateStamp() {
     const d = new Date();
-    const name = `space-ships-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}.json`;
+    return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  },
+  _download(blob, name) {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = name;
     document.body.appendChild(a);
     a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
-    return { count: items.length, name, bytes: blob.size };
   },
 
   // 読み込み: 同じIDの設計は更新日時の新しい方を残す
@@ -134,7 +169,8 @@ const ShipSync = {
       const cur = local.get(d.id);
       if (cur && (cur.updatedAt || 0) >= (d.updatedAt || 0)) { skipped++; continue; }
       await saveShipDesign(d, { keepTimestamp: true });
-      await saveShipDesignModel(d.id, d.hull.hasModel ? it.model || null : null);
+      // v88: 3Dモデルを含めずに書き出したファイルなら、この端末の3Dモデルはそのまま
+      if (!it.modelOmitted) await saveShipDesignModel(d.id, d.hull.hasModel ? it.model || null : null);
       if (cur) updated++; else added++;
     }
     return { added, updated, skipped };
