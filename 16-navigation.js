@@ -667,6 +667,12 @@ const Navigation = {
     if (!ship) return false;
     if (autopilot && !this.target) return false;
     if (this.departure) return false;
+    // v88: ワープ・内空航行中に自動航行を入れる・切るときは、速さ・船速・圧縮比をそのまま引き継ぐ
+    // （以前は止まった状態から始め直していた）
+    if (this.warp.active) {
+      this.setAutopilot(!!autopilot);
+      return true;
+    }
     // v88: 母港のポートの近くからは、まず出港（前進で3km）
     if (this._nearPort(ship)) {
       ship.autoDockingEnabled = false;
@@ -678,6 +684,25 @@ const Navigation = {
       return true;
     }
     return this._engageNow(autopilot);
+  },
+
+  // v88: ワープ・内空航行を続けたまま、自動航行を入れる・切る。切るときは、今の速さを保つスロットルにする
+  setAutopilot(on) {
+    const w = this.warp;
+    if (!w.active) return;
+    if (on && !this.target) return;
+    w.autopilot = !!on;
+    this.approach = null;
+    if (!on) {
+      // 手動のスロットル（0〜1）は、最低速〜この場所の最高速を対数で割り振ったもの。今の速さに合う位置へ
+      const vMax = Math.max(w.vMaxDrive || this.WARP_MAX_SPEED, this.WARP_MIN_SPEED * 1.0001);
+      w.throttle = clamp(Math.log(Math.max(w.speed, this.WARP_MIN_SPEED) / this.WARP_MIN_SPEED) / Math.log(vMax / this.WARP_MIN_SPEED), 0.01, 1);
+      this._leverTouched = false;
+      if (typeof InputSystem !== 'undefined' && InputSystem._throttleLever && InputSystem.setThrottleLever) InputSystem.setThrottleLever(w.throttle);
+      w.status = `自動航行を切りました（${this.driveName()}はそのままの速さで続けます）`;
+    } else {
+      w.status = '自動航行';
+    }
   },
 
   _engageNow(autopilot) {
@@ -986,6 +1011,14 @@ const Navigation = {
       const vMaxThrottle = this.WARP_MIN_SPEED * Math.pow(vMaxAll / this.WARP_MIN_SPEED, th);
       vTarget = th <= 0.001 ? 0 : Math.min(vLimit, vMaxThrottle);
     }
+
+    // v88: デバッグHUD（06-hud.js）用: 目標の速さ・上限とその理由・機首のずれ
+    w.vTarget = vTarget;
+    w.vLimit = vLimit;
+    w.vMaxDrive = vMaxDrive;
+    w.limitBy = vLimit < vMaxDrive ? `${near ? near.body.ja : '天体'}に近い（表面まで ${SpaceHud.formatDistance(surf)}）` : this.isInterspace() ? '最高船速 × 最大圧縮比' : 'この場所のワープの最高速';
+    w.alignDeg = Math.acos(clamp(alignCos, -1, 1)) * 180 / Math.PI;
+    w.near = near ? near.body.ja : '';
 
     if (this.isInterspace()) {
       this._stepInterspaceSpeed(ship, w, vTarget, vLimit, dt);

@@ -188,8 +188,9 @@ const SpaceHud = {
 
   toggleAutopilot() {
     if (Navigation.isDeparting()) { Navigation.cancelDeparture(); return; } // v88: 出港中に押したら中止
+    // v88: ワープ・内空航行中は、自動航行だけを切る（速さはそのまま、手動のワープ・内空航行で続ける）
     if (Navigation.isWarping() && Navigation.warp.autopilot) {
-      Navigation.disengageWarp('自動航行を中止しました');
+      Navigation.setAutopilot(false);
       return;
     }
     // v87: 通常航行での進入中は、その速さのまま手動に切り替える

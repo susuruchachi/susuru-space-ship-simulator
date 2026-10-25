@@ -604,6 +604,41 @@ const HUD = {
       <div>姿勢角: pitch ${euler.pitch.toFixed(1)}° / yaw ${euler.yaw.toFixed(1)}° / roll ${euler.roll.toFixed(1)}°</div>
       <div>角速度: pitch ${angVel.x.toFixed(2)} / yaw ${angVel.y.toFixed(2)} / roll ${angVel.z.toFixed(2)} rad/s</div>
       ${dockingLine}
+      ${this._navDebugLines(ship)}
     `;
+  },
+
+  // v88: 航法（ワープ・内空航行・自動航行・出港・進入）の中身。速さが出ない・時間がかかるときの確かめ用
+  _navDebugLines(ship) {
+    if (typeof Navigation === 'undefined' || typeof SpaceHud === 'undefined') return '';
+    const N = Navigation, w = N.warp;
+    const fs = (v) => (Number.isFinite(v) ? SpaceHud.formatSpeed(Math.max(0, v)) : '-');
+    const fd = (m) => (Number.isFinite(m) ? SpaceHud.formatDistance(m) : '-');
+    const lines = [];
+    let mode = '通常航行';
+    if (N.departure) mode = `出港中（${N.departure.autopilot ? '自動航行' : N.driveName()}の前）`;
+    else if (w.active) mode = `${N.driveName()}・${w.autopilot ? '自動航行' : '手動'}`;
+    else if (N.approach) mode = '自動航行の進入（通常航行）';
+    lines.push(`航法: ${mode}${N.target ? ` ・ 目的地 ${N.targetLabel()}` : ''}`);
+    if (N.departure) lines.push(`出港: ${Math.round(N.departure.moved || 0).toLocaleString('ja-JP')} / ${N.DEPART_DIST.toLocaleString('ja-JP')} m ・ ${N.departure.t.toFixed(0)}秒`);
+    if (w.active) {
+      lines.push(`実効速度: ${fs(w.speed)} ・ 目標 ${fs(w.vTarget)}`);
+      lines.push(`上限: ${fs(w.vLimit)}（${w.limitBy || '-'}）・ 機関の上限 ${fs(w.vMaxDrive)}`);
+      if (N.isInterspace()) {
+        const is = ship.interspace;
+        lines.push(`船速: ${SpaceHud.formatIKn(w.shipSpeed || 0)} / ${SpaceHud.formatIKn(is.maxSpeed)} ・ 圧縮比 ×${SpaceHud.formatJaNumber(w.compression || 1)} / ×${SpaceHud.formatJaNumber(is.maxCompression)}`);
+      }
+      if (w.autopilot) {
+        const vC = w.vCruise;
+        lines.push(`到着点まで: ${fd(w.targetDistance)} ・ 巡航 ${fs(vC)} ・ 機首のずれ ${Number.isFinite(w.alignDeg) ? w.alignDeg.toFixed(1) : '-'}°`);
+        if (vC > 0 && Number.isFinite(w.targetDistance)) lines.push(`距離 ÷ 巡航: ${SpaceHud.formatDuration(w.targetDistance / vC)}`);
+      } else {
+        const lever = typeof InputSystem !== 'undefined' && InputSystem._throttleLever;
+        lines.push(`ワープのスロットル: ${Math.round((w.throttle || 0) * 100)}%${lever ? ` ・ レバー ${Math.round((lever.ratio || 0) * 100)}%${N._leverTouched ? '（レバーで操作中）' : ''}` : ''}`);
+      }
+    }
+    if (N.approach) lines.push(`進入: 減速 ${N.brakeAccel(ship).toFixed(2)} m/s² ・ 通常航行の最高速 ${fs(N.normalMaxSpeed(ship))}`);
+    if (w.status) lines.push(`状態: ${w.status}`);
+    return lines.map((l) => `<div>${l.replace(/[<>&]/g, '')}</div>`).join('');
   },
 };
