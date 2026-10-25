@@ -608,10 +608,83 @@ const Navigation = {
     return this.isInterspace() ? '内空航行' : 'ワープ';
   },
 
+  // -----------------------------------------------------------
+  // v88: 母港からの出港。ポートの近く（DEPART_DIST 以内）でワープ・内空航行・自動航行を始めたら、まず
+  // 時速100km（DEPART_SPEED）を上限に、機首の向きへ前進だけで DEPART_DIST 進み、それから一気に加速する
+  // -----------------------------------------------------------
+  DEPART_SPEED: 100 / 3.6, // [m/s]
+  DEPART_DIST: 3000,       // [m]
+  departure: null,         // { autopilot, start, t }
+  isDeparting() {
+    return !!this.departure;
+  },
+  _nearPort(ship) {
+    if (!this.isHome()) return false;
+    const p = ship.position;
+    let d = Math.hypot(p.x, p.y, p.z);
+    const t = State.dockingTarget;
+    if (t) d = Math.min(d, Math.hypot(p.x - t.position.x, p.y - t.position.y, p.z - t.position.z));
+    return d < this.DEPART_DIST;
+  },
+  cancelDeparture(reason) {
+    if (!this.departure) return;
+    this.departure = null;
+    this.warp.status = reason || '出港を中止しました';
+  },
+  // 物理に渡す入力（ShipController.update から毎フレーム）: 回転・横移動はしない
+  departureInput(ship, input) {
+    if (!this.departure) return input;
+    const user = Math.abs(input.rotatePitch) + Math.abs(input.rotateYaw) + Math.abs(input.rotateRoll)
+      + Math.abs(input.thrustStrafeX) + Math.abs(input.thrustStrafeY);
+    if (user > 0.05) {
+      this.cancelDeparture('出港を中止しました（手動の操縦に切り替えました）');
+      return input;
+    }
+    return {
+      ...input, thrustForward: 0, thrustStrafeX: 0, thrustStrafeY: 0, rotatePitch: 0, rotateYaw: 0, rotateRoll: 0, boost: false,
+      holdForwardSpeed: Math.min(this.DEPART_SPEED, this.normalMaxSpeed(ship)), // 03-thruster-solver.js: この速さで前進
+    };
+  },
+  // 物理の1刻みごと: 進んだ距離を見る（前進は物理が departureInput の holdForwardSpeed で行う）。
+  // DEPART_DIST 進んだらワープ・内空航行を始める
+  stepDeparture(ship, dt) {
+    const dep = this.departure;
+    if (!dep) return;
+    dep.t += dt;
+    const p = ship.position, s = dep.start;
+    const moved = Math.hypot(p.x - s.x, p.y - s.y, p.z - s.z);
+    dep.moved = moved;
+    this.warp.status = `出港中: 時速100kmで前進（あと ${Math.max(0, Math.round(this.DEPART_DIST - moved)).toLocaleString('ja-JP')} m）`;
+    // 3km 進んだら（ポートの壁などで進めないまま長く経ったときも）、一気に加速する
+    if (moved >= this.DEPART_DIST || dep.t > this.DEPART_DIST / this.DEPART_SPEED + 60) {
+      this.departure = null;
+      this._engageNow(dep.autopilot);
+    }
+  },
+
   engageWarp(autopilot) {
     const ship = State.ship;
     if (!ship) return false;
     if (autopilot && !this.target) return false;
+    if (this.departure) return false;
+    // v88: 母港のポートの近くからは、まず出港（前進で3km）
+    if (this._nearPort(ship)) {
+      ship.autoDockingEnabled = false;
+      this.arrivalHold = null;
+      this.approach = null;
+      ship.angularVelocity = { x: 0, y: 0, z: 0 };
+      this.departure = { autopilot: !!autopilot, start: { ...ship.position }, t: 0, moved: 0 };
+      this.warp.status = '出港中: 時速100kmで前進';
+      return true;
+    }
+    return this._engageNow(autopilot);
+  },
+
+  _engageNow(autopilot) {
+    const ship = State.ship;
+    if (!ship) return false;
+    if (autopilot && !this.target) return false;
+    this.departure = null;
     this.warp.active = true;
     this.warp.autopilot = !!autopilot;
     this._leverTouched = false;
@@ -878,6 +951,10 @@ const Navigation = {
       const dx = arrival.point.x - shipU.x, dy = arrival.point.y - shipU.y, dz = arrival.point.z - shipU.z;
       const distA = Math.hypot(dx, dy, dz);
       w.targetDistance = distA;
+      // v88: 到着までの時間の見積もり（HUD）に使う巡航の速さ。内空航法は最高船速 × 最大圧縮比、
+      // ワープは途中（恒星から離れたところ）で出せる速さ
+      w.vCruise = this.isInterspace() ? vMaxDrive
+        : Math.max(this.WARP_MAX_SPEED, Math.min(this.WARP_DEEP_MAX, Math.max(vMaxHere, distA * 0.5 * this.WARP_K_STAR)));
       // v87: 通常航行の最高速が決まっている艦は、通常航行で止まり切れる距離（dropDistance）の手前で
       // 通常航行の最高速まで落とし、そこで通常航行に戻る
       const dDrop = this.dropDistance(ship);

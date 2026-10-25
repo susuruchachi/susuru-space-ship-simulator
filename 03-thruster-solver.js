@@ -825,7 +825,14 @@ const ThrusterSolver = {
     // v85: 母港以外で重力があるときは、スロットル = 推力の割合（速度を保つ補助は使わない。
     // 補助が速度を0へ戻そうとすると、重力で回っている軌道が壊れるため）
     const newtonian = typeof Navigation !== 'undefined' && Navigation.newtonianFlight && Navigation.newtonianFlight();
-    if (ship && (!Number.isFinite(ship.maxSpeed) || newtonian)) {
+    // v88: 母港からの出港（16-navigation.js departureInput）: 決めた速さで前進する（スロットルの位置は使わない）
+    const holdFwd = ship && Number.isFinite(input.holdForwardSpeed) ? input.holdForwardSpeed : null;
+    if (holdFwd !== null) {
+      const localVelForZ = rotateVecByQuat(ship.velocity, conjugateQuat(ship.quaternion));
+      const zError = -holdFwd - localVelForZ.z;
+      const fullErr = this._deadbeatFullError(ship, { x: 0, y: 0, z: Math.sign(zError) || 1 }, 5, dt);
+      desiredForce.z = Math.sign(zError) * Math.min(1, Math.abs(zError) / fullErr);
+    } else if (ship && (!Number.isFinite(ship.maxSpeed) || newtonian)) {
       // v85: 最高速度が無制限の艦は、スロットル = 推力の割合（離せば慣性で進み続ける）
       desiredForce.z = clamp(-input.thrustForward * boostMult, -1, 1);
     } else if (ship) {

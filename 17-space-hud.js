@@ -181,11 +181,13 @@ const SpaceHud = {
   },
 
   toggleWarp() {
+    if (Navigation.isDeparting()) { Navigation.cancelDeparture(); return; } // v88: 出港中に押したら中止
     if (Navigation.isWarping()) Navigation.disengageWarp(`${Navigation.driveName()}を解除しました`);
     else Navigation.engageWarp(false);
   },
 
   toggleAutopilot() {
+    if (Navigation.isDeparting()) { Navigation.cancelDeparture(); return; } // v88: 出港中に押したら中止
     if (Navigation.isWarping() && Navigation.warp.autopilot) {
       Navigation.disengageWarp('自動航行を中止しました');
       return;
@@ -424,8 +426,11 @@ const SpaceHud = {
         if (w.active && w.autopilot && w.targetDistance) {
           // 到着点までの距離とワープの減速の仕方（距離比例）から大まかな残り時間
           const dist = w.targetDistance;
+          // v88: 巡航の速さは、その艦・その場所で出せる速さ（以前は太陽系内のワープの最高速で割っていたため、
+          // 内空航法で 24 IKn × 3.5億倍の艦が大マゼラン雲へ行くとき、約4日のところ約80年と表示されていた）
+          const vC = w.vCruise || Navigation.WARP_MAX_SPEED;
           const eta = Math.log(Math.max(dist, 1) / Math.max(a.arrivalDist * 0.06, 500)) / Navigation.WARP_K_TARGET
-            + Math.max(0, dist - Navigation.WARP_MAX_SPEED / Navigation.WARP_K_TARGET) / Navigation.WARP_MAX_SPEED;
+            + Math.max(0, dist - vC / Navigation.WARP_K_TARGET) / vC;
           text += ` ・ 到着まで 約${this.formatDuration(Math.max(1, eta))}`;
         }
       }
@@ -442,7 +447,7 @@ const SpaceHud = {
       ? '内空航行（重力場機関）。航路を圧縮して進む。スロットルで速さ、操縦桿で向き (J)'
       : '手動ワープ。スロットルで速度、操縦桿で向き (J)';
     this._els.warpBtn.classList.toggle('is-on', w.active && !w.autopilot);
-    const autoOn = (w.active && w.autopilot) || Navigation.isApproaching();
+    const autoOn = (w.active && w.autopilot) || Navigation.isApproaching() || (Navigation.departure && Navigation.departure.autopilot);
     this._els.autoBtn.innerHTML = autoOn ? '🎯<span class="snb-text"> 自動航行を中止</span>' : '🎯<span class="snb-text"> 自動航行</span>';
     this._els.autoBtn.classList.toggle('is-on', autoOn);
     this._els.orbitAttBtn.classList.toggle('is-on', Navigation.isOrbitAttitude());

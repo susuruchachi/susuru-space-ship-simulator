@@ -41,6 +41,8 @@ const ShipController = {
       : State.input;
     // v87: 自動航行の終わりの、通常航行での進入（機首を到着点へ向ける）
     if (typeof Navigation !== 'undefined' && Navigation.approach) input = Navigation.approachInput(ship, input);
+    // v88: 母港からの出港（時速100kmで前進だけ）
+    if (typeof Navigation !== 'undefined' && Navigation.departure) input = Navigation.departureInput(ship, input);
     // v77: ワープ中は並進をワープ航法（16-navigation.js）が受け持ち、
     // 回転だけ通常の物理（RCSによる姿勢制御）で動かす。
     if (typeof Navigation !== 'undefined' && Navigation.isWarping()) {
@@ -66,6 +68,11 @@ const ShipController = {
         if (typeof Navigation !== 'undefined' && Navigation.approach) {
           Navigation.stepApproach(ship, h);
           if (Navigation.isWarping()) break; // （起こらないが念のため）
+        }
+        // v88: 母港からの出港。3km 進んだらワープ・内空航行が始まるので、残りの刻みはそちらで
+        if (typeof Navigation !== 'undefined' && Navigation.departure) {
+          Navigation.stepDeparture(ship, h);
+          if (Navigation.isWarping()) break;
         }
         // （進入中は速度を進入が受け持つので、境界面は姿勢だけ。竜骨が動いている到着点への速度を消さないように）
         if (ship.gravityDrive) GravityDrive.step(ship, input, h, typeof Navigation !== 'undefined' && !!Navigation.approach);
@@ -293,6 +300,14 @@ const GravityDrive = {
         const k = Math.exp(-this.TURN_SPEED_LOSS * Math.hypot(w.x, w.y) * dt);
         ship.velocity.x *= k; ship.velocity.y *= k; ship.velocity.z *= k;
       }
+    }
+    // v88: ロールの操作中は、境界面もロールする（面の「上」を艦の上へ合わせる）。v87 で境界面とのずれを
+    // 5°までにしたため、ロールを入れても境界面から5°で止まり、ロールが効かなくなっていた。
+    // 離すと、その傾きのまま境界面が支える（横揺れのばねは、その面に対して起き上がる）
+    if (ship._gdRolling && !ship._gdHold) {
+      const bFwd = rotateVecByQuat({ x: 0, y: 0, z: -1 }, ship.boundaryQuat);
+      const sUp = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
+      ship.boundaryQuat = this._quatFromForwardUp(bFwd, sUp) || ship.boundaryQuat;
     }
     // 境界面の復元力: 操作していない軸の回転を、本来の姿勢へ戻る角速度へ引き寄せる
     // （姿勢スラスターに頼らない、面が支える力）
