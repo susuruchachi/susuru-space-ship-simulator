@@ -863,10 +863,9 @@ const Navigation = {
       outward = Math.max(0, (fwd0.x * rx + fwd0.y * ry + fwd0.z * rz) / rl);
     }
     // v86: 内空航法は、その艦の最高船速 × 最大圧縮比まで
-    // v88: 星系の外では、もっと速く（内空航法は圧縮をもっと強くかけられる。値は仮）
+    // v88: 星系の外では、ワープはもっと速く。v88.002: 内空航法の圧縮比は、どこでも艦の設定の最大圧縮比まで
     const vMaxHere = this.warpMaxAt(shipU);
-    const deepK = vMaxHere / this.WARP_MAX_SPEED;
-    w.maxCompression = this.isInterspace() ? ship.interspace.maxCompression * deepK : 0;
+    w.maxCompression = this.isInterspace() ? ship.interspace.maxCompression : 0;
     const vMaxDrive = this.isInterspace() ? ship.interspace.maxSpeed * w.maxCompression : vMaxHere;
     let vLimit = Math.min(vMaxDrive, surf * this.WARP_K_SURFACE * (1 + 8 * outward * outward));
 
@@ -1004,12 +1003,12 @@ const Navigation = {
     vs = Math.min(vs, Math.max(tgt, 0));
     w.shipSpeed = Math.max(0, vs);
     // 圧縮比: 目標の実効の速さ ÷ 船速（1〜最大）。ワープと同じく対数で滑らかに変える
-    const cTarget = clamp(tgt / Math.max(w.shipSpeed, 1), 1, w.maxCompression || is.maxCompression);
+    const cTarget = clamp(tgt / Math.max(w.shipSpeed, 1), 1, is.maxCompression);
     const cur = Math.max(w.compression || 1, 1);
     const step = clamp(Math.log10(cTarget) - Math.log10(cur), -this.WARP_DECEL_DECADES * dt, this.WARP_ACCEL_DECADES * dt);
     w.compression = Math.pow(10, Math.log10(cur) + step);
     w.speed = Math.min(w.shipSpeed * w.compression, vLimit * 1.05);
-    if (w.shipSpeed > 0) w.compression = Math.max(1, w.speed / w.shipSpeed);
+    if (w.shipSpeed > 0) w.compression = clamp(w.speed / w.shipSpeed, 1, is.maxCompression);
   },
 
   // v83: 到着したら、姿勢をいきなり切り替えるのをやめ、到着後に姿勢スラスターで
