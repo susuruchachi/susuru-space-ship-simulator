@@ -577,14 +577,14 @@ const HUD = {
 
       const phaseLabels = {
         cruise: '自由巡航中',
-        approach: 'アプローチ中',
+        approach: 'アプローチ中（進入路の入口へ）',
         adjust: '軸合わせ調整中',
         brake300: '停止中（距離300・軸合わせ）',
-        final_approach: '最終アプローチ（姿勢調整）',
+        final_approach: '最終アプローチ（進入路を進んでいます）',
         brake250: '停止中（距離250・姿勢調整）',
-        tunnel: '最終進入（トンネル内・姿勢固定）',
+        tunnel: '最終進入（トンネル内）',
         overshoot: 'オーバーシュート通過中',
-        return_to_axis: '進入軸へ回り込み中',
+        return_to_axis: '港を避けて進入軸へ回り込み中',
         docked: '到着（固定）',
       };
       const phaseLabel = phaseLabels[ship._dockingPhase] || ship._dockingPhase || '-';
