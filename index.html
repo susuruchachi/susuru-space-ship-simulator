@@ -833,6 +833,21 @@
     .star-map-hint { display: none; }
     .star-map-legend { bottom: 96px; }
   }
+  /* v88: ダブルタップで、操作画面・目印をすべて隠し、艦と星と空だけにする（CleanView） */
+  body.clean-view > *:not(canvas):not(.clean-view-tools):not(.star-map-root) { display: none !important; }
+  .clean-view-tools { display: none; position: fixed; right: 14px; bottom: 14px; z-index: 50; gap: 10px; }
+  body.clean-view .clean-view-tools { display: flex; }
+  .clean-view-tools button {
+    width: 46px; height: 46px; border-radius: 23px; border: 1px solid rgba(255,255,255,0.35);
+    background: rgba(10, 20, 40, 0.45); color: #fff; font-size: 20px; line-height: 1; padding: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .clean-view-tools button:active { background: rgba(80, 120, 200, 0.6); }
+  .clean-view-flash { position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none; z-index: 60; transition: opacity 0.35s; }
+  .clean-view-toast {
+    position: fixed; left: 50%; bottom: 74px; transform: translateX(-50%); z-index: 61; display: none;
+    background: rgba(10, 20, 40, 0.75); color: #fff; font-size: 13px; padding: 6px 12px; border-radius: 14px;
+  }
 </style>
 </head>
 <body>
@@ -901,6 +916,7 @@ function initScene() {
   renderer.autoClear = false;
   renderer.setClearColor(0x000000, 1);
   document.body.appendChild(renderer.domElement);
+  CleanView.init(renderer.domElement); // v88: ダブルタップで艦と星と空だけに
 
   // v77: 以前はランダムな点を並べた簡易的な星空と固定の照明だったが、
   // 実在の星表・天の川・太陽系の天体（15-universe-render.js）に置き換えた。
@@ -1242,6 +1258,84 @@ function initGame() {
 
 // v88: 1フレームの処理でエラーが起きたら、その内容を残し、一度だけ読み込み直す（更新の直後に古いファイルと
 // 新しいファイルが混ざったとき用。2回目からは読み込み直さず、続けて動かす）
+// -------------------------------------------------------------
+// v88: ダブルタップ（ダブルクリック）で操作画面・目印をすべて隠し、艦と星と空だけを見せる。
+// そのときだけ出る📷で、画面の3D（艦・星・空）だけをそのまま画像に保存する（ボタンなどは写らない）。
+// -------------------------------------------------------------
+const CleanView = {
+  on: false,
+  _shotPending: false,
+  init(canvas) {
+    const tools = document.createElement('div');
+    tools.className = 'clean-view-tools';
+    tools.innerHTML = '<button type="button" class="cv-shot" title="スクリーンショット">📷</button><button type="button" class="cv-exit" title="元に戻す（ダブルタップでも戻れます）">✕</button>';
+    document.body.appendChild(tools);
+    tools.querySelector('.cv-shot').addEventListener('click', (e) => { e.stopPropagation(); this._shotPending = true; });
+    tools.querySelector('.cv-exit').addEventListener('click', (e) => { e.stopPropagation(); this.set(false); });
+    this._flash = document.createElement('div');
+    this._flash.className = 'clean-view-flash';
+    document.body.appendChild(this._flash);
+    this._toast = document.createElement('div');
+    this._toast.className = 'clean-view-toast';
+    document.body.appendChild(this._toast);
+    canvas.addEventListener('dblclick', () => this.toggle());
+    // タッチのダブルタップ（短く・あまり動かさない2回のタップ）
+    let last = 0, lastX = 0, lastY = 0, start = null;
+    canvas.addEventListener('touchstart', (e) => {
+      start = e.touches.length === 1 ? { t: performance.now(), x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+    }, { passive: true });
+    canvas.addEventListener('touchend', (e) => {
+      if (!start || e.touches.length > 0) { start = null; return; }
+      const t = e.changedTouches[0];
+      const now = performance.now();
+      const short = now - start.t < 300 && Math.hypot(t.clientX - start.x, t.clientY - start.y) < 15;
+      start = null;
+      if (!short) { last = 0; return; }
+      if (now - last < 350 && Math.hypot(t.clientX - lastX, t.clientY - lastY) < 40) { last = 0; this.toggle(); }
+      else { last = now; lastX = t.clientX; lastY = t.clientY; }
+    }, { passive: true });
+  },
+  toggle() { this.set(!this.on); },
+  set(on) {
+    if (on && typeof StarMap !== 'undefined' && StarMap.isOpen()) return;
+    this.on = !!on;
+    State.cleanView = this.on;
+    document.body.classList.toggle('clean-view', this.on);
+  },
+  // 描画の直後に呼ぶ（そのフレームの絵をそのまま画像にする）
+  afterRender(canvas) {
+    if (!this._shotPending) return;
+    this._shotPending = false;
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    const name = `space-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.png`;
+    canvas.toBlob(async (blob) => {
+      if (!blob) { this._say('画像にできませんでした'); return; }
+      this._flash.style.transition = 'none';
+      this._flash.style.opacity = '0.6';
+      requestAnimationFrame(() => { this._flash.style.transition = 'opacity 0.35s'; this._flash.style.opacity = '0'; });
+      // 端末の「共有」が使えれば写真アプリ等へ、使えなければファイルとして保存
+      const file = typeof File !== 'undefined' ? new File([blob], name, { type: 'image/png' }) : null;
+      if (file && navigator.canShare && navigator.canShare({ files: [file] }) && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+        try { await navigator.share({ files: [file] }); return; } catch (e) { if (e && e.name === 'AbortError') return; }
+      }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+      this._say(`保存しました（${name}）`);
+    }, 'image/png');
+  },
+  _say(text) {
+    this._toast.textContent = text;
+    this._toast.style.display = 'block';
+    clearTimeout(this._toastTimer);
+    this._toastTimer = setTimeout(() => { this._toast.style.display = 'none'; }, 2200);
+  },
+};
+
 function animate() {
   requestAnimationFrame(animate);
   try {
@@ -1308,6 +1402,7 @@ function animateFrame() {
       renderer.render(scene, camera);
     });
   }
+  CleanView.afterRender(renderer.domElement); // v88: スクリーンショット（描画の直後に）
 }
 
 initScene();

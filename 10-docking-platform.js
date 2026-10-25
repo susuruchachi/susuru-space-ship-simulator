@@ -69,7 +69,7 @@ const DockingPlatform = {
     // ゲートの枠などの誘導表示だけ）。母港を離れている間（ワープ・自動航行中など）も、
     // 母港フレームでのポートの位置を今のフレームに直して表示し続ける（以前はここで
     // 消して、戻るたびに大きなモデルを読み込み直していた）。
-    const showGuides = State.settings.showApproachGuides !== false;
+    const showGuides = State.settings.showApproachGuides !== false && !State.cleanView; // v88: ダブルタップの表示では隠す
 
     if (!target) {
       if (this._group) {

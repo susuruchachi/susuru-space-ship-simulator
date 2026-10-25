@@ -1654,7 +1654,8 @@ const Universe = {
   },
 
   _updateOrbitLines() {
-    const show = this.settings.showOrbits || this._mapMode;
+    // v88: ダブルタップの表示（艦と星と空だけ）では軌道線も出さない
+    const show = this._mapMode || (this.settings.showOrbits && !State.cleanView);
     const camU = this.cameraUniversePos();
     const rel = {};
     for (const b of SolarSystem.bodies) {
