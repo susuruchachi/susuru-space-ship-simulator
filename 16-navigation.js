@@ -48,6 +48,7 @@ const Navigation = {
   approach: null,
   APPROACH_BRAKE_MARGIN: 0.7, // 減速に使う加速度 = 艦が出せる減速 × この値（余裕）
   APPROACH_MAX_DROP_DIST: 2e6, // 通常航行で減速する距離の上限 [m]（2000 km。弱い艦は、ここから最高速より遅く入る）
+  APPROACH_MAX_TIME: 90,       // v88: 通常航行での進入にかける時間の上限の目安 [s]（減速の弱い艦は、もっと手前まで内空航行・ワープで行く）
 
   frame: null,      // { bodyId, offset, rot(3x3 local→universe), rotT, quat(THREE), isHome }
   homeFrame: null,
@@ -691,7 +692,9 @@ const Navigation = {
   dropDistance(ship) {
     const vN = this.normalMaxSpeed(ship);
     if (!Number.isFinite(vN)) return 0;
-    return Math.min(this.APPROACH_MAX_DROP_DIST, (vN * vN) / (2 * this.brakeAccel(ship)));
+    const a = this.brakeAccel(ship);
+    // 止まり切れる速さで進むと、距離 d を進むのに約 √(2d/a) 秒。それが APPROACH_MAX_TIME を超えないように
+    return Math.min(this.APPROACH_MAX_DROP_DIST, (vN * vN) / (2 * a), 0.5 * a * this.APPROACH_MAX_TIME * this.APPROACH_MAX_TIME);
   },
   isApproaching() {
     return !!this.approach;

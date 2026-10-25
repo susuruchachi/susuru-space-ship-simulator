@@ -526,6 +526,7 @@ const ShipAllocator = {
   // 噴射する」の修正）。大きすぎると、姿勢スラスターしか効かない向きで出力が
   // 指示より弱くなり、自動ドッキングで止まり切れなくなる。
   RCS_REG_FACTOR: 10,
+  COND_REG: 1e-10, // v88: 列の強さ（2乗）に対する正則化の下限（_solveCore）
 
   // 艦ごとの前計算（スラスター構成が変わったときだけやり直す）
   prepare(ship) {
@@ -580,6 +581,15 @@ const ShipAllocator = {
     }
     const rcsOnly = new Uint8Array(N);
     for (let k = 0; k < N; k++) rcsOnly[k] = cols[k].isEngine ? 0 : 1;
+    // v88: 姿勢スラスター等（エンジン以外）だけの単純な上限。それだけで能力を見積もるときの物差しに使う
+    const naivePosR = new Float64Array(6), naiveNegR = new Float64Array(6);
+    for (let k = 0; k < N; k++) {
+      if (!rcsOnly[k]) continue;
+      for (let row = 0; row < 6; row++) {
+        const v = B[k * 6 + row];
+        if (v > 0) naivePosR[row] += v; else naiveNegR[row] -= v;
+      }
+    }
     // v84: 主エンジンだけの前進（-Z）推力。手動のスロットルではこれを上限にする
     // （姿勢スラスターまで足した最大値を上限にすると、全開で加速するたびに
     // 姿勢スラスターも前進に使ってしまう）
@@ -617,15 +627,25 @@ const ShipAllocator = {
           }
           target[row] = sign * naive * 1.05;
           const r = new Float64Array(N);
-          // 回転（トルク）の能力は姿勢スラスターだけで見積もる
-          this._solveCore(a, target, scale, weight, this.CAP_ITERATIONS, r, row >= 3 ? rcsOnly : null);
+          // 回転（トルク）の能力は姿勢スラスターだけで見積もる。v88: そのときの物差しも、姿勢スラスター等だけの
+          // 上限にする（エンジンの上限で測ると、エンジンがとても強い艦では回す力が小さすぎて見積もりが小さく出た。
+          // RMIS TEUTONIC 2125 でヨーが実際の約6億N·mに対し5千万N·m）
+          const scaleR = new Float64Array(6), targetR = new Float64Array(6);
+          for (let j = 0; j < 6; j++) scaleR[j] = 1 / Math.max(naivePosR[j], naiveNegR[j], 1e-9);
+          const naiveR = sign > 0 ? naivePosR[row] : naiveNegR[row];
+          targetR[row] = sign * naiveR * 1.05;
+          if (row >= 3) this._solveCore(a, targetR, scaleR, weight, this.CAP_ITERATIONS, r, rcsOnly);
+          else this._solveCore(a, target, scale, weight, this.CAP_ITERATIONS, r, null);
           let achieved = 0;
           for (let k = 0; k < N; k++) achieved += B[k * 6 + row] * r[k];
           cap = Math.max(0, achieved * sign);
           if (row < 3) {
             // 同じ向きの力を、姿勢スラスターだけで（回転させずに）どこまで出せるか
             const r2 = new Float64Array(N);
-            this._solveCore(a, target, scale, weight, this.CAP_ITERATIONS, r2, rcsOnly);
+            const scaleR = new Float64Array(6), targetR = new Float64Array(6);
+            for (let j = 0; j < 6; j++) scaleR[j] = 1 / Math.max(naivePosR[j], naiveNegR[j], 1e-9);
+            targetR[row] = sign * (sign > 0 ? naivePosR[row] : naiveNegR[row]) * 1.05;
+            this._solveCore(a, targetR, scaleR, weight, this.CAP_ITERATIONS, r2, rcsOnly);
             let ach2 = 0;
             for (let k = 0; k < N; k++) ach2 += B[k * 6 + row] * r2[k];
             if (sign > 0) a.rcsCapPos[row] = Math.max(0, ach2); else a.rcsCapNeg[row] = Math.max(0, -ach2);
@@ -667,6 +687,10 @@ const ShipAllocator = {
       if ((mask && !mask[k]) || colNorm[k] <= 0) { r[k] = 0; st[k] = 2; continue; }
       // 主エンジンとジャイロは使っても損が小さい（ジャイロで足りる回転は姿勢スラスターを使わない）
       lamCol[k] = this.L2_REG * (a.isMainCol[k] || a.isGyroCol[k] ? 1 : this.RCS_REG_FACTOR);
+      // v88: とても強い列（ほかの列より何桁も強いエンジンなど）は、正則化を列の強さに合わせて大きくする。
+      // そうしないと連立方程式の係数の桁が離れすぎて（10^20 以上）、弱い列（ジャイロ）の答えが計算の誤差に
+      // 埋もれて消えていた（RMIS TEUTONIC 2125 で、ヨーの回す力が全く出なかった）。ふつうの艦では効かない
+      lamCol[k] = Math.max(lamCol[k], colNorm[k] * this.COND_REG);
       let v = r[k];
       if (!(v > 1e-12)) { r[k] = 0; st[k] = -1; } else if (v >= 1 - 1e-12) { r[k] = 1; st[k] = 1; } else st[k] = 0;
     }
