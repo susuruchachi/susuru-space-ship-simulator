@@ -1240,8 +1240,24 @@ function initGame() {
   ApproachVisualizer.init(scene);
 }
 
+// v88: 1フレームの処理でエラーが起きたら、その内容を残し、一度だけ読み込み直す（更新の直後に古いファイルと
+// 新しいファイルが混ざったとき用。2回目からは読み込み直さず、続けて動かす）
 function animate() {
   requestAnimationFrame(animate);
+  try {
+    animateFrame();
+  } catch (e) {
+    console.error('フレームの処理でエラーが起きました', e);
+    let tried = false;
+    try { tried = sessionStorage.getItem('spaceSimReloaded') === GAME_VERSION; } catch (e2) { /* ignore */ }
+    if (!tried) {
+      try { sessionStorage.setItem('spaceSimReloaded', GAME_VERSION); } catch (e2) { /* ignore */ }
+      location.reload();
+    }
+  }
+}
+
+function animateFrame() {
   const dt = Math.min(clock.getDelta(), 0.05); // タブ切り替え等の大ジャンプ対策
 
   // v77: 宇宙の時刻を進め、太陽系の天体の位置・自転を更新してから艦を動かす

@@ -715,9 +715,17 @@ const Navigation = {
       if (!this.goHomeFrameIfNear(true)) this._rebaseToDominantBody(false, true);
     } else {
       const b = arrival.body;
-      if (arrival.lagrange) ap.lagrange = arrival.lagrange;
-      else ap.rel = { x: arrival.point.x - b.pos.x, y: arrival.point.y - b.pos.y, z: arrival.point.z - b.pos.z };
-      this._rebaseToBody(b, true);
+      if (arrival.lagrange) {
+        // ラグランジュ点は動いている（月の L 点で秒速約1km）。その点と一緒に動くフレームに乗って近づく
+        // （月と一緒に動くフレームのままだと、最高速の制限で追いつけないことがあった）
+        ap.lagrange = arrival.lagrange;
+        const f = this._makeFrame(arrival.lagrange.secondary, { x: 0, y: 0, z: 0 }, [1, 0, 0, 0, 1, 0, 0, 0, 1], false);
+        f.lagrange = arrival.lagrange;
+        this.switchFrame(f, true);
+      } else {
+        ap.rel = { x: arrival.point.x - b.pos.x, y: arrival.point.y - b.pos.y, z: arrival.point.z - b.pos.z };
+        this._rebaseToBody(b, true);
+      }
     }
     this.approach = ap;
     this.warp.status = `${name}を終え、通常航行で${ap.label}の到着点へ向かっています`;

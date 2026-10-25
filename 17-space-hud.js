@@ -138,7 +138,7 @@ const SpaceHud = {
       ['準惑星・小天体', SolarSystem.bodies.filter((b) => ['dwarf', 'asteroid', 'comet'].includes(b.type) && !b.sys).map((b) => [b.id, b.ja])],
     ];
     // v88: 系外の星系（恒星と惑星。ハビタブルゾーンの惑星に印）と、銀河のステーション
-    for (const sys of DeepSpace.systems) {
+    for (const sys of (typeof DeepSpace !== 'undefined' ? DeepSpace.systems : [])) {
       const items = SolarSystem.bodies.filter((b) => b.sys === sys.id).map((b) => [b.id,
         b.type === 'station' ? `🛰 ${b.ja}` : b.type === 'star' ? `${b.ja}（恒星）` : `${b.ja}${b.hz ? '（ハビタブル）' : ''}`]);
       const dist = sys.distLy >= 1e4 ? `${Math.round(sys.distLy / 1e4).toLocaleString('ja-JP')}万光年` : `${sys.distLy < 100 ? sys.distLy.toFixed(1) : Math.round(sys.distLy).toLocaleString('ja-JP')}光年`;
@@ -374,7 +374,7 @@ const SpaceHud = {
       if (Navigation.isHome()) loc = `母港 ・ 地球 上空 ${this.formatDistance(info.altitude)}`;
       else if (dom.type === 'star' && dom.sys) {
         // v88: 系外の星系の中
-        const sys = DeepSpace.systems.find((s) => s.id === dom.sys);
+        const sys = typeof DeepSpace !== 'undefined' ? DeepSpace.systems.find((s) => s.id === dom.sys) : null;
         const near = info.nearest && info.nearest.type !== 'star' && info.nearestDist < 0.05 * Astro.AU ? info.nearest : null;
         loc = near ? `${near.ja} 上空 ${this.formatDistance(info.nearestDist)}`
           : sys && sys.kind === 'galaxy' ? `${sys.ja} ・ ${dom.ja}から ${this.formatDistance(SolarSystem.distance(Navigation._shipU, dom))}`

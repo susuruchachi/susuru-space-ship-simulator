@@ -6,8 +6,11 @@
 // - 同じサイトのファイルは「ネットを優先、つながらなければ保存したもの」（更新がすぐ届く）。
 // - 外部（Googleログイン・Firebase など）には手を出さない。
 // CACHE_NAME を変えると古い保存を捨てる（大きく作り直したとき用）。
+// v88: ネットから読むときも、ブラウザに残っている古いファイル（GitHub Pages は10分間の保存を許す）を
+// 使わず、必ずサーバーに新しいかどうかを確かめる。更新の直後に古いファイルと新しいファイルが混ざると、
+// 毎フレームの処理の途中でエラーになり、艦が動かなくなることがあったため。
 // =============================================================
-const CACHE_NAME = 'space-sim-v1';
+const CACHE_NAME = 'space-sim-v2';
 const PRECACHE = [
   "./",
   "01-state-and-config.js",
@@ -64,7 +67,7 @@ const PRECACHE = [
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(PRECACHE))
+      .then((cache) => cache.addAll(PRECACHE.map((u) => new Request(u, { cache: 'reload' }))))
       .then(() => self.skipWaiting())
   );
 });
@@ -82,8 +85,10 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
+  // コード・ページは毎回サーバーに確かめる（変わっていなければ短い返事だけで済む）。テクスチャなどはそのまま
+  const isCode = req.mode === 'navigate' || /\.(js|html|json|webmanifest|css)$/.test(url.pathname) || url.pathname.endsWith('/');
   event.respondWith(
-    fetch(req)
+    fetch(req, isCode ? { cache: 'no-cache' } : undefined)
       .then((res) => {
         if (res && res.ok && res.type === 'basic') {
           const copy = res.clone();

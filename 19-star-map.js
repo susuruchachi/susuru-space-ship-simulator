@@ -377,7 +377,7 @@ const StarMap = {
         // 惑星はその星系を見ているときだけ
         if (b.sys) {
           const near = this._nearSystem(b);
-          const galaxy = DeepSpace.systems.find((s) => s.id === b.sys && s.kind === 'galaxy');
+          const galaxy = typeof DeepSpace !== 'undefined' && DeepSpace.systems.find((s) => s.id === b.sys && s.kind === 'galaxy');
           if (b.type === 'star') return (near && d < 2 * LY) || (!galaxy && d > 0.3 * LY && d < 6000 * LY && distFromCam < d * 3);
           if (b.type === 'station') return near || d > 60000 * LY;
           return near && d < 3000 * AU;
