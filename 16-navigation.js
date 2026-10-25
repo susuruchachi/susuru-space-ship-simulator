@@ -610,9 +610,9 @@ const Navigation = {
 
   // -----------------------------------------------------------
   // v88: 母港からの出港。ポートの近く（DEPART_DIST 以内）でワープ・内空航行・自動航行を始めたら、まず
-  // 時速100km（DEPART_SPEED）を上限に、機首の向きへ前進だけで DEPART_DIST 進み、それから一気に加速する
+  // 時速500km（DEPART_SPEED。v88.008: 100km から変更）を上限に、機首の向きへ前進だけで DEPART_DIST 進み、それから一気に加速する
   // -----------------------------------------------------------
-  DEPART_SPEED: 100 / 3.6, // [m/s]
+  DEPART_SPEED: 500 / 3.6, // [m/s]
   DEPART_DIST: 3000,       // [m]
   departure: null,         // { autopilot, start, t }
   isDeparting() {
@@ -654,7 +654,7 @@ const Navigation = {
     const p = ship.position, s = dep.start;
     const moved = Math.hypot(p.x - s.x, p.y - s.y, p.z - s.z);
     dep.moved = moved;
-    this.warp.status = `出港中: 時速100kmで前進（あと ${Math.max(0, Math.round(this.DEPART_DIST - moved)).toLocaleString('ja-JP')} m）`;
+    this.warp.status = `出港中: 時速${Math.round(this.DEPART_SPEED * 3.6)}kmで前進（あと ${Math.max(0, Math.round(this.DEPART_DIST - moved)).toLocaleString('ja-JP')} m）`;
     // 3km 進んだら（ポートの壁などで進めないまま長く経ったときも）、一気に加速する
     if (moved >= this.DEPART_DIST || dep.t > this.DEPART_DIST / this.DEPART_SPEED + 60) {
       this.departure = null;
@@ -680,7 +680,7 @@ const Navigation = {
       this.approach = null;
       ship.angularVelocity = { x: 0, y: 0, z: 0 };
       this.departure = { autopilot: !!autopilot, start: { ...ship.position }, t: 0, moved: 0 };
-      this.warp.status = '出港中: 時速100kmで前進';
+      this.warp.status = `出港中: 時速${Math.round(this.DEPART_SPEED * 3.6)}kmで前進`;
       return true;
     }
     return this._engageNow(autopilot);
