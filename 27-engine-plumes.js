@@ -11,9 +11,9 @@
 //   gravity3 三段圧縮重力場機関: 後ろへ行くほど細く、円錐よりシュッと鋭く尖った炎。
 //            その後ろに輪が3本。輪の間隔は後ろほど広く、出力が高いほど全体に広がる。
 //            出力が高いと青白く、低いと黄色い。
-//   gwave    重力波共振機関: 後ろへ閉じる完全な円錐で、とても長い。その周りを
-//            3本の線が螺旋を描いて回りながら後ろへ流れる（スクリューの泡の筋のように）。
-//            色は全部青白い。
+//   gwave    重力波共振機関: 中央に三段圧縮重力場機関と同じ鋭く尖った円錐の炎。
+//            その周りを三段圧縮重力場機関の輪と同じ細い線が3本、螺旋を描いて回りながら
+//            後ろへ長く伸びる。色は全部青白い。
 //
 // 形は「ノズルの直径 = 1、噴射の向き = +Z」の大きさで作り、ノズルの直径倍に拡大する。
 // =============================================================
@@ -116,17 +116,19 @@ const EnginePlumes = {
     return geo;
   },
 
-  // 3本の螺旋（円錐の表面に沿って、後ろへ行くほど半径が小さくなる）
-  _helix(key, turns, phase) {
+  // 3本の螺旋（輪と同じくらいの半径から、後ろへ行くほどゆるやかに細くなる）
+  //   length: 実際の長さ（ノズル直径倍）。Z を大きく引き伸ばすと線が帯のように太るので、
+  //   最大の長さで作っておき、出力に合わせて少しだけ縮める
+  _helix(key, turns, phase, length) {
     if (this._geoCache[key]) return this._geoCache[key];
     class Helix extends THREE.Curve {
       getPoint(u, target) {
-        const r = 0.62 * (1 - u) + 0.04;
+        const r = 0.47 * (1 - 0.55 * u);
         const a = phase + u * turns * Math.PI * 2;
-        return (target || new THREE.Vector3()).set(Math.cos(a) * r, Math.sin(a) * r, u);
+        return (target || new THREE.Vector3()).set(Math.cos(a) * r, Math.sin(a) * r, u * length);
       }
     }
-    const geo = new THREE.TubeGeometry(new Helix(), 360, 0.05, 8, false);
+    const geo = new THREE.TubeGeometry(new Helix(), Math.ceil(Math.abs(turns) * 64), 0.04, 8, false);
     // TubeGeometry の uv.x が曲線に沿った位置。シェーダーは uv.y を使うので入れ替える
     const uv = geo.attributes.uv;
     for (let i = 0; i < uv.count; i++) { const x = uv.getX(i); uv.setX(i, uv.getY(i)); uv.setY(i, x); }
@@ -228,15 +230,16 @@ const EnginePlumes = {
         for (const p of parts) p.mat.uniforms.uTime.value = time;
       };
     } else {
-      // 重力波共振機関: 完全な円錐で、とても長い
-      const cone = add(this._lathe('gwcone', (z) => 0.5 * (1 - z)),
-        this._material({ a: 0xffffff, b: 0xbfdcff, c: 0x80aaff, fade: 0.56, edge: 1.1, flicker: 0.04 }));
+      // 重力波共振機関: 中央に三段圧縮重力場機関と同じ鋭く尖った円錐の炎。
+      // その周りを、三段圧縮重力場機関の輪と同じ細い線が3本、螺旋を描いて後ろへ長く伸びる
+      const cone = add(this._lathe('g3cone', (z) => 0.5 * Math.pow(1 - z, 2.2)),
+        this._material({ a: 0xffffff, b: 0xb8d8ff, c: 0x7fb0ff, fade: 0.63, edge: 1.0, flicker: 0.06 }));
       const helixGroup = new THREE.Group();
       group.add(helixGroup);
       const lines = [];
       for (let i = 0; i < 3; i++) {
-        const m = new THREE.Mesh(this._helix(`gwhelix${i}${tw < 0 ? 'L' : 'R'}`, 4 * tw, (i * Math.PI * 2) / 3),
-          this._material({ a: 0xffffff, b: 0xd8ecff, c: 0x9cc4ff, fade: 0.49, edge: 0.0, flicker: 0, dash: 14, flow: 2.2 }));
+        const m = new THREE.Mesh(this._helix(`gwhelix${i}${tw < 0 ? 'L' : 'R'}`, 10 * tw, (i * Math.PI * 2) / 3, L0),
+          this._material({ a: 0xffffff, b: 0xd8ecff, c: 0x9cc4ff, fade: 0.55, edge: 0.4, flicker: 0.05 }));
         m.frustumCulled = false;
         m.renderOrder = 6;
         helixGroup.add(m);
@@ -244,18 +247,16 @@ const EnginePlumes = {
         parts.push(p);
         lines.push(p);
       }
+      const Lcone0 = ENGINE_TYPES.gravity3.length;
       update = (ratio, time) => {
         const L = L0 * (0.4 + 0.6 * ratio);
-        cone.mesh.scale.set(1, 1, L);
-        cone.mat.uniforms.uIntensity.value = 0.45 * (0.3 + 0.7 * ratio);
-        helixGroup.scale.set(1, 1, L);
+        cone.mesh.scale.set(1, 1, Lcone0 * (0.45 + 0.55 * ratio));
+        cone.mat.uniforms.uIntensity.value = 1.1 * (0.35 + 0.65 * ratio);
+        helixGroup.scale.set(1, 1, L / L0);
         // 螺旋が回りながら後ろへ流れる（出力が高いほど速い）
         // ねじれの向きに合わせて回る（左ねじれは逆回り）
         helixGroup.rotation.z = -tw * time * (1.5 + 3 * ratio);
-        for (const p of lines) {
-          p.mat.uniforms.uIntensity.value = 1.1 * (0.3 + 0.7 * ratio);
-          p.mat.uniforms.uFlow.value = 1 + 2.5 * ratio;
-        }
+        for (const p of lines) p.mat.uniforms.uIntensity.value = 1.5 * (0.3 + 0.7 * ratio);
         for (const p of parts) p.mat.uniforms.uTime.value = time;
       };
     }
