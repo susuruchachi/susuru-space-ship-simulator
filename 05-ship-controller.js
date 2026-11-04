@@ -220,6 +220,10 @@ const GravityDrive = {
   ROLL_DAMPING: 0.45,     // 減衰比（1 で揺れずに戻る。小さいほど揺れが続く。0.45 で少し揺れてすぐ収まる）
   HEEL_GAIN: 0.004,       // 旋回中の傾き [rad] = この値 × 旋回の角速度 [rad/s] × 前進の速さ [m/s]
   HEEL_MAX: 4 * Math.PI / 180, // 傾きの上限 [rad]（v86: 4°。境界面とのずれは最大5°なので、その少し内側）
+  // v88: 傾きに効く前進の速さの上限 [m/s]。ワープ明けの秒速数百kmでは、ほぼ0の角速度の揺らぎでも
+  // 傾きが上限の ±4° に振り切れ、左右に交互に振られて艦がフラフラしていた
+  HEEL_SPEED_MAX: 300,
+  HEEL_TIME: 0.6,         // v88: 傾きの目標がなめらかに変わる時間 [s]
   MAX_TILT: 5 * Math.PI / 180, // v86: 艦と境界面の向きのずれの上限 [rad]（どの向きにも5°まで）
   // v85: 浮力（境界面より沈む・浮くと、強い力で面の高さへ押し戻す）
   BUOY_OMEGA: 3.0,        // [rad/s]
@@ -318,9 +322,11 @@ const GravityDrive = {
     if (!ship._gdRolling) {
       const e = this._error(ship);
       const fwdSpeed = -rotateVecByQuat(ship.velocity, conjugateQuat(ship.quaternion)).z;
-      const heel = clamp(-this.HEEL_GAIN * w.y * fwdSpeed, -this.HEEL_MAX, this.HEEL_MAX);
+      const v = clamp(fwdSpeed, -this.HEEL_SPEED_MAX, this.HEEL_SPEED_MAX);
+      const heelTarget = clamp(-this.HEEL_GAIN * w.y * v, -this.HEEL_MAX, this.HEEL_MAX);
+      ship._gdHeel = (ship._gdHeel || 0) + (heelTarget - (ship._gdHeel || 0)) * (1 - Math.exp(-dt / this.HEEL_TIME));
       const Wn = this.ROLL_OMEGA;
-      w.z += (Wn * Wn * (heel + e.z) - 2 * this.ROLL_DAMPING * Wn * w.z) * dt;
+      w.z += (Wn * Wn * (ship._gdHeel + e.z) - 2 * this.ROLL_DAMPING * Wn * w.z) * dt;
     }
 
     // 周回中の自動の姿勢合わせ・ワープ中は、浮力・竜骨の働きで速度を変えない
