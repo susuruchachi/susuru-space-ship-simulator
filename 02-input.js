@@ -14,6 +14,7 @@ const InputSystem = {
   },
   // v04: スロットルレバー。バネ戻り式スティックと違い、指を離しても
   // _ratio は最後の位置を保持し続ける（保持型/detent無しレバー）
+  THROTTLE_ZERO_DETENT: 0.12, // v88: レバーの中央のこの幅（全体の ±12%）は 0%
   _throttleLever: {
     active: false,
     id: null,
@@ -160,12 +161,29 @@ const InputSystem = {
       const usable = Math.max(1, bottom - top);
       const clampedY = clamp(clientY, top, bottom);
       // 上端(top)=+1(フル前進)、下端(bottom)=-1(フル後進)になるよう反転
-      const normalized = 1 - ((clampedY - top) / usable) * 2;
-      lever.ratio = clamp(normalized, -1, 1);
+      const normalized = clamp(1 - ((clampedY - top) / usable) * 2, -1, 1);
+      // v88: 0% の止まりどころ（中央の ±ZERO_DETENT は 0%。その外側は 0% からなめらかに続ける）。
+      // 以前は止まりどころが無く、指で 0% ちょうどに合わせにくかった
+      const dz = this.THROTTLE_ZERO_DETENT;
+      const a = Math.abs(normalized);
+      lever.ratio = a <= dz ? 0 : Math.sign(normalized) * ((a - dz) / (1 - dz));
       this._updateThrottleVisual();
     };
 
-    const onStart = (clientY, id) => {
+    // v88: レバーをダブルタップ、または下の「%」の表示をタップすると 0% に戻す
+    let lastTap = 0, lastTapY = 0;
+    const onStart = (clientY, id, target) => {
+      if (target && lever.labelEl && lever.labelEl.contains(target)) {
+        this.setThrottleLever(0);
+        return;
+      }
+      const now = performance.now();
+      if (now - lastTap < 350 && Math.abs(clientY - lastTapY) < 40) {
+        lastTap = 0;
+        this.setThrottleLever(0);
+        return;
+      }
+      lastTap = now; lastTapY = clientY;
       lever.active = true;
       lever.id = id;
       applyRatioFromClientY(clientY);
@@ -186,7 +204,7 @@ const InputSystem = {
     el.addEventListener('touchstart', (e) => {
       e.preventDefault();
       const t = e.changedTouches[0];
-      onStart(t.clientY, t.identifier);
+      onStart(t.clientY, t.identifier, e.target);
     }, { passive: false });
 
     el.addEventListener('touchmove', (e) => {
@@ -204,7 +222,7 @@ const InputSystem = {
     el.addEventListener('touchcancel', onEnd);
 
     // マウスでもテストできるようフォールバック
-    el.addEventListener('mousedown', (e) => onStart(e.clientY, 'mouse'));
+    el.addEventListener('mousedown', (e) => onStart(e.clientY, 'mouse', e.target));
     window.addEventListener('mousemove', (e) => {
       if (lever.id === 'mouse') onMove(e.clientY);
     });
@@ -228,6 +246,14 @@ const InputSystem = {
     if (lever.labelEl) {
       lever.labelEl.textContent = `${Math.round(lever.ratio * 100)}%`;
     }
+    lever.el.classList.toggle('at-zero', lever.ratio === 0);
+  },
+
+  // v88: レバーの保持値を外から決める（-1..1）。自動航行を切ったときに今のワープのスロットルへ合わせる、
+  // ダブルタップで 0% に戻す、など
+  setThrottleLever(ratio) {
+    this._throttleLever.ratio = clamp(Number(ratio) || 0, -1, 1);
+    this._updateThrottleVisual();
   },
 
   _readTouch() {

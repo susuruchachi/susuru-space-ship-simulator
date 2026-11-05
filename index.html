@@ -122,6 +122,22 @@
     top: 50%;
     transform: translateY(-50%);
   }
+  /* v88: 0% の止まりどころ（中央の帯）。0% のときはハンドルの色を変える */
+  .throttle-lever::after {
+    content: '';
+    position: absolute;
+    left: 2px;
+    right: 2px;
+    top: 44%;
+    height: 12%;
+    border-radius: 4px;
+    background: rgba(255,255,255,0.06);
+    pointer-events: none;
+  }
+  .throttle-lever.at-zero .throttle-lever-handle {
+    background: rgba(255,255,255,0.35);
+    border-color: rgba(255,255,255,0.85);
+  }
   .throttle-lever-label {
     position: absolute;
     left: 0;
