@@ -312,6 +312,31 @@
   }
   body.clean-view .wpn-reticle, body.clean-view .wpn-hint { display: none !important; }
   .wpn-zoom { font-weight: bold; color: #fff; }
+  /* v89: 砲塔ごとの照準マークと、下の番号（緑=撃てる・黄=旋回中・赤=装填中・灰=射線が当たる／寄せただけ・白灰=向けられない） */
+  .wpn-gunmarks { position: fixed; inset: 0; pointer-events: none; }
+  .wpn-gunmark {
+    position: absolute; width: 16px; height: 16px; margin: -8px 0 0 -8px;
+    border: 2px solid currentColor; border-radius: 50%; box-sizing: border-box;
+  }
+  .wpn-gunmark span { position: absolute; left: 14px; top: -12px; font-size: 10px; font-weight: bold; text-shadow: 0 1px 2px #000; }
+  .wpn-chips {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; max-width: 46vw; pointer-events: none;
+  }
+  .wpn-chip {
+    min-width: 22px; height: 22px; padding: 0 4px; box-sizing: border-box; border-radius: 5px;
+    font-size: 12px; font-weight: bold; line-height: 20px; text-align: center;
+    border: 1px solid currentColor; background: rgba(0,0,0,0.45);
+  }
+  .st-ready { color: #3dff6e; }
+  .st-moving { color: #ffd84a; }
+  .st-reload { color: #ff4a3a; }
+  .st-gray { color: #8a9099; }
+  .st-none { color: #d8dde3; opacity: 0.75; }
+  .wpn-chip.st-ready { background: rgba(30,120,50,0.45); }
+  .wpn-chip.st-reload { background: rgba(130,30,20,0.45); }
+  body.clean-view .wpn-gunmarks, body.clean-view .wpn-chips { display: none !important; }
+
   .hud-camera-controls {
     position: fixed;
     top: 56px;

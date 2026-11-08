@@ -218,6 +218,89 @@ const WeaponRig = {
     const elev = Math.atan2(up, h.length());
     return { yaw, elev };
   },
+  // v89: 射線の判定用に、船体を細かい格子（モデルの座標）にする。砲身は回るので入れない。
+  //   cell: 0 = 空, 1 = 船体（射撃レーダーなども）, 2 + k = k 番目の砲塔（自分の砲塔には当たらないように区別する）
+  //   ボーンが元の向きのとき（読み込んだ直後）に作る
+  buildOcclusion(root, rig, res) {
+    root.updateMatrixWorld(true);
+    const inv = new THREE.Matrix4().copy(root.matrixWorld).invert();
+    const box = new THREE.Box3();
+    const meshes = [];
+    root.traverse((o) => { if (o.isMesh && o.geometry && o.geometry.attributes.position) meshes.push(o); });
+    const M = new THREE.Matrix4(), v = new THREE.Vector3();
+    for (const o of meshes) {
+      M.multiplyMatrices(inv, o.matrixWorld);
+      if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+      box.union(o.geometry.boundingBox.clone().applyMatrix4(M));
+    }
+    if (box.isEmpty()) return null;
+    const sz = box.getSize(new THREE.Vector3());
+    const cell = Math.max(sz.x, sz.y, sz.z) / (res || 160);
+    const min = box.min.clone().addScalar(-cell);
+    const nx = Math.ceil(sz.x / cell) + 3, ny = Math.ceil(sz.y / cell) + 3, nz = Math.ceil(sz.z / cell) + 3;
+    const grid = new Uint16Array(nx * ny * nz);
+    const boneOwner = new Map(); // ボーン → 砲塔の番号（-1 = 砲身。格子に入れない）
+    rig.mounts.forEach((m, k) => {
+      boneOwner.set(m.turret, k);
+      for (const b of m.barrels) boneOwner.set(b.node, -1);
+    });
+    const mark = (x, y, z, val) => {
+      const i = Math.floor((x - min.x) / cell), j = Math.floor((y - min.y) / cell), l = Math.floor((z - min.z) / cell);
+      if (i < 0 || j < 0 || l < 0 || i >= nx || j >= ny || l >= nz) return;
+      const idx = (l * ny + j) * nx + i;
+      if (grid[idx] === 0 || (val >= 2 && grid[idx] === 1)) grid[idx] = val;
+    };
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+    for (const o of meshes) {
+      M.multiplyMatrices(inv, o.matrixWorld);
+      const g = o.geometry, pos = g.attributes.position, index = g.index;
+      const sk = o.isSkinnedMesh && g.attributes.skinIndex && g.attributes.skinWeight ? o.skeleton : null;
+      const si = sk ? g.attributes.skinIndex : null, sw = sk ? g.attributes.skinWeight : null;
+      const ownerOf = (vi) => {
+        if (!sk) return 1;
+        let best = 0, bw = -1;
+        const ws = [sw.getX(vi), sw.getY(vi), sw.getZ(vi), sw.getW(vi)], is = [si.getX(vi), si.getY(vi), si.getZ(vi), si.getW(vi)];
+        for (let q = 0; q < 4; q++) if (ws[q] > bw) { bw = ws[q]; best = is[q]; }
+        const own = boneOwner.get(sk.bones[best]);
+        return own === undefined ? 1 : own === -1 ? -1 : 2 + own;
+      };
+      const triCount = index ? index.count / 3 : pos.count / 3;
+      for (let t = 0; t < triCount; t++) {
+        const i0 = index ? index.getX(t * 3) : t * 3, i1 = index ? index.getX(t * 3 + 1) : t * 3 + 1, i2 = index ? index.getX(t * 3 + 2) : t * 3 + 2;
+        const val = ownerOf(i0);
+        if (val === -1) continue;
+        a.fromBufferAttribute(pos, i0).applyMatrix4(M);
+        b.fromBufferAttribute(pos, i1).applyMatrix4(M);
+        c.fromBufferAttribute(pos, i2).applyMatrix4(M);
+        const e = Math.max(a.distanceTo(b), b.distanceTo(c), c.distanceTo(a));
+        const n = Math.min(64, Math.max(1, Math.ceil(e / (cell * 0.7))));
+        for (let u = 0; u <= n; u++) {
+          for (let w = 0; w <= n - u; w++) {
+            const fu = u / n, fw = w / n, fv = 1 - fu - fw;
+            mark(a.x * fv + b.x * fu + c.x * fw, a.y * fv + b.y * fu + c.y * fw, a.z * fv + b.z * fu + c.z * fw, val);
+          }
+        }
+      }
+    }
+    return { grid, nx, ny, nz, cell, min, root };
+  },
+  // 世界の点 p から向き dir（世界）へ撃ったとき、船体・ほかの砲塔に当たるか（自分の砲塔 selfK は除く）
+  lineBlocked(occ, p, dir, selfK) {
+    if (!occ) return false;
+    const inv = new THREE.Matrix4().copy(occ.root.matrixWorld).invert();
+    const o = p.clone().applyMatrix4(inv);
+    const d = dir.clone().transformDirection(inv);
+    const step = occ.cell * 0.5, maxN = Math.ceil(((occ.nx + occ.ny + occ.nz) * occ.cell) / step);
+    const self = 2 + selfK;
+    for (let n = 1; n < maxN; n++) {
+      const x = o.x + d.x * step * n, y = o.y + d.y * step * n, z = o.z + d.z * step * n;
+      const i = Math.floor((x - occ.min.x) / occ.cell), j = Math.floor((y - occ.min.y) / occ.cell), l = Math.floor((z - occ.min.z) / occ.cell);
+      if (i < 0 || j < 0 || l < 0 || i >= occ.nx || j >= occ.ny || l >= occ.nz) return false; // 船体の外へ出た
+      const v = occ.grid[(l * occ.ny + j) * occ.nx + i];
+      if (v !== 0 && v !== self) return true;
+    }
+    return false;
+  },
   restoreAll(rig) {
     if (!rig) return;
     for (const m of rig.mounts) this.setMountAngles(m, 0, 0);
@@ -296,6 +379,10 @@ const Weapons = {
       m.reloadLeft = m.barrels.map(() => 0);
     }
     for (const d of rig.directors) d.cfg = normalizeWeaponDirector(this.cfg.directors[d.key]);
+    // 画面の番号: 名前の頭の数字（「1番主砲」→1）。無ければ並び順
+    rig.mounts.forEach((m, k) => { const mm = /^(\d+)/.exec(m.label); m.num = mm ? Number(mm[1]) : k + 1; m.index = k; m.state = 'none'; });
+    try { this._occ = WeaponRig.buildOcclusion(modelRoot, rig); } catch (e) { console.warn('射線の判定の準備に失敗しました', e); this._occ = null; }
+    this._buildMountUi();
     this._syncUi();
   },
   detach() {
@@ -364,12 +451,23 @@ const Weapons = {
     for (const m of this.rig.mounts) {
       const c = m.cfg;
       let ty = 0, te = 0;
-      m.reachable = false;
+      m.mode = 'none'; // 'exact' ぴったり向けられる / 'near' 範囲の端まで寄せる / 'none' 元の向き
       if (D) {
         const a = WeaponRig.aimAngles(m, D);
-        if (a.yaw >= toRadW(c.yawMin) - 1e-6 && a.yaw <= toRadW(c.yawMax) + 1e-6
-          && a.elev >= toRadW(c.elevMin) - 1e-6 && a.elev <= toRadW(c.elevMax) + 1e-6) {
-          ty = a.yaw; te = a.elev; m.reachable = true;
+        const yMin = toRadW(c.yawMin), yMax = toRadW(c.yawMax), eMin = toRadW(c.elevMin), eMax = toRadW(c.elevMax);
+        if (a.yaw >= yMin - 1e-6 && a.yaw <= yMax + 1e-6 && a.elev >= eMin - 1e-6 && a.elev <= eMax + 1e-6) {
+          ty = a.yaw; te = a.elev; m.mode = 'exact';
+        } else {
+          // ぴったりは向けられないが、範囲の端まで回せば近く（30°以内）まで向けられるなら寄せる
+          let cy = a.yaw;
+          if (cy < yMin || cy > yMax) {
+            const dMin = Math.abs(Math.atan2(Math.sin(cy - yMin), Math.cos(cy - yMin)));
+            const dMax = Math.abs(Math.atan2(Math.sin(cy - yMax), Math.cos(cy - yMax)));
+            cy = dMin <= dMax ? yMin : yMax;
+          }
+          const ce = clamp(a.elev, eMin, eMax);
+          const cosErr = Math.cos(a.elev) * Math.cos(ce) * Math.cos(a.yaw - cy) + Math.sin(a.elev) * Math.sin(ce);
+          if (Math.acos(clamp(cosErr, -1, 1)) <= toRadW(this.NEAR_MAX_DEG)) { ty = cy; te = ce; m.mode = 'near'; }
         }
       }
       // 旋回範囲の中だけを通って動く（範囲の外を回り込まない）
@@ -381,12 +479,28 @@ const Weapons = {
       if (full) yaw = Math.atan2(Math.sin(yaw), Math.cos(yaw));
       const elev = m.elev + clamp(te - m.elev, -re, re);
       if (yaw !== m.yaw || elev !== m.elev) WeaponRig.setMountAngles(m, yaw, elev);
-      m.onTarget = m.reachable && Math.abs(Math.atan2(Math.sin(ty - yaw), Math.cos(ty - yaw))) < toRadW(0.5) && Math.abs(te - elev) < toRadW(0.5);
+      const settled = Math.abs(Math.atan2(Math.sin(ty - yaw), Math.cos(ty - yaw))) < toRadW(0.5) && Math.abs(te - elev) < toRadW(0.5);
+      m.onTarget = m.mode === 'exact' && settled;
       for (let i = 0; i < m.reloadLeft.length; i++) m.reloadLeft[i] = Math.max(0, m.reloadLeft[i] - dt);
-      if (m.onTarget) {
-        aimed++;
-        if (m.reloadLeft.some((r) => r <= 0)) ready++;
+      // 射線: 狙いが合った砲身ごとに、船体・ほかの砲塔に当たらないか
+      m.blocked = m.barrels.map(() => false);
+      if (m.onTarget && this._occ) {
+        m.turret.updateMatrixWorld(true);
+        m.barrels.forEach((b, i) => {
+          const { pos, dir } = this._barrelMuzzle(m, b, true);
+          m.blocked[i] = WeaponRig.lineBlocked(this._occ, pos, dir, m.index);
+        });
       }
+      const canFire = (i) => m.reloadLeft[i] <= 0 && !m.blocked[i];
+      // 状態: ready 撃てる（緑）/ moving 旋回中（黄）/ reload 装填中（赤）/ gray 射線が船体に当たる・近くまで寄せただけ / none 向けられない
+      if (m.mode === 'none') m.state = 'none';
+      else if (m.mode === 'near') m.state = 'gray';
+      else if (!settled) m.state = 'moving';
+      else if (m.blocked.every((x) => x)) m.state = 'gray';
+      else if (m.barrels.some((b, i) => canFire(i))) m.state = 'ready';
+      else m.state = 'reload';
+      if (m.onTarget) aimed++;
+      if (m.state === 'ready') ready++;
     }
     for (const d of this.rig.directors) {
       const c = d.cfg;
@@ -408,10 +522,11 @@ const Weapons = {
 
   // v89: 照準の視点は、射撃レーダー／測距儀の位置から、測距儀でのぞいているように拡大して見る
   //   測距儀の倍率 = ふだんの視野角 ÷ 照準の視野角（ピンチ・ホイールで変える）
-  AIM_FOV_DEFAULT: 12,
+  AIM_FOV_DEFAULT: 30, // ふだん（60°）の2倍
   AIM_FOV_MIN: 1,
   AIM_FOV_MAX: 50,
-  _aimFov: 12,
+  _aimFov: 30,
+  NEAR_MAX_DEG: 30, // ぴったり向けられない砲を寄せるのは、狙う向きからこの角度まで
   zoomBy(factor) {
     this._aimFov = clamp(this._aimFov * factor, this.AIM_FOV_MIN, this.AIM_FOV_MAX);
   },
@@ -464,6 +579,7 @@ const Weapons = {
     if (Math.abs(cam.fov - this._aimFov) > 1e-6) { cam.fov = this._aimFov; cam.updateProjectionMatrix(); }
     const el = this._ui && this._ui.reticle;
     if (el) { el.style.left = '50%'; el.style.top = '50%'; }
+    this._placeGunMarks(cam);
     if (this._ui && this._ui.zoom) {
       const t = `測距儀 ×${(this._savedFov / this._aimFov).toFixed(1)}`;
       if (this._ui.zoom.textContent !== t) this._ui.zoom.textContent = t;
@@ -515,9 +631,9 @@ const Weapons = {
     const ship = State.ship;
     let n = 0;
     for (const m of this.rig.mounts) {
-      if (!m.onTarget) continue;
+      if (!m.onTarget || m.state !== 'ready') continue;
       m.barrels.forEach((b, i) => {
-        if (m.reloadLeft[i] > 0) return;
+        if (m.reloadLeft[i] > 0 || (m.blocked && m.blocked[i])) return;
         m.reloadLeft[i] = weaponReload(m.cfg);
         this._spawnShot(ship, m, b);
         n++;
@@ -526,11 +642,12 @@ const Weapons = {
     return n;
   },
 
-  _barrelMuzzle(m, b) {
+  _barrelMuzzle(m, b, pivot) {
     const pos = new THREE.Vector3(), q = new THREE.Quaternion();
     b.node.getWorldPosition(pos);
     b.node.getWorldQuaternion(q);
     const dir = new THREE.Vector3(0, 1, 0).applyQuaternion(q).normalize();
+    if (pivot) return { pos, dir }; // 射線の判定は砲身の付け根から（砲身の長さが分からないので）
     // 砲口: 砲身の付け根から「口径の45倍」先（模型の大きさが分からないので目安）
     const len = (m.cfg.caliber / 1000) * 45;
     return { pos: pos.addScaledVector(dir, len), dir };
@@ -668,6 +785,12 @@ const Weapons = {
     const reticle = document.createElement('div');
     reticle.className = 'wpn-reticle';
     document.body.appendChild(reticle);
+    const marks = document.createElement('div');
+    marks.className = 'wpn-gunmarks';
+    document.body.appendChild(marks);
+    const chips = document.createElement('div');
+    chips.className = 'wpn-chips';
+    document.body.appendChild(chips);
     const hint = document.createElement('div');
     hint.className = 'wpn-hint';
     hint.innerHTML = '<span class="wpn-zoom"></span>　画面をドラッグして狙う方向を決めます・ピンチで拡大（「照準」をもう一度押すと元の視点へ。狙いは続けます）';
@@ -680,8 +803,47 @@ const Weapons = {
       const n = this.fire();
       if (!n) this._flashStatus(this.aim.active ? '撃てる砲がありません（旋回中・装填中・範囲外）' : '先に「照準」で狙ってください');
     });
-    this._ui = { box, reticle, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
+    this._ui = { box, reticle, marks, chips, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
     this._syncUi();
+  },
+  // 砲塔ごとの小さな照準マーク（照準の視点）と、下の番号（装填・指向の状態）
+  _buildMountUi() {
+    const u = this._ui;
+    if (!u) return;
+    u.chips.innerHTML = '';
+    u.marks.innerHTML = '';
+    if (!this.rig) return;
+    const sorted = [...this.rig.mounts].sort((a, b) => a.num - b.num);
+    for (const m of sorted) {
+      const chip = document.createElement('div');
+      chip.className = 'wpn-chip st-none';
+      chip.textContent = String(m.num);
+      chip.title = m.key;
+      u.chips.appendChild(chip);
+      m._chip = chip;
+      const mk = document.createElement('div');
+      mk.className = 'wpn-gunmark st-none';
+      mk.innerHTML = `<span>${m.num}</span>`;
+      u.marks.appendChild(mk);
+      m._mark = mk;
+    }
+  },
+  _placeGunMarks(cam) {
+    if (!this.rig) return;
+    const q = new THREE.Quaternion(), v = new THREE.Vector3();
+    const W = window.innerWidth, H = window.innerHeight;
+    for (const m of this.rig.mounts) {
+      const mk = m._mark;
+      if (!mk) continue;
+      if (m.mode === 'none') { mk.style.display = 'none'; continue; }
+      m.barrels[0].node.getWorldQuaternion(q);
+      v.set(0, 1, 0).applyQuaternion(q);
+      v.multiplyScalar(1e4).add(cam.position).project(cam);
+      if (v.z > 1 || Math.abs(v.x) > 1.2 || Math.abs(v.y) > 1.2) { mk.style.display = 'none'; continue; }
+      mk.style.display = '';
+      mk.style.left = `${((v.x + 1) / 2) * W}px`;
+      mk.style.top = `${((1 - v.y) / 2) * H}px`;
+    }
   },
   _flashStatus(text) {
     this._statusOverride = { text, until: performance.now() + 1800 };
@@ -695,6 +857,8 @@ const Weapons = {
     u.stop.style.display = this.aim.active ? '' : 'none';
     u.fire.style.display = this.aim.active ? '' : 'none';
     u.reticle.style.display = has && this.view ? '' : 'none';
+    u.marks.style.display = has && this.view ? '' : 'none';
+    u.chips.style.display = has && this.aim.active ? '' : 'none';
     u.hint.style.display = has && this.view ? '' : 'none';
     document.body.classList.toggle('weapon-aim-view', has && this.view);
     this._updateUiState();
@@ -707,6 +871,14 @@ const Weapons = {
     if (this._statusOverride && performance.now() < this._statusOverride.until) text = this._statusOverride.text;
     if (u.status.textContent !== text) u.status.textContent = text;
     u.fire.disabled = !(s.ready > 0);
+    for (const m of this.rig.mounts) {
+      const st = this.aim.active ? m.state : 'none';
+      if (m._chip && m._lastState !== st) {
+        m._lastState = st;
+        m._chip.className = `wpn-chip st-${st}`;
+        if (m._mark) m._mark.className = `wpn-gunmark st-${st}`;
+      }
+    }
   },
 };
 
