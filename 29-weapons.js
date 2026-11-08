@@ -288,9 +288,17 @@ const WeaponRig = {
     root.traverse((o) => { if (o.isMesh && o.geometry && o.geometry.attributes.position) meshes.push(o); });
     const M = new THREE.Matrix4(), v = new THREE.Vector3();
     for (const o of meshes) {
-      M.multiplyMatrices(inv, o.matrixWorld);
       if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
-      box.union(o.geometry.boundingBox.clone().applyMatrix4(M));
+      if (o.isSkinnedMesh && o.skeleton) {
+        // スキンは、ボーンごとの行列で置いた範囲を合わせる（メッシュ自身の位置は使われない）
+        o.skeleton.bones.forEach((bone, bi) => {
+          const BM = new THREE.Matrix4().multiplyMatrices(inv, bone.matrixWorld).multiply(o.skeleton.boneInverses[bi]).multiply(o.bindMatrix);
+          box.union(o.geometry.boundingBox.clone().applyMatrix4(BM));
+        });
+      } else {
+        M.multiplyMatrices(inv, o.matrixWorld);
+        box.union(o.geometry.boundingBox.clone().applyMatrix4(M));
+      }
     }
     if (box.isEmpty()) return null;
     const sz = box.getSize(new THREE.Vector3());
@@ -310,6 +318,12 @@ const WeaponRig = {
       if (grid[idx] === 0 || (val >= 2 && grid[idx] === 1)) grid[idx] = val;
     };
     const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+    // 砲身のボーンの付け根の位置と向き（モデルの座標）
+    const barrelInfo = new Map();
+    for (const m of rig.mounts) for (const br of m.barrels) {
+      const BM = new THREE.Matrix4().multiplyMatrices(inv, br.node.matrixWorld);
+      barrelInfo.set(br.node, { p: new THREE.Vector3().setFromMatrixPosition(BM), d: new THREE.Vector3(0, 1, 0).transformDirection(BM), len: 0 });
+    }
     for (const o of meshes) {
       M.multiplyMatrices(inv, o.matrixWorld);
       const g = o.geometry, pos = g.attributes.position, index = g.index;
@@ -318,6 +332,16 @@ const WeaponRig = {
       // この部品が砲塔の部品なら（ボーンに砲塔を含む）、砲身以外の部分（台座・neutral_bone など）はその砲塔のもの
       let meshOwner = 1;
       if (sk) rig.mounts.forEach((m, k) => { if (sk.bones.includes(m.turret)) meshOwner = 2 + k; });
+      // スキンの頂点の位置: three.js が描くときと同じく「ボーンの世界の行列 × ボーンの逆行列 × bindMatrix」で求める
+      // （メッシュ自身の位置は使われない。副砲のように、位置をずらしたグループの下のメッシュで二重にずれていた）
+      const boneM = sk ? sk.bones.map((bone, bi) => new THREE.Matrix4().multiplyMatrices(inv, bone.matrixWorld).multiply(sk.boneInverses[bi]).multiply(o.bindMatrix)) : null;
+      const domBone = (vi) => {
+        let best = 0, bw = -1;
+        const ws = [sw.getX(vi), sw.getY(vi), sw.getZ(vi), sw.getW(vi)], is = [si.getX(vi), si.getY(vi), si.getZ(vi), si.getW(vi)];
+        for (let q = 0; q < 4; q++) if (ws[q] > bw) { bw = ws[q]; best = is[q]; }
+        return best;
+      };
+      const place = (vec, vi) => vec.fromBufferAttribute(pos, vi).applyMatrix4(sk ? boneM[domBone(vi)] : M);
       const ownerOf = (vi) => {
         if (!sk) return 1;
         let best = 0, bw = -1;
@@ -326,14 +350,22 @@ const WeaponRig = {
         const own = boneOwner.get(sk.bones[best]);
         return own === undefined ? meshOwner : own === -1 ? -1 : 2 + own;
       };
+      // v89: 砲身の長さを測る（砲身のボーンに付いた頂点の、付け根から砲身の向きへの最大の距離）
+      if (sk) {
+        const vtx = new THREE.Vector3();
+        for (let vi = 0; vi < pos.count; vi++) {
+          const info = barrelInfo.get(sk.bones[domBone(vi)]);
+          if (!info) continue;
+          place(vtx, vi).sub(info.p);
+          info.len = Math.max(info.len, vtx.dot(info.d));
+        }
+      }
       const triCount = index ? index.count / 3 : pos.count / 3;
       for (let t = 0; t < triCount; t++) {
         const i0 = index ? index.getX(t * 3) : t * 3, i1 = index ? index.getX(t * 3 + 1) : t * 3 + 1, i2 = index ? index.getX(t * 3 + 2) : t * 3 + 2;
         const val = ownerOf(i0);
         if (val === -1) continue;
-        a.fromBufferAttribute(pos, i0).applyMatrix4(M);
-        b.fromBufferAttribute(pos, i1).applyMatrix4(M);
-        c.fromBufferAttribute(pos, i2).applyMatrix4(M);
+        place(a, i0); place(b, i1); place(c, i2);
         const e = Math.max(a.distanceTo(b), b.distanceTo(c), c.distanceTo(a));
         const n = Math.min(64, Math.max(1, Math.ceil(e / (cell * 0.7))));
         for (let u = 0; u <= n; u++) {
@@ -344,9 +376,14 @@ const WeaponRig = {
         }
       }
     }
-    return { grid, nx, ny, nz, cell, min, root };
+    // 砲身の長さ（世界の大きさ。モデルの拡大率を掛ける）
+    const scale = new THREE.Vector3().setFromMatrixScale(root.matrixWorld).x;
+    const barrelLen = new Map();
+    for (const [node, info] of barrelInfo) if (info.len > 0) barrelLen.set(node, info.len * scale);
+    return { grid, nx, ny, nz, cell, min, root, barrelLen };
   },
   // 世界の点 p から向き dir（世界）へ撃ったとき、船体・ほかの砲塔に当たるか（自分の砲塔 selfK は除く）
+  //   v89: 砲口のすぐ周り（格子1つ半）は見ない（砲郭・防盾など、砲口を囲むカバーに当たったと間違えないように）
   lineBlocked(occ, p, dir, selfK) {
     if (!occ) return false;
     const inv = new THREE.Matrix4().copy(occ.root.matrixWorld).invert();
@@ -354,7 +391,7 @@ const WeaponRig = {
     const d = dir.clone().transformDirection(inv);
     const step = occ.cell * 0.5, maxN = Math.ceil(((occ.nx + occ.ny + occ.nz) * occ.cell) / step);
     const self = 2 + selfK;
-    for (let n = 1; n < maxN; n++) {
+    for (let n = 3; n < maxN; n++) {
       const x = o.x + d.x * step * n, y = o.y + d.y * step * n, z = o.z + d.z * step * n;
       const i = Math.floor((x - occ.min.x) / occ.cell), j = Math.floor((y - occ.min.y) / occ.cell), l = Math.floor((z - occ.min.z) / occ.cell);
       if (i < 0 || j < 0 || l < 0 || i >= occ.nx || j >= occ.ny || l >= occ.nz) return false; // 船体の外へ出た
@@ -450,6 +487,7 @@ const Weapons = {
     // 画面の番号: 並び順（名前の頭の数字の順。「1番主砲」…「12番主砲」、次に副砲など）の通し番号
     rig.mounts.forEach((m, k) => { m.num = k + 1; m.index = k; m.state = 'none'; });
     try { this._occ = WeaponRig.buildOcclusion(modelRoot, rig); } catch (e) { console.warn('射線の判定の準備に失敗しました', e); this._occ = null; }
+    if (this._occ) for (const m of rig.mounts) for (const b of m.barrels) b.length = this._occ.barrelLen.get(b.node) || null;
     try { this._buildInset(modelRoot, rig); } catch (e) { console.warn('照準の小さな艦の図の準備に失敗しました', e); this._inset = null; }
     this.groups = this.cfg.groups.map((g) => ({ id: g.id, name: g.name, auto: g.autoFire, mounts: rig.mounts.filter((m) => m.groupId === g.id) }))
       .filter((g) => g.mounts.length);
@@ -560,7 +598,8 @@ const Weapons = {
       if (m.onTarget && this._occ) {
         m.turret.updateMatrixWorld(true);
         m.barrels.forEach((b, i) => {
-          const { pos, dir } = this._barrelMuzzle(m, b, true);
+          // 射線は砲口から（砲身の付け根から見ると、付け根を囲む砲郭・防盾に当たったと間違える）
+          const { pos, dir } = this._barrelMuzzle(m, b);
           m.blocked[i] = WeaponRig.lineBlocked(this._occ, pos, dir, m.index);
         });
       }
@@ -887,9 +926,9 @@ const Weapons = {
     b.node.getWorldPosition(pos);
     b.node.getWorldQuaternion(q);
     const dir = new THREE.Vector3(0, 1, 0).applyQuaternion(q).normalize();
-    if (pivot) return { pos, dir }; // 射線の判定は砲身の付け根から（砲身の長さが分からないので）
-    // 砲口: 砲身の付け根から「口径の45倍」先（模型の大きさが分からないので目安）
-    const len = (m.cfg.caliber / 1000) * 45;
+    if (pivot) return { pos, dir };
+    // 砲口: 砲身の付け根から、モデルで測った砲身の長さの先（測れなければ「口径の45倍」）
+    const len = b.length > 0 ? b.length : (m.cfg.caliber / 1000) * 45;
     return { pos: pos.addScaledVector(dir, len), dir };
   },
   // 弾・閃光の丸い点（四角い点にならないように）
