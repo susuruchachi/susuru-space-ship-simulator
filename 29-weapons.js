@@ -527,6 +527,7 @@ const Weapons = {
   },
   stopAim() {
     this.aim.active = false;
+    this._viewMount = null;
     this.setView(false);
     this._syncUi();
   },
@@ -718,7 +719,8 @@ const Weapons = {
     const nB = rig.mounts.reduce((n, m) => n + m.barrels.length, 0);
     const lgeo = new THREE.BufferGeometry();
     lgeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(nB * 6), 3));
-    const lines = new THREE.LineSegments(lgeo, new THREE.LineBasicMaterial({ color: 0xfff0a0, transparent: true, opacity: 0.9, depthTest: false }));
+    lgeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(nB * 6), 3));
+    const lines = new THREE.LineSegments(lgeo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.95, depthTest: false }));
     lines.frustumCulled = false;
     lines.renderOrder = 5;
     scene.add(lines);
@@ -763,6 +765,9 @@ const Weapons = {
     s.ship.matrixWorldNeedsUpdate = true;
     // 砲身の線
     const a = s.lines.geometry.attributes.position;
+    const ca = s.lines.geometry.attributes.color;
+    const colorOf = { ready: 0x3dff6e, moving: 0xffd84a, reload: 0xff4a3a, gray: 0x9aa1aa, none: 0x5c626b };
+    const lc = new THREE.Color();
     const p = new THREE.Vector3(), q = new THREE.Quaternion(), d = new THREE.Vector3();
     const len = s.size * 0.32;
     let k = 0;
@@ -772,11 +777,15 @@ const Weapons = {
         b.node.getWorldQuaternion(q);
         d.set(0, 1, 0).applyQuaternion(q);
         p.x -= ship.position.x; p.y -= ship.position.y; p.z -= ship.position.z;
+        // 線の色は、その砲の状態の色（狙っていなければ薄い黄色）
+        lc.setHex(this.aim.active ? (colorOf[m.state] || 0xfff0a0) : 0xfff0a0);
+        ca.setXYZ(k, lc.r, lc.g, lc.b); ca.setXYZ(k + 1, lc.r, lc.g, lc.b);
         a.setXYZ(k++, p.x, p.y, p.z);
         a.setXYZ(k++, p.x + d.x * len, p.y + d.y * len, p.z + d.z * len);
       }
     }
     a.needsUpdate = true;
+    ca.needsUpdate = true;
     // カメラ: 射撃方向を奥に（艦の後ろ、射撃方向の手前から見る）。上は艦の上
     const up = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
     // 艦の長さが枠の幅にほぼ収まる距離（縦・横の視野角の狭い方に合わせる）
@@ -790,7 +799,7 @@ const Weapons = {
     s.camera.updateProjectionMatrix();
     const y = window.innerHeight - bottom - h;
     const prevAuto = renderer.autoClear;
-    const cc = renderer.getClearColor(new THREE.Color()), ca = renderer.getClearAlpha();
+    const cc = renderer.getClearColor(new THREE.Color()), cAlpha = renderer.getClearAlpha();
     renderer.setRenderTarget(null);
     renderer.setScissorTest(true);
     renderer.setScissor(x, window.innerHeight - y - h, w, h);
@@ -801,7 +810,7 @@ const Weapons = {
     renderer.render(s.scene, s.camera);
     renderer.setScissorTest(false);
     renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
-    renderer.setClearColor(cc, ca);
+    renderer.setClearColor(cc, cAlpha);
     renderer.autoClear = prevAuto;
   },
 
@@ -815,7 +824,13 @@ const Weapons = {
     const up = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
     const dir = this.rig.directors[0];
     let p;
-    if (dir) {
+    const vm = this._viewMount && this.rig.mounts.includes(this._viewMount) ? this._viewMount : null;
+    if (vm) {
+      // v89: 番号を押した砲の砲口から見る（砲身の後ろから見ると砲身が視界をふさぐので、砲口から）
+      ship.mesh.updateMatrixWorld(true);
+      const { pos } = this._barrelMuzzle(vm, vm.barrels[0]);
+      p = { x: pos.x, y: pos.y, z: pos.z };
+    } else if (dir) {
       ship.mesh.updateMatrixWorld(true);
       const v = new THREE.Vector3();
       dir.node.getWorldPosition(v);
@@ -1123,6 +1138,13 @@ const Weapons = {
       col.appendChild(chip);
       u.chips.appendChild(col);
       m._chip = chip;
+      // v89: 番号を押すと、その砲から見る視点に（もう一度押すとレーダーから）
+      col.addEventListener('click', () => {
+        this._viewMount = this._viewMount === m ? null : m;
+        if (!this.view) this.setView(true);
+        for (const x of this.rig.mounts) if (x._chip) x._chip.classList.toggle('viewing', x === this._viewMount);
+        this._flashStatus(this._viewMount ? `${m.num}番（${m.key}）の砲口から見ています` : '射撃レーダーから見ています');
+      });
       const mk = document.createElement('div');
       mk.className = 'wpn-gunmark st-none';
       mk.innerHTML = `<span>${m.num}</span>`;

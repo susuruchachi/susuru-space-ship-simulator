@@ -331,6 +331,9 @@
     position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
     display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-end; gap: 4px; max-width: 46vw; pointer-events: none;
   }
+  .wpn-chipcol { pointer-events: auto; cursor: pointer; }
+  .wpn-chip.viewing { outline: 2px solid #fff; outline-offset: 1px;
+  }
   .wpn-chip {
     min-width: 22px; height: 22px; padding: 0 4px; box-sizing: border-box; border-radius: 5px;
     font-size: 12px; font-weight: bold; line-height: 20px; text-align: center;
@@ -346,7 +349,8 @@
   .st-moving { color: #ffd84a; }
   .st-reload { color: #ff4a3a; }
   .st-gray { color: #8a9099; }
-  .st-none { color: #d8dde3; opacity: 0.75; }
+  /* v89: 指向不可は濃いグレー（射線が当たる・寄せただけの砲の灰色と分ける） */
+  .st-none { color: #5c626b; }
   .wpn-chip.st-ready { background: rgba(30,120,50,0.45); }
   .wpn-chip.st-reload { background: rgba(130,30,20,0.45); }
   body.clean-view .wpn-gunmarks, body.clean-view .wpn-chips { display: none !important; }
