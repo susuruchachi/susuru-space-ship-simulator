@@ -175,7 +175,8 @@ const WeaponRig = {
       h.normalize();
       const axis = new THREE.Vector3().crossVectors(h, Y).normalize(); // + で砲身が上がる
       const elev0 = Math.asin(clamp(raw.y, -1, 1)); // 元の向きの仰角
-      return { node, rest: bRest, axis, fwd: h, elev0 };
+      const nm = /^(\d+)/.exec(this.label(node.name));
+      return { node, rest: bRest, axis, fwd: h, elev0, num: nm ? Number(nm[1]) : 99 };
     });
     const F = b[0].fwd.clone().applyQuaternion(rest); // 旋回角0の砲の向き（砲塔の親の座標、U に垂直）
     return { key, label, turret, barrels: b, rest, U, F, yaw: 0, elev: 0, kind: 'mount' };
@@ -526,6 +527,7 @@ const Weapons = {
   AIM_FOV_MIN: 1,
   AIM_FOV_MAX: 50,
   _aimFov: 30,
+  SALVO_TAP_MS: 400, // 「撃て」をこの時間 [ms] より早く続けて押すと一斉射撃
   NEAR_MAX_DEG: 30, // ぴったり向けられない砲を寄せるのは、狙う向きからこの角度まで
   zoomBy(factor) {
     this._aimFov = clamp(this._aimFov * factor, this.AIM_FOV_MIN, this.AIM_FOV_MAX);
@@ -626,6 +628,33 @@ const Weapons = {
   },
 
   // 撃つ: 狙いが合っていて装填の済んだ砲身を全部
+  // v89: 撃つ順番（砲塔の番号順、同じ砲塔の中は砲の番号順）の砲身の並び
+  _firingOrder() {
+    const list = [];
+    for (const m of [...this.rig.mounts].sort((a, b) => a.num - b.num)) {
+      m.barrels.map((b, i) => ({ m, b, i })).sort((x, y) => x.b.num - y.b.num).forEach((e) => list.push(e));
+    }
+    return list;
+  },
+  _canFireBarrel(m, i) {
+    return m.onTarget && m.state === 'ready' && m.reloadLeft[i] <= 0 && !(m.blocked && m.blocked[i]);
+  },
+  // 一門ずつ: 前に撃った砲身の次から順に探して、撃てる砲身を1つ撃つ
+  fireOne() {
+    if (!this.rig) return 0;
+    const order = this._firingOrder();
+    const start = this._lastShot ? order.findIndex((e) => e.m === this._lastShot.m && e.i === this._lastShot.i) + 1 : 0;
+    for (let k = 0; k < order.length; k++) {
+      const e = order[(start + k) % order.length];
+      if (!this._canFireBarrel(e.m, e.i)) continue;
+      e.m.reloadLeft[e.i] = weaponReload(e.m.cfg);
+      this._spawnShot(State.ship, e.m, e.b);
+      this._lastShot = { m: e.m, i: e.i };
+      return 1;
+    }
+    return 0;
+  },
+  // 一斉射撃: 撃てる砲身を全部
   fire() {
     if (!this.rig) return 0;
     const ship = State.ship;
@@ -799,8 +828,14 @@ const Weapons = {
     box.addEventListener('touchstart', stop, { passive: true });
     box.querySelector('.wpn-view').addEventListener('click', () => this.setView(!this.view));
     box.querySelector('.wpn-stop').addEventListener('click', () => this.stopAim());
+    // 1回押すと一門ずつ（砲塔の番号順・砲の番号順）、素早く続けて押すと一斉射撃
+    let lastPress = 0;
     box.querySelector('.wpn-fire').addEventListener('click', () => {
-      const n = this.fire();
+      const now = performance.now();
+      const rapid = now - lastPress < this.SALVO_TAP_MS;
+      lastPress = now;
+      const n = rapid ? this.fire() : this.fireOne();
+      if (rapid && n) this._flashStatus(`一斉射撃 ${n}門`);
       if (!n) this._flashStatus(this.aim.active ? '撃てる砲がありません（旋回中・装填中・範囲外）' : '先に「照準」で狙ってください');
     });
     this._ui = { box, reticle, marks, chips, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
