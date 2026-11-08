@@ -274,6 +274,12 @@
   .wpn-btn.active { background: rgba(255,90,60,0.45); color: #fff; }
   .wpn-btn:disabled { opacity: 0.4; }
   .wpn-fire { background: rgba(255,60,40,0.32); font-weight: bold; }
+  .wpn-groups { display: flex; flex-direction: column; gap: 4px; }
+  .wpn-auto { height: auto; min-height: 30px; padding: 2px 4px; font-size: 11px; line-height: 1.2; display: flex; flex-direction: column; align-items: center;
+    background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.3); color: #cfd6de; }
+  .wpn-auto .wpn-auto-name { font-weight: bold; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wpn-auto .wpn-auto-state { font-size: 10px; opacity: 0.85; }
+  .wpn-auto.active { background: rgba(60,200,90,0.32); border-color: rgba(120,255,150,0.8); color: #eaffef; }
   .wpn-stop { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.3); color: #ddd; }
   .wpn-reticle {
     position: fixed;

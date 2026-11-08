@@ -503,6 +503,9 @@
   .pod-chip.dir-chip { border-color: rgba(140,255,170,0.45); background: rgba(140,255,170,0.08); color: #d0ffe0; }
   .pod-chip.dir-chip.selected { background: rgba(140,255,170,0.3); color: #fff; }
   .wpn-editor .axis-row { grid-template-columns: 36px 1fr 48px; }
+  .pod-chip.grp-chip { border-color: rgba(255,210,120,0.55); background: rgba(255,210,120,0.08); color: #ffe6b0; }
+  .pod-chip.grp-chip.selected { background: rgba(255,210,120,0.35); color: #fff; }
+  .pod-chip.grp-chip.auto::after { content: ' ●自動'; color: #7dff9a; }
   .pod-editor.wpn-editor { background: rgba(255,120,90,0.05); border-color: rgba(255,120,90,0.22); }
   .wpn-range { display: flex; align-items: center; gap: 4px; color: #9fb3c8; }
   .wpn-range .num-input { padding: 5px 6px; }
@@ -1014,9 +1017,35 @@
     <details class="adjust-section" id="weaponSection" open>
       <summary>武装（砲塔・射撃レーダー）</summary>
       <div class="derived" id="wpnFound"></div>
+      <h3>グループ</h3>
+      <div class="pod-list" id="wpnGroupList"></div>
+      <div class="pod-editor wpn-editor wpn-group-editor" id="wpnGroupEditor" style="display:none;">
+        <div class="field-row">
+          <label for="wpnGroupName">グループ名</label>
+          <input type="text" id="wpnGroupName" class="text-input" maxlength="20">
+        </div>
+        <div class="field-row wpn-range-row">
+          <label>砲身の仰角</label>
+          <span class="wpn-range"><input type="number" id="wpnGroupElevMin" class="num-input" min="-90" max="90" step="any"> 〜 <input type="number" id="wpnGroupElevMax" class="num-input" min="-90" max="90" step="any"></span>
+          <span class="unit">°</span>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="wpnGroupElevBtn">この仰角をグループ全部にそろえる</button>
+        </div>
+        <label class="check-row"><input type="checkbox" id="wpnGroupAuto"> 自動射撃（ゲームを始めたときに入れておく）</label>
+        <div class="btn-row">
+          <button type="button" id="wpnGroupAddBtn">＋ 新しいグループ</button>
+          <button type="button" id="wpnGroupDelBtn" class="danger">このグループを消す</button>
+        </div>
+      </div>
+      <h3>砲塔（選んでいるグループ）・射撃レーダー</h3>
       <div class="pod-list" id="wpnList"></div>
       <div class="pod-editor wpn-editor" id="wpnEditor" style="display:none;">
         <div class="pod-editor-title" id="wpnEditorTitle"></div>
+        <div class="field-row">
+          <label for="wpnGroupSel">グループ</label>
+          <select id="wpnGroupSel" class="text-input"></select>
+        </div>
         <div class="field-row">
           <label for="wpnKind">砲</label>
           <select id="wpnKind" class="text-input"></select>
@@ -1070,7 +1099,8 @@
           <div class="axis-value" id="wpnTestElevVal">0°</div>
         </div>
         <div class="btn-row">
-          <button type="button" id="wpnApplyAllBtn">この砲（種類・口径・装填・色・速さ）を全部の砲塔に</button>
+          <button type="button" id="wpnApplyGroupBtn">この砲（種類・口径・装填・色・速さ）をグループ全部に</button>
+          <button type="button" id="wpnApplyAllBtn">全部の砲塔に</button>
         </div>
       </div>
       <div class="pod-editor wpn-editor" id="dirEditor" style="display:none;">

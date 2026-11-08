@@ -85,6 +85,7 @@ function normalizeWeaponMount(c) {
     elevMax: clamp(num(c.elevMax, d.elevMax), -90, 90),
     traverseRate: Number(c.traverseRate) > 0 ? Number(c.traverseRate) : null,
     elevRate: Number(c.elevRate) > 0 ? Number(c.elevRate) : null,
+    group: typeof c.group === 'string' && c.group ? c.group : null, // v89: グループの id
   };
   if (out.yawMax < out.yawMin) [out.yawMin, out.yawMax] = [out.yawMax, out.yawMin];
   if (out.elevMax < out.elevMin) [out.elevMin, out.elevMax] = [out.elevMax, out.elevMin];
@@ -115,7 +116,33 @@ function normalizeShipWeapons(w) {
   const mounts = {}, directors = {};
   for (const [k, v] of Object.entries(w.mounts || {})) mounts[k] = normalizeWeaponMount(v);
   for (const [k, v] of Object.entries(w.directors || {})) directors[k] = normalizeWeaponDirector(v);
-  return { mounts, directors };
+  // v89: 砲塔のグループ（主砲・副砲など。名前は自由）。autoFire はゲーム開始時の自動射撃
+  const groups = (Array.isArray(w.groups) ? w.groups : []).filter((g) => g && g.id).map((g) => ({
+    id: String(g.id), name: String(g.name || 'グループ').slice(0, 20), autoFire: !!g.autoFire,
+  }));
+  return { mounts, directors, groups };
+}
+
+// v89: 名前から最初のグループ分け（「1番主砲」→主砲、「14cm第1副砲」→副砲）
+function weaponAutoGroupName(label) {
+  const m = /(主砲|副砲|高角砲|両用砲|機銃|機関砲|ミサイル|魚雷|レーザー砲)/.exec(String(label || ''));
+  return m ? m[1] : 'その他';
+}
+// 全部の砲塔をどれかのグループに入れる（入っていなければ、名前から決めたグループへ。無ければ作る）。weapons を書き換える
+function ensureWeaponGroups(weapons, mountKeys) {
+  if (!Array.isArray(weapons.groups)) weapons.groups = [];
+  const ids = new Set(weapons.groups.map((g) => g.id));
+  let n = weapons.groups.reduce((mx, g) => Math.max(mx, Number(/^g(\d+)$/.exec(g.id)?.[1] || 0)), 0);
+  for (const key of mountKeys) {
+    const c = weaponMountConfigFor(weapons, key);
+    if (c.group && ids.has(c.group)) continue;
+    const name = weaponAutoGroupName(key);
+    let g = weapons.groups.find((x) => x.name === name);
+    if (!g) { g = { id: `g${++n}`, name, autoFire: false }; weapons.groups.push(g); ids.add(g.id); }
+    c.group = g.id;
+    weapons.mounts[key] = c;
+  }
+  return weapons.groups;
 }
 
 // -------------------------------------------------------------
@@ -409,8 +436,13 @@ const Weapons = {
     this.rig = rig;
     this._modelRoot = modelRoot;
     this.cfg = normalizeShipWeapons(design && design.weapons);
+    // v89: グループ（設計に無ければ名前から分ける。ゲームの中だけで、設計は書き換えない）
+    const gcfg = normalizeShipWeapons(JSON.parse(JSON.stringify(this.cfg)));
+    ensureWeaponGroups(gcfg, rig.mounts.map((m) => m.key));
+    this.cfg = gcfg;
     for (const m of rig.mounts) {
       m.cfg = weaponMountConfigFor(this.cfg, m.key);
+      m.groupId = m.cfg.group;
       m.reloadLeft = m.barrels.map(() => 0);
     }
     for (const d of rig.directors) d.cfg = normalizeWeaponDirector(this.cfg.directors[d.key]);
@@ -419,7 +451,10 @@ const Weapons = {
     rig.mounts.forEach((m, k) => { m.num = k + 1; m.index = k; m.state = 'none'; });
     try { this._occ = WeaponRig.buildOcclusion(modelRoot, rig); } catch (e) { console.warn('射線の判定の準備に失敗しました', e); this._occ = null; }
     try { this._buildInset(modelRoot, rig); } catch (e) { console.warn('照準の小さな艦の図の準備に失敗しました', e); this._inset = null; }
+    this.groups = this.cfg.groups.map((g) => ({ id: g.id, name: g.name, auto: g.autoFire, mounts: rig.mounts.filter((m) => m.groupId === g.id) }))
+      .filter((g) => g.mounts.length);
     this._buildMountUi();
+    this._buildGroupUi();
     this._syncUi();
   },
   detach() {
@@ -539,6 +574,20 @@ const Weapons = {
       else m.state = 'reload';
       if (m.onTarget) aimed++;
       if (m.state === 'ready') ready++;
+    }
+    // v89: 自動射撃のグループは、狙いが合って装填ができ次第、撃てる砲身を撃ち続ける
+    if (this.aim.active && this.groups) {
+      for (const g of this.groups) {
+        if (!g.auto) continue;
+        for (const m of g.mounts) {
+          if (m.state !== 'ready') continue;
+          m.barrels.forEach((b, i) => {
+            if (!this._canFireBarrel(m, i)) return;
+            m.reloadLeft[i] = weaponReload(m.cfg);
+            this._spawnShot(ship, m, b);
+          });
+        }
+      }
     }
     for (const d of this.rig.directors) {
       const c = d.cfg;
@@ -969,6 +1018,7 @@ const Weapons = {
     box.className = 'weapon-controls';
     box.innerHTML = `
       <div class="wpn-status"></div>
+      <div class="wpn-groups"></div>
       <button type="button" class="wpn-btn wpn-fire">撃て</button>
       <button type="button" class="wpn-btn wpn-view">照準</button>
       <button type="button" class="wpn-btn wpn-stop">照準やめ</button>`;
@@ -1000,7 +1050,7 @@ const Weapons = {
       if (rapid && n) this._flashStatus(`一斉射撃 ${n}門`);
       if (!n) this._flashStatus(this.aim.active ? '撃てる砲がありません（旋回中・装填中・範囲外）' : '先に「照準」で狙ってください');
     });
-    this._ui = { box, reticle, marks, chips, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
+    this._ui = { box, groups: box.querySelector('.wpn-groups'), reticle, marks, chips, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
     this._syncUi();
   },
   // 砲塔ごとの小さな照準マーク（照準の視点）と、下の番号（装填・指向の状態）
@@ -1039,6 +1089,23 @@ const Weapons = {
       mk.innerHTML = `<span>${m.num}</span>`;
       u.marks.appendChild(mk);
       m._mark = mk;
+    }
+  },
+  // グループごとの自動射撃の入れ・切り（「撃て」の上）
+  _buildGroupUi() {
+    const u = this._ui;
+    if (!u) return;
+    u.groups.innerHTML = '';
+    for (const g of this.groups || []) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = `wpn-btn wpn-auto${g.auto ? ' active' : ''}`;
+      b.innerHTML = `<span class="wpn-auto-name"></span><span class="wpn-auto-state"></span>`;
+      b.querySelector('.wpn-auto-name').textContent = g.name;
+      const sync = () => { b.classList.toggle('active', g.auto); b.querySelector('.wpn-auto-state').textContent = g.auto ? '自動 入' : '自動 切'; };
+      sync();
+      b.addEventListener('click', () => { g.auto = !g.auto; sync(); this._flashStatus(`${g.name}: 自動射撃を${g.auto ? '入れました' : '切りました'}`); });
+      u.groups.appendChild(b);
     }
   },
   _placeGunMarks(cam) {
@@ -1143,6 +1210,62 @@ const WeaponDesigner = {
     bindNum('wpnElevMax', 'elevMax', false);
     bindNum('wpnTraverse', 'traverseRate', true);
     $('wpnColor').addEventListener('input', () => this._edit((m) => { m.color = $('wpnColor').value; }));
+    // v89: グループ
+    $('wpnGroupSel').addEventListener('change', () => this._edit((m) => { m.group = $('wpnGroupSel').value; }));
+    $('wpnGroupName').addEventListener('change', () => this._editGroup((g) => { g.name = $('wpnGroupName').value.trim().slice(0, 20) || g.name; }));
+    $('wpnGroupAuto').addEventListener('change', () => this._editGroup((g) => { g.autoFire = $('wpnGroupAuto').checked; }));
+    $('wpnGroupElevBtn').addEventListener('click', () => {
+      const g = this._currentGroup();
+      if (!g) return;
+      const lo = Number($('wpnGroupElevMin').value), hi = Number($('wpnGroupElevMax').value);
+      if (!Number.isFinite(lo) || !Number.isFinite(hi) || $('wpnGroupElevMin').value === '' || $('wpnGroupElevMax').value === '') return;
+      const d = this._opts.getDesign();
+      for (const m of this._groupMounts(g.id)) {
+        const c = weaponMountConfigFor(d.weapons, m.key);
+        c.elevMin = Math.min(lo, hi); c.elevMax = Math.max(lo, hi);
+        d.weapons.mounts[m.key] = normalizeWeaponMount(c);
+      }
+      this._opts.onChange();
+      this.refresh();
+    });
+    $('wpnGroupAddBtn').addEventListener('click', () => {
+      const d = this._opts.getDesign();
+      const n = d.weapons.groups.reduce((mx, g) => Math.max(mx, Number(/^g(\d+)$/.exec(g.id)?.[1] || 0)), 0) + 1;
+      const g = { id: `g${n}`, name: `グループ${n}`, autoFire: false };
+      d.weapons.groups.push(g);
+      this._selGroup = g.id;
+      // 選んでいる砲塔があれば、新しいグループへ移す
+      const part = this._findSel();
+      if (part && part.kind === 'mount') { const c = weaponMountConfigFor(d.weapons, part.key); c.group = g.id; d.weapons.mounts[part.key] = c; }
+      this._opts.onChange();
+      this.refresh();
+    });
+    $('wpnGroupDelBtn').addEventListener('click', () => {
+      const d = this._opts.getDesign();
+      const g = this._currentGroup();
+      if (!g || d.weapons.groups.length <= 1) return;
+      if (!confirm(`グループ「${g.name}」を消しますか？（中の砲塔は、名前から決まるグループへ移ります）`)) return;
+      d.weapons.groups = d.weapons.groups.filter((x) => x.id !== g.id);
+      for (const m of this._rig.mounts) {
+        const c = weaponMountConfigFor(d.weapons, m.key);
+        if (c.group === g.id) { c.group = null; d.weapons.mounts[m.key] = c; }
+      }
+      this._selGroup = null;
+      this._opts.onChange();
+      this.refresh();
+    });
+    $('wpnApplyGroupBtn').addEventListener('click', () => {
+      const cur = this._currentMountCfg();
+      if (!cur) return;
+      const d = this._opts.getDesign();
+      for (const m of this._groupMounts(cur.group)) {
+        const c = weaponMountConfigFor(d.weapons, m.key);
+        Object.assign(c, { kind: cur.kind, type: cur.type, caliber: cur.caliber, reload: cur.reload, color: cur.color, traverseRate: cur.traverseRate, elevRate: cur.elevRate });
+        d.weapons.mounts[m.key] = c;
+      }
+      this._opts.onChange();
+      this.refresh();
+    });
     $('wpnApplyAllBtn').addEventListener('click', () => {
       const cur = this._currentMountCfg();
       if (!cur) return;
@@ -1196,6 +1319,21 @@ const WeaponDesigner = {
     this._opts.onChange();
     this.refresh();
   },
+  _currentGroup() {
+    const d = this._opts.getDesign();
+    return (d.weapons.groups || []).find((g) => g.id === this._selGroup) || null;
+  },
+  _groupMounts(id) {
+    const d = this._opts.getDesign();
+    return this._rig.mounts.filter((m) => weaponMountConfigFor(d.weapons, m.key).group === id);
+  },
+  _editGroup(fn) {
+    const g = this._currentGroup();
+    if (!g) return;
+    fn(g);
+    this._opts.onChange();
+    this.refresh();
+  },
   _editDir(fn) {
     const part = this._findSel();
     if (!part || part.kind !== 'director') return;
@@ -1239,11 +1377,54 @@ const WeaponDesigner = {
     $('wpnFound').textContent = !this._rigRoot
       ? 'モデルを読み込むと、モデルの中の砲塔・射撃レーダーを見つけて設定できます。'
       : has ? `砲塔 ${rig.mounts.length}基（砲身 ${rig.mounts.reduce((s, m) => s + m.barrels.length, 0)}門）・射撃レーダー／測距儀 ${rig.directors.length}基` : 'モデルの中に砲塔（名前に「砲塔」を含む部品）が見つかりません。';
+    // v89: グループ（全部の砲塔がどれかに入るように）
+    const groups = rig.mounts.length ? ensureWeaponGroups(design.weapons, rig.mounts.map((m) => m.key)) : [];
+    const selPart0 = this._findSel();
+    const locked = this._groupLocked; // 砲塔の無いグループを選んだところ
+    this._groupLocked = false;
+    if (selPart0 && selPart0.kind === 'mount' && !locked) this._selGroup = weaponMountConfigFor(design.weapons, selPart0.key).group;
+    if (!groups.some((g) => g.id === this._selGroup)) this._selGroup = groups.length ? groups[0].id : null;
+    const gl = $('wpnGroupList');
+    gl.innerHTML = '';
+    for (const g of groups) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      const n = rig.mounts.filter((m) => weaponMountConfigFor(design.weapons, m.key).group === g.id).length;
+      b.className = `pod-chip grp-chip${g.id === this._selGroup ? ' selected' : ''}${g.autoFire ? ' auto' : ''}`;
+      b.textContent = `${g.name}（${n}基）`;
+      b.addEventListener('click', () => {
+        this._selGroup = g.id;
+        const first = rig.mounts.find((m) => weaponMountConfigFor(design.weapons, m.key).group === g.id);
+        if (first) this._select('mount', first.key);
+        else { this._sel = null; this._groupLocked = true; this.refresh(); }
+      });
+      gl.appendChild(b);
+    }
+    const cg = groups.find((g) => g.id === this._selGroup);
+    $('wpnGroupEditor').style.display = cg ? '' : 'none';
+    if (cg) {
+      if (document.activeElement !== $('wpnGroupName')) $('wpnGroupName').value = cg.name;
+      $('wpnGroupAuto').checked = !!cg.autoFire;
+      const members = rig.mounts.filter((m) => weaponMountConfigFor(design.weapons, m.key).group === cg.id);
+      if (members.length && document.activeElement !== $('wpnGroupElevMin') && document.activeElement !== $('wpnGroupElevMax')) {
+        const c0 = weaponMountConfigFor(design.weapons, members[0].key);
+        $('wpnGroupElevMin').value = String(c0.elevMin);
+        $('wpnGroupElevMax').value = String(c0.elevMax);
+      }
+      $('wpnGroupDelBtn').disabled = groups.length <= 1;
+    }
+    const gs = $('wpnGroupSel');
+    gs.innerHTML = '';
+    for (const g of groups) gs.appendChild(new Option(g.name, g.id));
     const list = $('wpnList');
     list.innerHTML = '';
-    if (!this._sel && rig.mounts.length) this._sel = { kind: 'mount', key: rig.mounts[0].key };
+    if (!this._sel && rig.mounts.length && !locked) {
+      const first = rig.mounts.find((m) => weaponMountConfigFor(design.weapons, m.key).group === this._selGroup) || rig.mounts[0];
+      this._sel = { kind: 'mount', key: first.key };
+    }
     for (const m of rig.mounts) {
       const c = weaponMountConfigFor(design.weapons, m.key);
+      if (c.group !== this._selGroup) continue; // 選んでいるグループの砲塔だけ
       const b = document.createElement('button');
       b.type = 'button';
       const on = this._sel && this._sel.kind === 'mount' && this._sel.key === m.key;
@@ -1271,6 +1452,7 @@ const WeaponDesigner = {
     if (part.kind === 'mount') {
       const c = weaponMountConfigFor(design.weapons, part.key);
       $('wpnEditorTitle').textContent = `${part.key}（砲身 ${part.barrels.length}門）`;
+      $('wpnGroupSel').value = c.group || '';
       $('wpnKind').value = c.kind;
       const ts = $('wpnType');
       ts.innerHTML = '';
