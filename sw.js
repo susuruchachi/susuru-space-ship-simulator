@@ -29,6 +29,7 @@ const PRECACHE = [
   "13-astro-core.js",
   "14-solar-system.js",
   "28-deep-space.js",
+  "29-weapons.js",
   "15-universe-render.js",
   "16-navigation.js",
   "17-space-hud.js",

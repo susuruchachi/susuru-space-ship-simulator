@@ -497,6 +497,18 @@
   }
   .pos-row .axis-label { font-size: 12px; font-weight: 700; color: #6cc3ff; text-align: center; }
   .pos-row .num-input { padding: 4px 6px; font-size: 12px; }
+  /* v89: 武装 */
+  .pod-chip.wpn-chip { border-color: rgba(255,120,90,0.5); background: rgba(255,120,90,0.08); color: #ffd0c0; }
+  .pod-chip.wpn-chip.selected { background: rgba(255,120,90,0.35); color: #fff; }
+  .pod-chip.dir-chip { border-color: rgba(140,255,170,0.45); background: rgba(140,255,170,0.08); color: #d0ffe0; }
+  .pod-chip.dir-chip.selected { background: rgba(140,255,170,0.3); color: #fff; }
+  .wpn-editor .axis-row { grid-template-columns: 36px 1fr 48px; }
+  .pod-editor.wpn-editor { background: rgba(255,120,90,0.05); border-color: rgba(255,120,90,0.22); }
+  .wpn-range { display: flex; align-items: center; gap: 4px; color: #9fb3c8; }
+  .wpn-range .num-input { padding: 5px 6px; }
+  .wpn-color-input { width: 100%; height: 30px; border: none; background: none; padding: 0; }
+  .wpn-swatches { display: flex; gap: 6px; margin: -2px 0 8px 100px; }
+  .wpn-swatch { width: 22px; height: 22px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.5); }
   .pod-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
   .pod-chip {
     padding: 5px 8px;
@@ -999,6 +1011,84 @@
       <p class="hint">1基につき、船体から外向きの噴射口1つと、表面に沿った4方向の噴射口4つがあります。座標を入力すると、いちばん近い船体表面に吸着します。ビューの■をタップすると選択でき、出てくる矢印（ギズモ）をドラッグすると船体の表面に沿って動かせます（中央の白い丸をつかむと指の下の表面へ）。</p>
     </details>
 
+    <details class="adjust-section" id="weaponSection" open>
+      <summary>武装（砲塔・射撃レーダー）</summary>
+      <div class="derived" id="wpnFound"></div>
+      <div class="pod-list" id="wpnList"></div>
+      <div class="pod-editor wpn-editor" id="wpnEditor" style="display:none;">
+        <div class="pod-editor-title" id="wpnEditorTitle"></div>
+        <div class="field-row">
+          <label for="wpnKind">砲</label>
+          <select id="wpnKind" class="text-input"></select>
+        </div>
+        <div class="field-row">
+          <label for="wpnType">種類</label>
+          <select id="wpnType" class="text-input"></select>
+        </div>
+        <div class="field-row">
+          <label for="wpnCaliber">口径</label>
+          <input type="number" id="wpnCaliber" class="num-input" min="1" step="any" list="wpnCalList">
+          <span class="unit">mm</span>
+        </div>
+        <datalist id="wpnCalList"></datalist>
+        <div class="field-row">
+          <label for="wpnReload">装填時間</label>
+          <input type="number" id="wpnReload" class="num-input" min="0" step="any" placeholder="自動">
+          <span class="unit">秒</span>
+        </div>
+        <div class="field-row" id="wpnColorRow">
+          <label for="wpnColor">レーザーの色</label>
+          <input type="color" id="wpnColor" class="wpn-color-input">
+          <span class="unit"></span>
+        </div>
+        <div class="wpn-swatches" id="wpnColorPresets"></div>
+        <div class="field-row wpn-range-row">
+          <label>旋回範囲</label>
+          <span class="wpn-range"><input type="number" id="wpnYawMin" class="num-input" min="-180" max="180" step="any"> 〜 <input type="number" id="wpnYawMax" class="num-input" min="-180" max="180" step="any"></span>
+          <span class="unit">°</span>
+        </div>
+        <div class="field-row wpn-range-row">
+          <label>砲身の仰角</label>
+          <span class="wpn-range"><input type="number" id="wpnElevMin" class="num-input" min="-90" max="90" step="any"> 〜 <input type="number" id="wpnElevMax" class="num-input" min="-90" max="90" step="any"></span>
+          <span class="unit">°</span>
+        </div>
+        <div class="field-row">
+          <label for="wpnTraverse">旋回の速さ</label>
+          <input type="number" id="wpnTraverse" class="num-input" min="0" step="any" placeholder="自動">
+          <span class="unit">°/s</span>
+        </div>
+        <div class="derived" id="wpnLine"></div>
+        <h3>動きの確認（保存されません）</h3>
+        <div class="axis-row">
+          <div class="axis-label">旋回</div>
+          <input type="range" id="wpnTestYaw" min="-150" max="150" step="1" value="0">
+          <div class="axis-value" id="wpnTestYawVal">0°</div>
+        </div>
+        <div class="axis-row">
+          <div class="axis-label">仰角</div>
+          <input type="range" id="wpnTestElev" min="-5" max="40" step="1" value="0">
+          <div class="axis-value" id="wpnTestElevVal">0°</div>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="wpnApplyAllBtn">この砲（種類・口径・装填・色・速さ）を全部の砲塔に</button>
+        </div>
+      </div>
+      <div class="pod-editor wpn-editor" id="dirEditor" style="display:none;">
+        <div class="pod-editor-title" id="dirEditorTitle"></div>
+        <div class="field-row wpn-range-row">
+          <label>旋回範囲</label>
+          <span class="wpn-range"><input type="number" id="dirYawMin" class="num-input" min="-180" max="180" step="any"> 〜 <input type="number" id="dirYawMax" class="num-input" min="-180" max="180" step="any"></span>
+          <span class="unit">°</span>
+        </div>
+        <div class="axis-row">
+          <div class="axis-label">確認</div>
+          <input type="range" id="dirTestYaw" min="-180" max="180" step="1" value="0">
+          <div class="axis-value" id="dirTestYawVal">0°</div>
+        </div>
+      </div>
+      <p class="hint">モデルの中の部品の名前で見つけます。「砲塔」を名前に含む部品が旋回し（部品のY軸まわり）、その中の「〜砲」で終わる部品（「1番砲」「2番砲」など。部品のY軸が砲身の向き）が仰角を変えます。砲塔の名前は、その親の部品の名前（「1番主砲」など）です。「射撃レーダー」「測距儀」を名前に含む部品は、狙う方向へ旋回します。角度は元の向きを0°として、旋回は左回り（上から見て）が＋、仰角は上が＋です。ゲームでは「照準」を押して画面をドラッグすると、その方向を向けられる砲が全部そちらを向きます。</p>
+    </details>
+
     <details class="adjust-section" id="perfSection" open>
       <summary>性能（自動計算）</summary>
       <div class="perf" id="perfBox">計算中…</div>
@@ -1066,6 +1156,7 @@
 <script src="firebase-config.js"></script>
 <script src="25-google-sync.js"></script>
 <script src="09-ship-builder.js"></script>
+<script src="29-weapons.js"></script>
 <script src="22-ship-designer.js"></script>
 </body>
 </html>

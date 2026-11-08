@@ -149,6 +149,8 @@ function createShipDesign(baseClass, name) {
     speedCapMode: t.speedCapMode,
     dockingFace: null,
     collision: null,
+    // v89: 武装（29-weapons.js）。砲塔・射撃レーダーの名前ごとの設定
+    weapons: { mounts: {}, directors: {} },
   };
   return design;
 }
@@ -302,6 +304,9 @@ function normalizeShipDesign(d) {
   // v85: 最高速度は空欄（null）なら無制限。最大加速度は無ければ制限なし
   out.maxSpeed = d.maxSpeed === null ? null : (Number(d.maxSpeed) > 0 ? Number(d.maxSpeed) : base.maxSpeed);
   out.maxAccel = Number(d.maxAccel) > 0 ? Number(d.maxAccel) : null;
+  // v89: 武装（29-weapons.js を読み込んでいない画面では、そのまま持ち回る）
+  if (typeof normalizeShipWeapons === 'function') out.weapons = normalizeShipWeapons(d.weapons);
+  else if (!out.weapons || typeof out.weapons !== 'object') out.weapons = { mounts: {}, directors: {} };
   return out;
 }
 
