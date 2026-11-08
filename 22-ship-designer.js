@@ -1041,7 +1041,7 @@
 
   // v89: 武装（29-weapons.js WeaponDesigner）。モデルの中の砲塔・射撃レーダーを名前で見つけて設定する
   if (typeof WeaponDesigner !== 'undefined') {
-    WeaponDesigner.init({ getDesign: () => design, getModelRoot: () => core.getModelRoot(), onChange: markDirty });
+    WeaponDesigner.init({ getDesign: () => design, getModelRoot: () => core.getModelRoot(), onChange: markDirty, scene: core.scene });
   }
 
   // v85: 重力場の密度境界面の高さ（重力場機関を積んだ艦だけ）

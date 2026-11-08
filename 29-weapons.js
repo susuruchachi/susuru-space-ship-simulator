@@ -691,6 +691,9 @@ const WeaponDesigner = {
     $('wpnTestYaw').addEventListener('input', () => this._applyTest());
     $('wpnTestElev').addEventListener('input', () => this._applyTest());
     $('dirTestYaw').addEventListener('input', () => this._applyTest());
+    // 欄を閉じたらマークを消す
+    const sec = $('weaponSection');
+    if (sec) sec.addEventListener('toggle', () => this._rebuildMarks());
   },
 
   _ensureRig() {
@@ -742,6 +745,7 @@ const WeaponDesigner = {
     $('wpnTestYawVal').textContent = `${$('wpnTestYaw').value}°`;
     $('wpnTestElevVal').textContent = `${$('wpnTestElev').value}°`;
     $('dirTestYawVal').textContent = `${$('dirTestYaw').value}°`;
+    this._rebuildMarks();
   },
   _select(kind, key) {
     if (this._rig) WeaponRig.restoreAll(this._rig);
@@ -752,6 +756,10 @@ const WeaponDesigner = {
   },
 
   refresh() {
+    this._refreshUi();
+    this._rebuildMarks();
+  },
+  _refreshUi() {
     const $ = this.$;
     const design = this._opts.getDesign();
     if (!design || !$) return;
@@ -823,5 +831,96 @@ const WeaponDesigner = {
       setVal('dirYawMax', String(c.yawMax));
       $('dirTestYaw').min = String(c.yawMin); $('dirTestYaw').max = String(c.yawMax);
     }
+  },
+
+  // ---------------------------------------------------------
+  // v89: 3Dビューの旋回範囲のマーク（武装の欄を開いている間）
+  //   各砲塔: 旋回範囲の扇形（砲塔の位置・旋回の軸に垂直な面）と、元の向き（0°）の線。
+  //   選んでいる砲塔は明るく、砲身の仰角の範囲（今の旋回角での縦の扇形）と今の向きの線も出す。
+  //   射撃レーダー／測距儀は緑の扇形。船体に隠れないよう、いちばん手前に描く
+  // ---------------------------------------------------------
+  _rebuildMarks() {
+    const scene = this._opts && this._opts.scene;
+    if (!scene) return;
+    if (!this._marks) {
+      this._marks = new THREE.Group();
+      this._marks.renderOrder = 20;
+      scene.add(this._marks);
+    }
+    for (const c of [...this._marks.children]) {
+      this._marks.remove(c);
+      c.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+    }
+    const design = this._opts.getDesign();
+    const sec = this.$ && this.$('weaponSection');
+    if (!design || !this._rig || !this._rigRoot || (sec && !sec.open)) return;
+    this._rigRoot.updateMatrixWorld(true);
+    const size = (design.hull && design.hull.size) || 100;
+    const sel = this._findSel();
+    for (const m of this._rig.mounts) {
+      const c = normalizeWeaponMount(design.weapons.mounts[m.key]);
+      const on = sel === m;
+      const r = size * (on ? 0.07 : 0.045);
+      this._addPartMarks(m, m.turret, c.yawMin, c.yawMax, r, on ? 0xff7a50 : 0xff9070, on ? 0.38 : 0.16, on);
+      if (on) {
+        // 砲身の仰角の範囲: 今の旋回角での、旋回の軸を含む縦の扇形
+        const Fy = m.F.clone().applyAxisAngle(m.U, m.yaw);
+        const pts = this._fanPoints((e) => Fy.clone().multiplyScalar(Math.cos(e)).addScaledVector(m.U, Math.sin(e)), toRadW(c.elevMin), toRadW(c.elevMax), r * 0.85);
+        this._addFan(m.turret, pts, 0xffd060, 0.42);
+        const cur = Fy.clone().multiplyScalar(Math.cos(m.elev)).addScaledVector(m.U, Math.sin(m.elev));
+        this._addLine(m.turret, [new THREE.Vector3(), cur.multiplyScalar(r * 1.15)], 0xffffff, 1);
+      }
+    }
+    for (const d of this._rig.directors) {
+      const c = normalizeWeaponDirector(design.weapons.directors[d.key]);
+      const on = sel === d;
+      const r = size * (on ? 0.06 : 0.04);
+      this._addPartMarks(d, d.node, c.yawMin, c.yawMax, r, 0x70ff9a, on ? 0.38 : 0.16, on);
+    }
+  },
+  _addPartMarks(part, node, yawMin, yawMax, r, color, opacity, on) {
+    const pts = this._fanPoints((a) => part.F.clone().applyAxisAngle(part.U, a), toRadW(yawMin), toRadW(yawMax), r);
+    this._addFan(node, pts, color, opacity);
+    // 元の向き（0°）
+    this._addLine(node, [new THREE.Vector3(), part.F.clone().multiplyScalar(r * 1.1)], color, on ? 0.9 : 0.5);
+    if (on) {
+      const cur = part.F.clone().applyAxisAngle(part.U, part.yaw);
+      this._addLine(node, [new THREE.Vector3(), cur.multiplyScalar(r * 1.15)], 0xffffff, 1);
+    }
+  },
+  _fanPoints(dirAt, a0, a1, r) {
+    const n = Math.max(2, Math.ceil(Math.abs(a1 - a0) / toRadW(5)));
+    const pts = [];
+    for (let i = 0; i <= n; i++) pts.push(dirAt(a0 + ((a1 - a0) * i) / n).normalize().multiplyScalar(r));
+    return pts;
+  },
+  // 部品の位置に、部品の親の向きで置く（U・F は親の座標）。拡大率は使わない（大きさは m 単位で決める）
+  _placeAt(node, obj) {
+    const p = new THREE.Vector3(), q = new THREE.Quaternion();
+    node.getWorldPosition(p);
+    node.parent.getWorldQuaternion(q);
+    obj.position.copy(p);
+    obj.quaternion.copy(q);
+    obj.renderOrder = 20;
+    this._marks.add(obj);
+  },
+  _addFan(node, pts, color, opacity) {
+    const pos = [];
+    for (let i = 0; i + 1 < pts.length; i++) pos.push(0, 0, 0, pts[i].x, pts[i].y, pts[i].z, pts[i + 1].x, pts[i + 1].y, pts[i + 1].z);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    const fan = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity, side: THREE.DoubleSide, depthTest: false, depthWrite: false }));
+    const edge = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), ...pts, new THREE.Vector3()]),
+      new THREE.LineBasicMaterial({ color, transparent: true, opacity: Math.min(1, opacity * 2.4), depthTest: false, depthWrite: false }));
+    const g = new THREE.Group();
+    g.add(fan); g.add(edge);
+    fan.renderOrder = 20; edge.renderOrder = 21;
+    this._placeAt(node, g);
+  },
+  _addLine(node, pts, color, opacity) {
+    const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color, transparent: true, opacity, depthTest: false, depthWrite: false }));
+    this._placeAt(node, line);
+    line.renderOrder = 22;
   },
 };
