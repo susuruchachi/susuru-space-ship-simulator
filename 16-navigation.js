@@ -942,8 +942,15 @@ const Navigation = {
     FlightPhysics.step(ship, gd ? GravityDrive.adjustInput(ship, rotInput) : rotInput, dt);
     if (gd) GravityDrive.step(ship, rotInput, dt, true);
     ship.velocity = { x: 0, y: 0, z: 0 };
+    // v89: 重力場機関の艦は、密度境界面の上の点を中心に向きを変える（05-ship-controller.js と同じ）
+    const pivot = gd && ship.boundaryHeight ? { x: 0, y: ship.boundaryHeight, z: 0 } : null;
+    const pv0 = pivot ? rotateVecByQuat(pivot, ship.quaternion) : null;
     ShipController._integratePose(ship, dt);
     if (gd) GravityDrive.limit(ship);
+    if (pv0) {
+      const pv1 = rotateVecByQuat(pivot, ship.quaternion);
+      ship.position.x += pv0.x - pv1.x; ship.position.y += pv0.y - pv1.y; ship.position.z += pv0.z - pv1.z;
+    }
     // v85: ワープ中も主エンジンの噴射を見せる（見た目だけ。強さはワープの速さの桁で決める）
     if (w.speed > 50) {
       const level = clamp(Math.log10(w.speed / this.WARP_MIN_SPEED) / Math.log10(this.WARP_MAX_SPEED / this.WARP_MIN_SPEED) * 0.7 + 0.3, 0.3, 1);

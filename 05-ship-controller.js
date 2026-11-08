@@ -77,8 +77,17 @@ const ShipController = {
         // （進入中は速度を進入が受け持つので、境界面は姿勢だけ。竜骨が動いている到着点への速度を消さないように）
         if (ship.gravityDrive) GravityDrive.step(ship, input, h, typeof Navigation !== 'undefined' && !!Navigation.approach);
         const prev = { x: ship.position.x, y: ship.position.y, z: ship.position.z };
+        // v89: 重力場機関の艦は、密度境界面の上（重心の真上・真下の、境界面の高さの点）を中心に向きを変える。
+        // 以前は重心を中心に回っていたため、境界面と重心の高さが違う艦（Hood など）は、境界面からずれたところで回っていた。
+        // （自動入港中は、入港の位置合わせが重心を基準にしているので、これまでどおり重心で回る）
+        const pivot = ship.gravityDrive && !ship.autoDockingEnabled && ship.boundaryHeight ? { x: 0, y: ship.boundaryHeight, z: 0 } : null;
+        const pv0 = pivot ? rotateVecByQuat(pivot, ship.quaternion) : null;
         this._integratePose(ship, h);
         if (ship.gravityDrive) GravityDrive.limit(ship);
+        if (pv0) {
+          const pv1 = rotateVecByQuat(pivot, ship.quaternion);
+          ship.position.x += pv0.x - pv1.x; ship.position.y += pv0.y - pv1.y; ship.position.z += pv0.z - pv1.z;
+        }
         // v79: ドッキングポートとの当たり判定（めり込んだら押し戻す）
         if (typeof Collision !== 'undefined') Collision.resolve(ship, prev);
       }
