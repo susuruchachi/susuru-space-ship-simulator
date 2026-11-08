@@ -294,7 +294,7 @@
   .wpn-reticle::after { top: 50%; left: -10px; right: -10px; height: 2px; margin-top: -1px; }
   .wpn-hint {
     position: fixed;
-    bottom: 200px;
+    top: 152px;
     left: 50%;
     transform: translateX(-50%);
     font-size: 12px;
@@ -312,6 +312,8 @@
   }
   body.clean-view .wpn-reticle, body.clean-view .wpn-hint { display: none !important; }
   .wpn-zoom { font-weight: bold; color: #fff; }
+  .wpn-inset { position: fixed; border: 1px solid rgba(255,240,160,0.45); border-radius: 4px; pointer-events: none; box-sizing: border-box; }
+  .wpn-inset::after { content: '射撃方向 →奥'; position: absolute; left: 4px; top: 2px; font-size: 9px; color: rgba(255,240,160,0.7); }
   /* v89: 砲塔ごとの照準マークと、下の番号（緑=撃てる・黄=旋回中・赤=装填中・灰=射線が当たる／寄せただけ・白灰=向けられない） */
   .wpn-gunmarks { position: fixed; inset: 0; pointer-events: none; }
   .wpn-gunmark {
@@ -1519,6 +1521,7 @@ function animateFrame() {
       renderer.render(scene, camera);
     });
   }
+  if (!mapOpen) Weapons.renderInset(renderer); // v89: 照準の視点の小さな艦の図
   CleanView.afterRender(renderer.domElement); // v88: スクリーンショット（描画の直後に）
 }
 

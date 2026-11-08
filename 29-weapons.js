@@ -135,8 +135,14 @@ const WeaponRig = {
       const barrels = [];
       t.traverse((o) => {
         if (o === t) return;
-        if (this.isBarrelName(o.name) && !turrets.some((x) => x !== t && this._isAncestor(x, o))) barrels.push(o);
+        if (!o.isMesh && this.isBarrelName(o.name) && !turrets.some((x) => x !== t && this._isAncestor(x, o))) barrels.push(o);
       });
+      // 砲身が砲塔の子ではなく、同じ親の下（兄弟）にあるモデルもある（副砲など）
+      if (!barrels.length && t.parent) {
+        for (const o of t.parent.children) {
+          if (o !== t && !o.isMesh && this.isBarrelName(o.name)) barrels.push(o); // 砲塔の部品のメッシュ（「〜副砲.001」など）は砲身ではない
+        }
+      }
       if (!barrels.length) continue;
       let label = '';
       for (let p = t.parent; p && p !== root; p = p.parent) {
@@ -167,8 +173,12 @@ const WeaponRig = {
     const Y = new THREE.Vector3(0, 1, 0);
     const rest = turret.quaternion.clone();
     const U = Y.clone().applyQuaternion(rest); // 旋回の軸（砲塔の親の座標）
+    const restInv = rest.clone().invert();
     const b = barrels.map((node) => {
-      const bRest = node.quaternion.clone();
+      // 兄弟の砲身は、砲塔に対する向き・位置で持ち、砲塔の旋回を自分でかける
+      const sibling = node.parent !== turret;
+      const bRest = sibling ? restInv.clone().multiply(node.quaternion) : node.quaternion.clone();
+      const relPos = sibling ? node.position.clone().sub(turret.position).applyQuaternion(restInv) : null;
       const raw = Y.clone().applyQuaternion(bRest); // 砲身の向き（砲塔の座標）
       const h = new THREE.Vector3(raw.x, 0, raw.z);
       if (h.lengthSq() < 1e-8) h.set(1, 0, 0);
@@ -176,7 +186,7 @@ const WeaponRig = {
       const axis = new THREE.Vector3().crossVectors(h, Y).normalize(); // + で砲身が上がる
       const elev0 = Math.asin(clamp(raw.y, -1, 1)); // 元の向きの仰角
       const nm = /^(\d+)/.exec(this.label(node.name));
-      return { node, rest: bRest, axis, fwd: h, elev0, num: nm ? Number(nm[1]) : 99 };
+      return { node, rest: bRest, axis, fwd: h, elev0, num: nm ? Number(nm[1]) : 99, sibling, relPos };
     });
     const F = b[0].fwd.clone().applyQuaternion(rest); // 旋回角0の砲の向き（砲塔の親の座標、U に垂直）
     return { key, label, turret, barrels: b, rest, U, F, yaw: 0, elev: 0, kind: 'mount' };
@@ -196,10 +206,17 @@ const WeaponRig = {
   setMountAngles(m, yaw, elev) {
     m.yaw = yaw; m.elev = elev;
     const q = new THREE.Quaternion().setFromAxisAngle(m.U, yaw);
-    m.turret.quaternion.copy(q.multiply(m.rest));
+    const qT = q.multiply(m.rest);
+    m.turret.quaternion.copy(qT);
     for (const b of m.barrels) {
       const qb = new THREE.Quaternion().setFromAxisAngle(b.axis, elev - b.elev0);
-      b.node.quaternion.copy(qb.multiply(b.rest));
+      qb.multiply(b.rest);
+      if (b.sibling) {
+        b.node.quaternion.copy(qT).multiply(qb);
+        b.node.position.copy(b.relPos).applyQuaternion(qT).add(m.turret.position);
+      } else {
+        b.node.quaternion.copy(qb);
+      }
     }
   },
   setDirectorYaw(d, yaw) {
@@ -257,13 +274,16 @@ const WeaponRig = {
       const g = o.geometry, pos = g.attributes.position, index = g.index;
       const sk = o.isSkinnedMesh && g.attributes.skinIndex && g.attributes.skinWeight ? o.skeleton : null;
       const si = sk ? g.attributes.skinIndex : null, sw = sk ? g.attributes.skinWeight : null;
+      // この部品が砲塔の部品なら（ボーンに砲塔を含む）、砲身以外の部分（台座・neutral_bone など）はその砲塔のもの
+      let meshOwner = 1;
+      if (sk) rig.mounts.forEach((m, k) => { if (sk.bones.includes(m.turret)) meshOwner = 2 + k; });
       const ownerOf = (vi) => {
         if (!sk) return 1;
         let best = 0, bw = -1;
         const ws = [sw.getX(vi), sw.getY(vi), sw.getZ(vi), sw.getW(vi)], is = [si.getX(vi), si.getY(vi), si.getZ(vi), si.getW(vi)];
         for (let q = 0; q < 4; q++) if (ws[q] > bw) { bw = ws[q]; best = is[q]; }
         const own = boneOwner.get(sk.bones[best]);
-        return own === undefined ? 1 : own === -1 ? -1 : 2 + own;
+        return own === undefined ? meshOwner : own === -1 ? -1 : 2 + own;
       };
       const triCount = index ? index.count / 3 : pos.count / 3;
       for (let t = 0; t < triCount; t++) {
@@ -381,12 +401,15 @@ const Weapons = {
     }
     for (const d of rig.directors) d.cfg = normalizeWeaponDirector(this.cfg.directors[d.key]);
     // 画面の番号: 名前の頭の数字（「1番主砲」→1）。無ければ並び順
-    rig.mounts.forEach((m, k) => { const mm = /^(\d+)/.exec(m.label); m.num = mm ? Number(mm[1]) : k + 1; m.index = k; m.state = 'none'; });
+    // 画面の番号: 並び順（名前の頭の数字の順。「1番主砲」…「12番主砲」、次に副砲など）の通し番号
+    rig.mounts.forEach((m, k) => { m.num = k + 1; m.index = k; m.state = 'none'; });
     try { this._occ = WeaponRig.buildOcclusion(modelRoot, rig); } catch (e) { console.warn('射線の判定の準備に失敗しました', e); this._occ = null; }
+    try { this._buildInset(modelRoot, rig); } catch (e) { console.warn('照準の小さな艦の図の準備に失敗しました', e); this._inset = null; }
     this._buildMountUi();
     this._syncUi();
   },
   detach() {
+    this._disposeInset();
     if (this.rig) WeaponRig.restoreAll(this.rig);
     this.rig = null;
     this.aim.active = false;
@@ -555,6 +578,131 @@ const Weapons = {
       this._savedFov = null;
     }
   },
+  // ---------------------------------------------------------
+  // v89: 照準の視点の小さな3Dの図（装填の棒の上）
+  //   射撃方向を奥に見た艦の概形（全長の1/64の格子の箱）と、砲身ごとの向きの細い薄黄色の線。
+  //   艦がどちらを向いていて、どの砲がどこを向いているかが分かる
+  // ---------------------------------------------------------
+  _buildInset(modelRoot, rig) {
+    this._disposeInset();
+    const occ = WeaponRig.buildOcclusion(modelRoot, rig, 64);
+    if (!occ) return;
+    const { grid, nx, ny, nz, cell, min } = occ;
+    const at = (i, j, l) => (i < 0 || j < 0 || l < 0 || i >= nx || j >= ny || l >= nz ? 0 : grid[(l * ny + j) * nx + i]);
+    const cells = [];
+    for (let l = 0; l < nz; l++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      if (!at(i, j, l)) continue;
+      // 外から見える箱だけ（6方向のどれかが空）
+      if (at(i + 1, j, l) && at(i - 1, j, l) && at(i, j + 1, l) && at(i, j - 1, l) && at(i, j, l + 1) && at(i, j, l - 1)) continue;
+      cells.push([i, j, l, at(i, j, l)]);
+    }
+    const scene = new THREE.Scene();
+    scene.add(new THREE.HemisphereLight(0xcfe4ff, 0x203040, 1.0));
+    const ship = new THREE.Group();
+    ship.matrixAutoUpdate = false;
+    scene.add(ship);
+    const geo = new THREE.BoxGeometry(cell, cell, cell);
+    const mat = new THREE.MeshLambertMaterial({ color: 0x8aa6c4 });
+    const inst = new THREE.InstancedMesh(geo, mat, Math.max(1, cells.length));
+    const m4 = new THREE.Matrix4(), col = new THREE.Color();
+    cells.forEach(([i, j, l, v], k) => {
+      m4.makeTranslation(min.x + (i + 0.5) * cell, min.y + (j + 0.5) * cell, min.z + (l + 0.5) * cell);
+      inst.setMatrixAt(k, m4);
+      inst.setColorAt(k, col.set(v >= 2 ? 0xc8d4e0 : 0x6f8aa8));
+    });
+    inst.count = cells.length;
+    ship.add(inst);
+    // 砲身の向きの線（艦の位置を原点にしたゲームの座標で、毎フレーム描き直す）
+    const nB = rig.mounts.reduce((n, m) => n + m.barrels.length, 0);
+    const lgeo = new THREE.BufferGeometry();
+    lgeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(nB * 6), 3));
+    const lines = new THREE.LineSegments(lgeo, new THREE.LineBasicMaterial({ color: 0xfff0a0, transparent: true, opacity: 0.9, depthTest: false }));
+    lines.frustumCulled = false;
+    lines.renderOrder = 5;
+    scene.add(lines);
+    const camera = new THREE.PerspectiveCamera(30, 1.5, 0.1, 1e6);
+    const size = Math.max(nx, ny, nz) * cell;
+    this._inset = { scene, ship, inst, lines, camera, size };
+    const frame = document.createElement('div');
+    frame.className = 'wpn-inset';
+    document.body.appendChild(frame);
+    this._inset.frame = frame;
+  },
+  _disposeInset() {
+    const s = this._inset;
+    if (!s) return;
+    s.inst.geometry.dispose(); s.inst.material.dispose();
+    s.lines.geometry.dispose(); s.lines.material.dispose();
+    if (s.frame) s.frame.remove();
+    this._inset = null;
+  },
+  // メインの描画の後に、画面の下の小さな枠へ描く（index.html animateFrame）
+  renderInset(renderer) {
+    const s = this._inset;
+    const show = !!(s && this.view && this.hasWeapons() && this._modelRoot && !(typeof CleanView !== 'undefined' && CleanView.on));
+    if (s && s.frame) s.frame.style.display = show ? '' : 'none';
+    if (!show) return;
+    const ship = State.ship;
+    const dl = this.aimDirLocal();
+    if (!ship || !dl) return;
+    // 置き場所: 装填の棒（番号）の上
+    const small = window.innerWidth <= 700 || window.innerHeight <= 500;
+    const w = small ? 170 : 230, h = small ? 104 : 140;
+    const cr = this._ui.chips.getBoundingClientRect();
+    const cx = cr.width > 0 ? cr.left + cr.width / 2 : window.innerWidth / 2;
+    const bottom = cr.height > 0 ? window.innerHeight - cr.top + 6 : 90;
+    const x = Math.round(cx - w / 2);
+    s.frame.style.left = `${x}px`; s.frame.style.bottom = `${bottom}px`;
+    s.frame.style.width = `${w}px`; s.frame.style.height = `${h}px`;
+    // 艦の概形: モデルの座標 → 艦の位置を原点にしたゲームの座標
+    const mw = this._modelRoot.matrixWorld;
+    s.ship.matrix.copy(mw);
+    s.ship.matrix.elements[12] -= ship.position.x; s.ship.matrix.elements[13] -= ship.position.y; s.ship.matrix.elements[14] -= ship.position.z;
+    s.ship.matrixWorldNeedsUpdate = true;
+    // 砲身の線
+    const a = s.lines.geometry.attributes.position;
+    const p = new THREE.Vector3(), q = new THREE.Quaternion(), d = new THREE.Vector3();
+    const len = s.size * 0.32;
+    let k = 0;
+    for (const m of this.rig.mounts) {
+      for (const b of m.barrels) {
+        b.node.getWorldPosition(p);
+        b.node.getWorldQuaternion(q);
+        d.set(0, 1, 0).applyQuaternion(q);
+        p.x -= ship.position.x; p.y -= ship.position.y; p.z -= ship.position.z;
+        a.setXYZ(k++, p.x, p.y, p.z);
+        a.setXYZ(k++, p.x + d.x * len, p.y + d.y * len, p.z + d.z * len);
+      }
+    }
+    a.needsUpdate = true;
+    // カメラ: 射撃方向を奥に（艦の後ろ、射撃方向の手前から見る）。上は艦の上
+    const up = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
+    // 艦の長さが枠の幅にほぼ収まる距離（縦・横の視野角の狭い方に合わせる）
+    const tv = Math.tan((s.camera.fov * Math.PI) / 360), th = tv * (w / h);
+    const dist = (s.size * 0.5) / Math.min(tv * 1.6, th) * 1.02;
+    s.camera.aspect = w / h;
+    s.camera.position.set(-dl.x * dist, -dl.y * dist, -dl.z * dist);
+    s.camera.up.set(up.x, up.y, up.z);
+    s.camera.lookAt(0, 0, 0);
+    s.camera.near = dist * 0.05; s.camera.far = dist * 4;
+    s.camera.updateProjectionMatrix();
+    const y = window.innerHeight - bottom - h;
+    const prevAuto = renderer.autoClear;
+    const cc = renderer.getClearColor(new THREE.Color()), ca = renderer.getClearAlpha();
+    renderer.setRenderTarget(null);
+    renderer.setScissorTest(true);
+    renderer.setScissor(x, window.innerHeight - y - h, w, h);
+    renderer.setViewport(x, window.innerHeight - y - h, w, h);
+    renderer.setClearColor(0x060a10, 1);
+    renderer.clear(true, true, false);
+    renderer.autoClear = false;
+    renderer.render(s.scene, s.camera);
+    renderer.setScissorTest(false);
+    renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
+    renderer.setClearColor(cc, ca);
+    renderer.autoClear = prevAuto;
+  },
+
   // 照準の視点のカメラ（照準の視点でなければ false を返し、ふだんのカメラに任せる）
   updateCamera(cam) {
     if (!this.view || !this.hasWeapons()) return false;
