@@ -321,13 +321,19 @@
   .wpn-gunmark span { position: absolute; left: 14px; top: -12px; font-size: 10px; font-weight: bold; text-shadow: 0 1px 2px #000; }
   .wpn-chips {
     position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
-    display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; max-width: 46vw; pointer-events: none;
+    display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-end; gap: 4px; max-width: 46vw; pointer-events: none;
   }
   .wpn-chip {
     min-width: 22px; height: 22px; padding: 0 4px; box-sizing: border-box; border-radius: 5px;
     font-size: 12px; font-weight: bold; line-height: 20px; text-align: center;
     border: 1px solid currentColor; background: rgba(0,0,0,0.45);
   }
+  .wpn-chipcol { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .wpn-bars { display: flex; gap: 2px; height: 18px; align-items: stretch; }
+  .wpn-bar { position: relative; width: 5px; background: #e8c428; border-radius: 1px; overflow: hidden; }
+  .wpn-bar-fill { position: absolute; left: 0; right: 0; bottom: 0; height: 100%; background: #33e05f; }
+  .wpn-bar.off { background: #3a3f46; }
+  .wpn-bar.off .wpn-bar-fill { background: transparent; border-top: 2px solid #fff; box-sizing: border-box; }
   .st-ready { color: #3dff6e; }
   .st-moving { color: #ffd84a; }
   .st-reload { color: #ff4a3a; }

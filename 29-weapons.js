@@ -850,11 +850,27 @@ const Weapons = {
     if (!this.rig) return;
     const sorted = [...this.rig.mounts].sort((a, b) => a.num - b.num);
     for (const m of sorted) {
+      // 番号の上に、砲身ごとの装填の棒（下から緑で埋まる）
+      const col = document.createElement('div');
+      col.className = 'wpn-chipcol';
+      const bars = document.createElement('div');
+      bars.className = 'wpn-bars';
+      m._bars = m.barrels.map((b, i) => ({ b, i })).sort((x, y) => x.b.num - y.b.num).map(({ i }) => {
+        const bar = document.createElement('div');
+        bar.className = 'wpn-bar';
+        const fill = document.createElement('div');
+        fill.className = 'wpn-bar-fill';
+        bar.appendChild(fill);
+        bars.appendChild(bar);
+        return { i, bar, fill, last: -1 };
+      });
       const chip = document.createElement('div');
       chip.className = 'wpn-chip st-none';
       chip.textContent = String(m.num);
       chip.title = m.key;
-      u.chips.appendChild(chip);
+      col.appendChild(bars);
+      col.appendChild(chip);
+      u.chips.appendChild(col);
       m._chip = chip;
       const mk = document.createElement('div');
       mk.className = 'wpn-gunmark st-none';
@@ -912,6 +928,14 @@ const Weapons = {
         m._lastState = st;
         m._chip.className = `wpn-chip st-${st}`;
         if (m._mark) m._mark.className = `wpn-gunmark st-${st}`;
+        // 向けられない砲の棒は濃い灰色の地に白い線
+        for (const bb of m._bars || []) bb.bar.classList.toggle('off', st === 'none');
+      }
+      // 装填の割合（装填時間に対して、どこまで済んだか）
+      const rt = weaponReload(m.cfg);
+      for (const bb of m._bars || []) {
+        const k = Math.round(clamp(1 - m.reloadLeft[bb.i] / rt, 0, 1) * 100);
+        if (k !== bb.last) { bb.last = k; bb.fill.style.height = `${k}%`; }
       }
     }
   },
