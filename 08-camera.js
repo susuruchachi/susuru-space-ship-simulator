@@ -51,7 +51,7 @@ const CameraSystem = {
   PAN_SENSITIVITY: 0.0015, // ドラッグ1pxかつdistance=1あたりのワールド移動量。distanceに比例させ、ズーム倍率が変わっても画面上の動きの体感速度を揃える
   MIN_ELEVATION: -1.4, // 真下近くまで（真下=-PI/2=-1.57は特異点なので少し手前で止める）
   MAX_ELEVATION: 1.4,
-  MIN_DISTANCE: 8,
+  MIN_DISTANCE: 1.5, // v89: 自由視点でもっと寄れるように（以前は 8 = 艦の大きさと同じ）
   MAX_DISTANCE: 300,
 
   // v78: 艦の大きさ（最大寸法[m]）に応じた倍率。自作の艦は10m〜5000mまで
@@ -67,7 +67,8 @@ const CameraSystem = {
     const k = Math.max(1, (sizeM || 8) / 8);
     const ratio = k / this._shipScale;
     this._shipScale = k;
-    this.MIN_DISTANCE = 8 * k;
+    // v89: 艦の大きさの6%まで寄れる（以前は艦の大きさと同じ距離まで）。小さな艦でも 1.5m まで
+    this.MIN_DISTANCE = Math.max(1.5, (sizeM || 8) * 0.06);
     this.MAX_DISTANCE = 300 * k;
     this._orbit.distance = clamp(this._orbit.distance * ratio, this.MIN_DISTANCE, this.MAX_DISTANCE);
     this._panOffsetLocal = vecScale(this._panOffsetLocal, ratio);
