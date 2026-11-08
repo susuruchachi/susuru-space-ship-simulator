@@ -90,6 +90,20 @@ function normalizeWeaponMount(c) {
   if (out.elevMax < out.elevMin) [out.elevMin, out.elevMax] = [out.elevMax, out.elevMin];
   return out;
 }
+// v89: 砲塔の名前に口径があれば（「14cm第1副砲」「120mm高角砲」など）、設定の無い砲塔の口径の初期値にする
+function weaponCaliberFromName(name) {
+  const m = /(\d+(?:\.\d+)?)\s*(cm|mm|センチ|ミリ)/i.exec(String(name || ''));
+  if (!m) return null;
+  const v = Number(m[1]) * (/cm|センチ/i.test(m[2]) ? 10 : 1);
+  return v > 0 ? v : null;
+}
+// 砲塔 key の設定（無ければ名前から口径を推し量った初期値）
+function weaponMountConfigFor(weapons, key) {
+  const c = weapons && weapons.mounts ? weapons.mounts[key] : null;
+  if (c) return normalizeWeaponMount(c);
+  const cal = weaponCaliberFromName(key);
+  return normalizeWeaponMount(cal ? { caliber: cal } : null);
+}
 function normalizeWeaponDirector(c) {
   c = c || {};
   const yawMin = clamp(Number.isFinite(Number(c.yawMin)) ? Number(c.yawMin) : -180, -180, 180);
@@ -396,7 +410,7 @@ const Weapons = {
     this._modelRoot = modelRoot;
     this.cfg = normalizeShipWeapons(design && design.weapons);
     for (const m of rig.mounts) {
-      m.cfg = normalizeWeaponMount(this.cfg.mounts[m.key]);
+      m.cfg = weaponMountConfigFor(this.cfg, m.key);
       m.reloadLeft = m.barrels.map(() => 0);
     }
     for (const d of rig.directors) d.cfg = normalizeWeaponDirector(this.cfg.directors[d.key]);
@@ -1134,7 +1148,7 @@ const WeaponDesigner = {
       if (!cur) return;
       const d = this._opts.getDesign();
       for (const m of this._rig.mounts) {
-        const c = normalizeWeaponMount(d.weapons.mounts[m.key]);
+        const c = weaponMountConfigFor(d.weapons, m.key);
         Object.assign(c, { kind: cur.kind, type: cur.type, caliber: cur.caliber, reload: cur.reload, color: cur.color, traverseRate: cur.traverseRate, elevRate: cur.elevRate });
         d.weapons.mounts[m.key] = c;
       }
@@ -1170,13 +1184,13 @@ const WeaponDesigner = {
   _currentMountCfg() {
     const part = this._findSel();
     if (!part || part.kind !== 'mount') return null;
-    return normalizeWeaponMount(this._opts.getDesign().weapons.mounts[part.key]);
+    return weaponMountConfigFor(this._opts.getDesign().weapons, part.key);
   },
   _edit(fn) {
     const part = this._findSel();
     if (!part || part.kind !== 'mount') return;
     const d = this._opts.getDesign();
-    const c = normalizeWeaponMount(d.weapons.mounts[part.key]);
+    const c = weaponMountConfigFor(d.weapons, part.key);
     fn(c);
     d.weapons.mounts[part.key] = normalizeWeaponMount(c);
     this._opts.onChange();
@@ -1229,7 +1243,7 @@ const WeaponDesigner = {
     list.innerHTML = '';
     if (!this._sel && rig.mounts.length) this._sel = { kind: 'mount', key: rig.mounts[0].key };
     for (const m of rig.mounts) {
-      const c = normalizeWeaponMount(design.weapons.mounts[m.key]);
+      const c = weaponMountConfigFor(design.weapons, m.key);
       const b = document.createElement('button');
       b.type = 'button';
       const on = this._sel && this._sel.kind === 'mount' && this._sel.key === m.key;
@@ -1255,7 +1269,7 @@ const WeaponDesigner = {
     const active = document.activeElement;
     const setVal = (id, v) => { if (active !== $(id)) $(id).value = v; };
     if (part.kind === 'mount') {
-      const c = normalizeWeaponMount(design.weapons.mounts[part.key]);
+      const c = weaponMountConfigFor(design.weapons, part.key);
       $('wpnEditorTitle').textContent = `${part.key}（砲身 ${part.barrels.length}門）`;
       $('wpnKind').value = c.kind;
       const ts = $('wpnType');
@@ -1314,9 +1328,11 @@ const WeaponDesigner = {
     const size = (design.hull && design.hull.size) || 100;
     const sel = this._findSel();
     for (const m of this._rig.mounts) {
-      const c = normalizeWeaponMount(design.weapons.mounts[m.key]);
+      const c = weaponMountConfigFor(design.weapons, m.key);
       const on = sel === m;
-      const r = size * (on ? 0.07 : 0.045);
+      // 扇形の大きさは口径に合わせる（副砲などの小さな砲は小さく。たくさん並んでも重なりにくいように）
+      const r0 = clamp((c.caliber / 1000) * 30, size * 0.01, size * 0.045);
+      const r = on ? Math.max(r0 * 1.6, size * 0.03) : r0;
       this._addPartMarks(m, m.turret, c.yawMin, c.yawMax, r, on ? 0xff7a50 : 0xff9070, on ? 0.38 : 0.16, on);
       if (on) {
         // 砲身の仰角の範囲: 今の旋回角での、旋回の軸を含む縦の扇形
