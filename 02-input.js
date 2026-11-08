@@ -272,7 +272,8 @@ const InputSystem = {
       thrustForward: this._throttleLever.ratio, // v04: 保持型スロットルレバーの値をそのまま使う
       thrustStrafeX: move.dx,
       thrustStrafeY: -move.dy, // 上に倒す=上昇
-      rotateYaw: look.dx,
+      // v89: 右へ倒すと右へ回る（+ヨーは左回り。キーボードの A=左・D=右 と同じ向きに）。以前は逆だった
+      rotateYaw: -look.dx,
       rotatePitch: -look.dy,
       rotateRoll: roll,
       boost: this._boostEl ? this._isPressed(this._boostEl) : false,

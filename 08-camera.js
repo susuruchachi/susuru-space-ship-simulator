@@ -387,20 +387,53 @@ const CameraSystem = {
   // -----------------------------------------------------------
   _updateChase(camera, ship) {
     const k = this._shipScale * this._chaseZoom;
-    const camOffset = rotateVecByQuat({ x: 0, y: 6 * k, z: 24 * k }, ship.quaternion);
+    // v89: 重力場機関の艦は、カメラの向きが艦の回転に少し遅れてついていき、境界面の上の回転の中心を見る
+    const cq = this._viewQuat(ship);
+    const tg = this._viewTarget(ship);
+    const camOffset = rotateVecByQuat({ x: 0, y: 6 * k, z: 24 * k }, cq);
     camera.position.set(
-      ship.position.x + camOffset.x,
-      ship.position.y + camOffset.y,
-      ship.position.z + camOffset.z
+      tg.x + camOffset.x,
+      tg.y + camOffset.y,
+      tg.z + camOffset.z
     );
 
     // 船のローカル上方向（+Y）をワールド座標に変換し、カメラのupに
     // 明示的に設定してからlookAtする。これによりlookAt()が
     // 「船が今向いている上方向」を基準に視界を組み立てるようになり、
     // 船がロールすればカメラの傾きも一緒に回転する。
-    const upWorld = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
+    const upWorld = rotateVecByQuat({ x: 0, y: 1, z: 0 }, cq);
     camera.up.set(upWorld.x, upWorld.y, upWorld.z);
-    camera.lookAt(ship.position.x, ship.position.y, ship.position.z);
+    camera.lookAt(tg.x, tg.y, tg.z);
+  },
+
+  // -----------------------------------------------------------
+  // v89: 重力場機関の艦のカメラ
+  //   艦に固定したカメラだと、艦が回っても画面の艦は動かず、まわりの景色がカメラ（艦のずっと上・後ろ）を
+  //   中心に回って見え、「回転の軸がずっと上にある」ように感じられた。重力場機関の艦は、
+  //   ・カメラが見る点を、重心ではなく境界面の上の回転の中心（重心の真上・真下の境界面の高さの点）にし、
+  //   ・カメラの向きは艦の向きに少し遅れてついていく（宇宙の座標でなめらかにする。フレームが変わっても跳ばない）
+  //   ので、回し始めに艦が境界面の上の点を中心に回るのが見えてから、カメラが追いつく。
+  // -----------------------------------------------------------
+  GD_CAM_LAG: 0.35, // [s]
+  _camQU: null,
+  _camLastT: 0,
+  _viewQuat(ship) {
+    const now = performance.now();
+    const dt = this._camLastT ? Math.min(0.2, (now - this._camLastT) / 1000) : 0;
+    this._camLastT = now;
+    if (!ship.gravityDrive || ship.autoDockingEnabled) { this._camQU = null; return ship.quaternion; }
+    const fq = typeof Navigation !== 'undefined' && Navigation.frame && Navigation.frame.quat ? Navigation.frame.quat : null;
+    const qs = new THREE.Quaternion(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w);
+    const qU = fq ? fq.clone().multiply(qs) : qs;
+    if (!this._camQU || this._camQU.angleTo(qU) > 1.2) this._camQU = qU.clone();
+    else this._camQU.slerp(qU, 1 - Math.exp(-dt / this.GD_CAM_LAG));
+    const ql = fq ? fq.clone().invert().multiply(this._camQU) : this._camQU.clone();
+    return { x: ql.x, y: ql.y, z: ql.z, w: ql.w };
+  },
+  _viewTarget(ship) {
+    if (!ship.gravityDrive || ship.autoDockingEnabled || !ship.boundaryHeight) return ship.position;
+    const o = rotateVecByQuat({ x: 0, y: ship.boundaryHeight, z: 0 }, ship.quaternion);
+    return { x: ship.position.x + o.x, y: ship.position.y + o.y, z: ship.position.z + o.z };
   },
 
   // -----------------------------------------------------------
@@ -420,15 +453,17 @@ const CameraSystem = {
       z: horizontalDist * Math.cos(azimuth),
     };
 
-    const worldOffset = rotateVecByQuat(localOffset, ship.quaternion);
+    const cq = this._viewQuat(ship);
+    const tg0 = this._viewTarget(ship);
+    const worldOffset = rotateVecByQuat(localOffset, cq);
     // v72: パンオフセット（船のローカル座標系で保持）をワールドへ
     // 変換し、注視点・カメラ位置の両方に同じだけ加える。カメラ位置に
     // も同じ量を足すことで、パンしても船との距離(distance)や見る
     // 角度自体は変わらず、視界全体が平行にずれる。
-    const panWorld = rotateVecByQuat(this._panOffsetLocal, ship.quaternion);
-    const targetX = ship.position.x + panWorld.x;
-    const targetY = ship.position.y + panWorld.y;
-    const targetZ = ship.position.z + panWorld.z;
+    const panWorld = rotateVecByQuat(this._panOffsetLocal, cq);
+    const targetX = tg0.x + panWorld.x;
+    const targetY = tg0.y + panWorld.y;
+    const targetZ = tg0.z + panWorld.z;
 
     camera.position.set(
       targetX + worldOffset.x,
@@ -438,7 +473,7 @@ const CameraSystem = {
 
     // orbitモードでも船のロールに応じてupを追従させる（真上/真下
     // 付近を除き、chaseと同じ理屈で自然な傾きになる）
-    const upWorld = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
+    const upWorld = rotateVecByQuat({ x: 0, y: 1, z: 0 }, cq);
     camera.up.set(upWorld.x, upWorld.y, upWorld.z);
     camera.lookAt(targetX, targetY, targetZ);
   },
