@@ -225,6 +225,38 @@ const WeaponRig = {
   },
 };
 
+// -------------------------------------------------------------
+// v89: ボーンで動く部品（スキン）のブレ対策
+//   three.js はスキンの頂点を「ボーンの世界の行列 × 船体の世界の行列の逆」で GPU（32ビットの小数）で計算する。
+//   艦の座標が大きいと、どちらの行列にも大きな位置が入り、GPU の中で打ち消し合うときに桁が落ちて、
+//   砲塔・砲身がブレていた。打ち消しを JS（64ビット）で先に済ませ、小さな値だけを GPU に渡す。
+// -------------------------------------------------------------
+function stabilizeSkinnedMeshes(root) {
+  if (!root) return;
+  const ident = new THREE.Matrix4();
+  root.traverse((o) => {
+    if (!o.isSkinnedMesh || !o.skeleton || o.userData.skinStabilized) return;
+    o.userData.skinStabilized = true;
+    const mesh = o;
+    const meshInv = new THREE.Matrix4(), m = new THREE.Matrix4();
+    // 頂点の最後の変換（bindMatrixInverse）は単位行列にし、その分をボーンの行列に含める
+    mesh.updateMatrixWorld = function (force) {
+      THREE.Mesh.prototype.updateMatrixWorld.call(this, force);
+      this.bindMatrixInverse.identity();
+    };
+    mesh.skeleton.update = function () {
+      meshInv.copy(mesh.matrixWorld).invert();
+      for (let i = 0; i < this.bones.length; i++) {
+        const bone = this.bones[i];
+        m.multiplyMatrices(bone ? bone.matrixWorld : ident, this.boneInverses[i]);
+        m.premultiply(meshInv);
+        m.toArray(this.boneMatrices, i * 16);
+      }
+      if (this.boneTexture) this.boneTexture.needsUpdate = true;
+    };
+  });
+}
+
 const toRadW = (d) => (d * Math.PI) / 180;
 const toDegW = (r) => (r * 180) / Math.PI;
 
@@ -257,6 +289,7 @@ const Weapons = {
     const rig = WeaponRig.detect(modelRoot);
     if (!rig.mounts.length && !rig.directors.length) return;
     this.rig = rig;
+    this._modelRoot = modelRoot;
     this.cfg = normalizeShipWeapons(design && design.weapons);
     for (const m of rig.mounts) {
       m.cfg = normalizeWeaponMount(this.cfg.mounts[m.key]);
@@ -313,6 +346,7 @@ const Weapons = {
       if (!dir && ship) dir = rotateVecByQuat({ x: 0, y: 0, z: -1 }, ship.quaternion);
       this.startAim(dir || { x: 0, y: 0, z: -1 });
     }
+    if (on !== this.view) this._setScopeLook(on);
     this.view = on;
     if (on && typeof CleanView !== 'undefined' && CleanView.on) CleanView.set(false);
     this._syncUi();
@@ -372,26 +406,67 @@ const Weapons = {
     this._updateUiState();
   },
 
+  // v89: 照準の視点は、射撃レーダー／測距儀の位置から、測距儀でのぞいているように拡大して見る
+  //   測距儀の倍率 = ふだんの視野角 ÷ 照準の視野角（ピンチ・ホイールで変える）
+  AIM_FOV_DEFAULT: 12,
+  AIM_FOV_MIN: 1,
+  AIM_FOV_MAX: 50,
+  _aimFov: 12,
+  zoomBy(factor) {
+    this._aimFov = clamp(this._aimFov * factor, this.AIM_FOV_MIN, this.AIM_FOV_MAX);
+  },
+  // 照準の視点に入る・出るとき: 視野角を戻すために覚える。船体の面の裏側を描かないようにする
+  // （レーダーの中から見るので、レーダー自身や船体の面が視界をふさがないように）
+  _setScopeLook(on) {
+    if (on) {
+      this._savedSides = [];
+      if (this._modelRoot) {
+        this._modelRoot.traverse((o) => {
+          if (!o.material) return;
+          for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+            if (m.side !== THREE.FrontSide) { this._savedSides.push([m, m.side]); m.side = THREE.FrontSide; m.needsUpdate = true; }
+          }
+        });
+      }
+    } else {
+      for (const [m, side] of this._savedSides || []) { m.side = side; m.needsUpdate = true; }
+      this._savedSides = null;
+      if (this._savedFov && typeof camera !== 'undefined' && camera) {
+        camera.fov = this._savedFov;
+        camera.updateProjectionMatrix();
+      }
+      this._savedFov = null;
+    }
+  },
   // 照準の視点のカメラ（照準の視点でなければ false を返し、ふだんのカメラに任せる）
   updateCamera(cam) {
     if (!this.view || !this.hasWeapons()) return false;
     const ship = State.ship;
     const dl = this.aimDirLocal();
     if (!ship || !dl) return false;
-    const size = (CameraSystem._shipScale || 1) * 8;
+    if (!this._savedFov) this._savedFov = cam.fov;
     const up = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
-    // 狙う向きの後ろ上から、艦越しに狙う向きを見る
-    const dist = size * 1.3;
-    const p = ship.position;
-    cam.position.set(p.x - dl.x * dist + up.x * dist * 0.35, p.y - dl.y * dist + up.y * dist * 0.35, p.z - dl.z * dist + up.z * dist * 0.35);
+    const dir = this.rig.directors[0];
+    let p;
+    if (dir) {
+      ship.mesh.updateMatrixWorld(true);
+      const v = new THREE.Vector3();
+      dir.node.getWorldPosition(v);
+      p = { x: v.x, y: v.y, z: v.z };
+    } else {
+      // 射撃レーダーが無ければ、艦の上（船体の上の縁の少し上）から
+      const size = (CameraSystem._shipScale || 1) * 8;
+      p = { x: ship.position.x + up.x * size * 0.12, y: ship.position.y + up.y * size * 0.12, z: ship.position.z + up.z * size * 0.12 };
+    }
+    cam.position.set(p.x, p.y, p.z);
     cam.up.set(up.x, up.y, up.z);
-    cam.lookAt(p.x + dl.x * dist * 4, p.y + dl.y * dist * 4, p.z + dl.z * dist * 4);
-    // 照準の印（狙う向きの無限遠）
-    const far = new THREE.Vector3(cam.position.x + dl.x * 1e4, cam.position.y + dl.y * 1e4, cam.position.z + dl.z * 1e4).project(cam);
+    cam.lookAt(p.x + dl.x, p.y + dl.y, p.z + dl.z);
+    if (Math.abs(cam.fov - this._aimFov) > 1e-6) { cam.fov = this._aimFov; cam.updateProjectionMatrix(); }
     const el = this._ui && this._ui.reticle;
-    if (el) {
-      el.style.left = `${((far.x + 1) / 2) * window.innerWidth}px`;
-      el.style.top = `${((1 - far.y) / 2) * window.innerHeight}px`;
+    if (el) { el.style.left = '50%'; el.style.top = '50%'; }
+    if (this._ui && this._ui.zoom) {
+      const t = `測距儀 ×${(this._savedFov / this._aimFov).toFixed(1)}`;
+      if (this._ui.zoom.textContent !== t) this._ui.zoom.textContent = t;
     }
     return true;
   },
@@ -404,10 +479,12 @@ const Weapons = {
       if (!d || d.id !== id || !this.view) return;
       const dx = x - d.x, dy = y - d.y;
       d.x = x; d.y = y;
-      this._rotateAim(-dx * 0.004, -dy * 0.004);
+      // 指の下の景色が指についてくる速さ（視野角に合わせる。拡大しているほどゆっくり）
+      const k = ((this._aimFov * Math.PI) / 180) / Math.max(1, window.innerHeight);
+      this._rotateAim(-dx * k, -dy * k);
     };
     const end = (id) => { if (this._drag && this._drag.id === id) this._drag = null; };
-    canvas.addEventListener('touchstart', (e) => { if (e.touches.length === 1) start(e.touches[0].clientX, e.touches[0].clientY, e.touches[0].identifier); else this._drag = null; }, { passive: true });
+    canvas.addEventListener('touchstart', (e) => { const tt = e.targetTouches; if (tt.length === 1) start(tt[0].clientX, tt[0].clientY, tt[0].identifier); else this._drag = null; }, { passive: true });
     canvas.addEventListener('touchmove', (e) => { for (const t of e.changedTouches) move(t.clientX, t.clientY, t.identifier); }, { passive: true });
     canvas.addEventListener('touchend', (e) => { for (const t of e.changedTouches) end(t.identifier); }, { passive: true });
     canvas.addEventListener('mousedown', (e) => start(e.clientX, e.clientY, 'mouse'));
@@ -593,7 +670,7 @@ const Weapons = {
     document.body.appendChild(reticle);
     const hint = document.createElement('div');
     hint.className = 'wpn-hint';
-    hint.textContent = '照準: 画面をドラッグして狙う方向を決めます（「照準」をもう一度押すと元の視点へ。狙いは続けます）';
+    hint.innerHTML = '<span class="wpn-zoom"></span>　画面をドラッグして狙う方向を決めます・ピンチで拡大（「照準」をもう一度押すと元の視点へ。狙いは続けます）';
     document.body.appendChild(hint);
     const stop = (e) => { e.stopPropagation(); };
     box.addEventListener('touchstart', stop, { passive: true });
@@ -603,7 +680,7 @@ const Weapons = {
       const n = this.fire();
       if (!n) this._flashStatus(this.aim.active ? '撃てる砲がありません（旋回中・装填中・範囲外）' : '先に「照準」で狙ってください');
     });
-    this._ui = { box, reticle, hint, status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
+    this._ui = { box, reticle, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
     this._syncUi();
   },
   _flashStatus(text) {

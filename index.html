@@ -311,6 +311,7 @@
     .wpn-btn { height: 32px; font-size: 12px; }
   }
   body.clean-view .wpn-reticle, body.clean-view .wpn-hint { display: none !important; }
+  .wpn-zoom { font-weight: bold; color: #fff; }
   .hud-camera-controls {
     position: fixed;
     top: 56px;
@@ -1159,6 +1160,8 @@ async function applyShipDesignInGame(ship, root, design) {
     corr.scale.setScalar(h.scale);
     corr.position.set(h.offset.x, h.offset.y, h.offset.z);
     corr.add(obj);
+    // v89: ボーンで動く部品が、艦の座標が大きいときにブレないように（29-weapons.js）
+    if (typeof stabilizeSkinnedMeshes === 'function') stabilizeSkinnedMeshes(obj);
     // v89: モデルの中の砲塔・射撃レーダーを動かせるようにする（29-weapons.js）
     if (typeof Weapons !== 'undefined') Weapons.attach(obj, design);
     root.userData.designOffset.remove(box);
@@ -1197,6 +1200,7 @@ async function loadSavedShipModelInto(root, classKey, ship) {
     if (placeholder && placeholder.parent) {
       placeholder.parent.remove(placeholder);
     }
+    if (typeof stabilizeSkinnedMeshes === 'function') stabilizeSkinnedMeshes(loadedObject); // v89
     root.userData.correctionGroup.add(loadedObject);
     applyAdjust(root.userData.correctionGroup);
     refreshShipCollisionShape(root);

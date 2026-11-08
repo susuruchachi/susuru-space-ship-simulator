@@ -91,6 +91,7 @@ const CameraSystem = {
   _bindDrag(canvasEl) {
     const onDragStart = (x, y, panMode) => {
       if (State.settings.cameraMode !== 'orbit') return;
+      if (typeof Weapons !== 'undefined' && Weapons.view) return; // v89: 照準の視点のドラッグは狙う向きを回す
       this._dragState.active = true;
       this._dragState.panMode = !!panMode;
       this._dragState.lastX = x;
@@ -138,6 +139,8 @@ const CameraSystem = {
     // いくらピンチしてもほとんど変わらなかった。追従視点でもズームできるようにした。
     const zoomBy = (factor) => {
       if (!(factor > 0) || !Number.isFinite(factor)) return;
+      // v89: 照準の視点では、測距儀の倍率を変える（29-weapons.js）
+      if (typeof Weapons !== 'undefined' && Weapons.view) { Weapons.zoomBy(factor); return; }
       if (State.settings.cameraMode === 'orbit') {
         this._orbit.distance = clamp(this._orbit.distance * factor, this.MIN_DISTANCE, this.MAX_DISTANCE);
       } else {
