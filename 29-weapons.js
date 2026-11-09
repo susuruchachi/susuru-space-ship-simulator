@@ -628,8 +628,10 @@ const Weapons = {
       else if (m.barrels.some((b, i) => canFire(i))) m.state = 'ready';
       else m.state = 'reload';
       // 砲身ごとの状態（装填の棒・小さな図の線の色）
+      // v89: 自動射撃を「N%」にしているレーザーは、充電が N% になったら撃てる（緑）とする
+      const fullCh = this._fullCharge(m);
       m.barrelStates = m.barrels.map((b, i) => (m.state === 'none' || m.state === 'near' || m.state === 'moving' ? m.state
-        : m.blocked[i] ? 'blocked' : m.reloadLeft[i] > 0 ? 'reload' : 'ready'));
+        : m.blocked[i] ? 'blocked' : (m.cfg.kind === 'laser' ? this._charge(m, i) < fullCh - 1e-9 : m.reloadLeft[i] > 0) ? 'reload' : 'ready'));
       if (m.onTarget) aimed++;
       if (m.barrels.some((b, i) => this._canFireBarrel(m, i))) ready++;
     }
@@ -923,6 +925,12 @@ const Weapons = {
   // v89: レーザーは充電の途中でも撃てる（充電の割合 = 1 − 残り時間 / 充電時間。光線の太さがその割合になる）
   LASER_MIN_CHARGE: 0.05,
   _charge(m, i) { return clamp(1 - m.reloadLeft[i] / weaponReload(m.cfg), 0, 1); },
+  // 装填の棒が一番上になる充電の割合: 自動射撃を「N%」にしているグループのレーザーは N%、それ以外は 1（満タン）
+  _fullCharge(m) {
+    if (m.cfg.kind !== 'laser' || !this.groups) return 1;
+    const g = this.groups.find((x) => x.id === m.groupId);
+    return g && g.mode === 'set' ? Math.max(this.LASER_MIN_CHARGE, g.power / 100) : 1;
+  },
   // minCharge: レーザーの撃てる充電の割合（省略時は LASER_MIN_CHARGE）。実弾砲は装填が済んでいること
   _canFireBarrel(m, i, minCharge) {
     if (!m.onTarget || (m.blocked && m.blocked[i])) return false;
@@ -1257,7 +1265,8 @@ const Weapons = {
       // 砲身ごとの装填の棒: 砲身の状態の色で、装填の済んだ割合だけ下から伸びる
       const rt = weaponReload(m.cfg);
       for (const bb of m._bars || []) {
-        const k = Math.round(clamp(1 - m.reloadLeft[bb.i] / rt, 0, 1) * 100);
+        // 自動射撃を「N%」にしているレーザーは、N% で一番上まで（その割合まで溜まったら撃つので）
+        const k = Math.round(clamp((1 - m.reloadLeft[bb.i] / rt) / this._fullCharge(m), 0, 1) * 100);
         if (k !== bb.last) { bb.last = k; bb.fill.style.height = `${k}%`; }
         const bst = this.aim.active && m.barrelStates ? m.barrelStates[bb.i] : 'none';
         if (bst !== bb.lastSt) { bb.lastSt = bst; bb.bar.className = `wpn-bar st-${bst}`; }
