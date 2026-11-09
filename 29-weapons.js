@@ -1868,6 +1868,59 @@ const Weapons = {
     for (const pt of D.parts) if (pt.kind === kind && (!filter || filter(pt))) e = Math.min(e, pt.hp / pt.max);
     return e;
   },
+  // 砲塔の損傷の段階: '' / 'jam'（旋回・俯仰不能）/ 'nofire'（砲撃不能）/ 'dead'（完全に機能停止）
+  _turretDamageState(m) {
+    const pt = m._dmgPart;
+    if (!pt || !this._dmg) return '';
+    const e = pt.hp / pt.max;
+    if (e <= 0.001) return 'dead';
+    if (e < this.TURRET_NOFIRE) return 'nofire';
+    if (e < this.TURRET_JAM) return 'jam';
+    return '';
+  },
+  // v89: BOOST の上の小さな損傷のマーク（重要区画・射撃レーダー／測距儀）。縁が修理の進み具合。押すと修理を始める
+  _renderDamageIcons() {
+    if (typeof document === 'undefined') return;
+    let box = this._dmgIcons;
+    const D = this._dmg;
+    const list = D ? D.parts.filter((x) => x.kind !== 'turret' && (x.hp < x.max - 1e-6 || x.repair)) : [];
+    if (!list.length) { if (box) box.style.display = 'none'; return; }
+    if (!box) {
+      box = document.createElement('div');
+      box.className = 'dmg-icons';
+      document.body.appendChild(box);
+      this._dmgIcons = box;
+      box._items = new Map();
+    }
+    box.style.display = '';
+    const boost = document.querySelector('.btn-boost');
+    if (boost) {
+      const r = boost.getBoundingClientRect();
+      if (r.width > 0) { box.style.right = `${Math.round(window.innerWidth - r.right)}px`; box.style.bottom = `${Math.round(window.innerHeight - r.top + 6)}px`; box.style.maxWidth = `${Math.max(60, Math.round(r.width + 4))}px`; }
+    }
+    const sym = { bridge: '艦', defense: '盾', engine: '機', fcs: '統', director: '測' };
+    const keep = new Set(list.map((x) => x.key));
+    for (const [k, el] of box._items) if (!keep.has(k)) { el.remove(); box._items.delete(k); }
+    for (const pt of list) {
+      let el = box._items.get(pt.key);
+      if (!el) {
+        el = document.createElement('button');
+        el.type = 'button';
+        el.className = 'dmg-icon';
+        el.innerHTML = '<span class="dmg-icon-in"></span>';
+        el.addEventListener('click', (e) => { e.stopPropagation(); if (!pt.repair) { if (this.startRepair(pt.key)) this._flashStatus(`${pt.label}の応急修理を始めました`); } });
+        box.appendChild(el);
+        box._items.set(pt.key, el);
+      }
+      const e = pt.hp / pt.max;
+      const prog = pt.repair ? clamp(pt.repair.t / pt.repair.total, 0, 1) : 0;
+      el.style.background = pt.repair ? `conic-gradient(#6fd0ff ${(prog * 360).toFixed(0)}deg, rgba(255,255,255,0.18) 0deg)` : 'rgba(255,255,255,0.18)';
+      const inn = el.firstChild;
+      inn.textContent = sym[pt.kind] || '!';
+      inn.style.background = e > 0.6 ? '#8a6a10' : e > 0.3 ? '#9a4a10' : '#9a1a10';
+      el.title = `${pt.label} ${Math.floor(e * 100)}%${pt.repair ? `・修理中 ${Math.round(prog * 100)}%` : '（押すと応急修理）'}`;
+    }
+  },
   _dmgTakenMul() { return 1 + (1 - this._eff('defense')); },
   _laserPowerFactor() { return 0.3 + 0.7 * this._eff('engine'); },
   _turretMoveFactor(m) {
@@ -1939,10 +1992,11 @@ const Weapons = {
     }
     this._updateHitSpots(dt);
     D.uiT -= dt;
-    if (done || D.uiT <= 0) { D.uiT = 0.5; this._renderDamageUi(); }
+    if (done || D.uiT <= 0) { D.uiT = 0.25; this._renderDamageUi(); }
   },
   // サイドメニューの「損傷と応急修理」。行は区画ごとに作って使い回す（ボタンが押しやすいように）
   _renderDamageUi(rebuild) {
+    this._renderDamageIcons();
     const el = typeof document !== 'undefined' ? document.querySelector('.side-menu-damage') : null;
     if (!el) return;
     const D = this._dmg;
@@ -2700,6 +2754,11 @@ const Weapons = {
       col.appendChild(chip);
       u.chips.appendChild(col);
       m._chip = chip;
+      // v89: 砲塔の損傷（旋回不能・砲撃不能・機能停止）を番号の下に
+      const dtag = document.createElement('div');
+      dtag.className = 'wpn-chip-dmg';
+      col.appendChild(dtag);
+      m._dtag = dtag;
       // v89: 番号を押すと、その砲から見る視点に（もう一度押すとレーダーから）
       col.addEventListener('click', () => {
         this._viewMount = this._viewMount === m ? null : m;
@@ -2875,10 +2934,13 @@ const Weapons = {
     u.fire.disabled = !(s.ready > 0);
     for (const m of this.rig.mounts) {
       const st = this.aim.active ? m.state : 'none';
-      if (m._chip && m._lastState !== st) {
+      const ds = this._turretDamageState(m);
+      if (m._chip && (m._lastState !== st || m._lastDs !== ds)) {
         m._lastState = st;
-        m._chip.className = `wpn-chip st-${st}`;
+        m._lastDs = ds;
+        m._chip.className = `wpn-chip st-${st}${ds ? ` dmg-${ds}` : ''}`;
         if (m._mark) m._mark.className = `wpn-gunmark st-${st}${m._smallGun ? ' small' : ''}`;
+        if (m._dtag) { m._dtag.textContent = { jam: '旋回×', nofire: '砲撃×', dead: '停止' }[ds] || ''; m._dtag.className = `wpn-chip-dmg${ds ? ` dmg-${ds}` : ''}`; }
       }
       // 砲身ごとの装填の棒: 砲身の状態の色で、装填の済んだ割合だけ下から伸びる
       const rt = weaponReload(m.cfg);
