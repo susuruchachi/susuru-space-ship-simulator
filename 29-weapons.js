@@ -428,6 +428,14 @@ const WeaponRig = {
       const BM = new THREE.Matrix4().multiplyMatrices(inv, br.node.matrixWorld);
       barrelInfo.set(br.node, { p: new THREE.Vector3().setFromMatrixPosition(BM), d: new THREE.Vector3(0, 1, 0).transformDirection(BM), len: 0 });
     }
+    // v89: 砲塔の屋根の高さ（砲塔の付け根から、砲塔の上向きに測った砲塔の部品のいちばん高いところ）。砲塔の視点をその少し上に置く
+    const turretInfo = rig.mounts.map((m) => {
+      // 上向き = 旋回の軸（砲塔の親の座標の U）
+      const TM = new THREE.Matrix4().multiplyMatrices(inv, m.turret.matrixWorld);
+      const PM = new THREE.Matrix4().multiplyMatrices(inv, m.turret.parent ? m.turret.parent.matrixWorld : root.matrixWorld);
+      return { p: new THREE.Vector3().setFromMatrixPosition(TM), u: m.U.clone().transformDirection(PM), top: 0 };
+    });
+    const turretOfMesh = (o) => { for (let q = o; q; q = q.parent) { const k = rig.mounts.findIndex((m) => m.turret === q); if (k >= 0) return k; } return -1; };
     for (const o of meshes) {
       M.multiplyMatrices(inv, o.matrixWorld);
       const g = o.geometry, pos = g.attributes.position, index = g.index;
@@ -454,6 +462,17 @@ const WeaponRig = {
         const own = boneOwner.get(sk.bones[best]);
         return own === undefined ? meshOwner : own === -1 ? -1 : 2 + own;
       };
+      {
+        const vtx = new THREE.Vector3();
+        const mk = sk ? -1 : turretOfMesh(o);
+        if (sk || mk >= 0) for (let vi = 0; vi < pos.count; vi++) {
+          const own = sk ? ownerOf(vi) : 2 + mk;
+          if (own < 2) continue;
+          const ti = turretInfo[own - 2];
+          place(vtx, vi).sub(ti.p);
+          ti.top = Math.max(ti.top, vtx.dot(ti.u));
+        }
+      }
       // v89: 砲身の長さを測る（砲身のボーンに付いた頂点の、付け根から砲身の向きへの最大の距離）
       if (sk) {
         const vtx = new THREE.Vector3();
@@ -484,7 +503,9 @@ const WeaponRig = {
     const scale = new THREE.Vector3().setFromMatrixScale(root.matrixWorld).x;
     const barrelLen = new Map();
     for (const [node, info] of barrelInfo) if (info.len > 0) barrelLen.set(node, info.len * scale);
-    return { grid, nx, ny, nz, cell, min, root, barrelLen };
+    const turretTop = new Map();
+    rig.mounts.forEach((m, k) => { if (turretInfo[k].top > 0) turretTop.set(m.turret, turretInfo[k].top * scale); });
+    return { grid, nx, ny, nz, cell, min, root, barrelLen, turretTop, cellWorld: cell * scale };
   },
   // v89: 世界の線分 a→b が船体（格子のどこか）に当たるか。当たればその世界の点。格子の箱の中だけをたどる
   segmentHitsGrid(occ, a, b) {
@@ -887,13 +908,32 @@ const Weapons = {
   // v89: 照準の視点は、射撃レーダー／測距儀の位置から、測距儀でのぞいているように拡大して見る
   //   測距儀の倍率 = ふだんの視野角 ÷ 照準の視野角（ピンチ・ホイールで変える）
   AIM_FOV_DEFAULT: 30, // ふだん（60°）の2倍
-  AIM_FOV_MIN: 1,
+  AIM_FOV_MIN: 0.4,
   AIM_FOV_MAX: 50,
   _aimFov: 30,
   SALVO_TAP_MS: 400, // 「撃て」をこの時間 [ms] より早く続けて押すと一斉射撃
   NEAR_MAX_DEG: 30, // ぴったり向けられない砲を寄せるのは、狙う向きからこの角度まで
   zoomBy(factor) {
-    this._aimFov = clamp(this._aimFov * factor, this.AIM_FOV_MIN, this.AIM_FOV_MAX);
+    // 追尾中のピンチは、追尾の拡大の度合いを変える（追尾をやめれば元の倍率に戻る）
+    if (this.tracking) this._trackAdj = clamp((this._trackAdj || 1) * factor, 0.2, 10);
+    else this._aimFov = clamp(this._aimFov * factor, this.AIM_FOV_MIN, this.AIM_FOV_MAX);
+  },
+  // v89: 照準で目標を追尾しているあいだ（照準が目標に合っている）は、目標が画面の高さの約 1/6 に見えるまで拡大する。
+  //   パンで目標へ回している途中・追尾していないときは、ふだんの倍率へなめらかに戻す
+  TRACK_FILL: 1 / 6,
+  _viewFov(eye) {
+    const t = this.lock && this.lock.alive && this._practiceOn() ? this.lock : null;
+    this.tracking = !!(t && !this.lockPanning);
+    let want = this._aimFov;
+    if (this.tracking) {
+      const d = Math.max(1, t.pos.distanceTo(new THREE.Vector3(eye.x, eye.y, eye.z)));
+      const ang = (2 * Math.atan((t.size || 50) / d) * 180) / Math.PI; // 目標の見かけの大きさ [deg]
+      want = clamp((ang / this.TRACK_FILL) * (this._trackAdj || 1), this.AIM_FOV_MIN, Math.min(this.AIM_FOV_MAX, this._aimFov));
+    }
+    const cur = this._dispFov || this._aimFov;
+    const k = 1 - Math.exp(-Math.min(this._dt || 0.016, 0.1) / 0.45);
+    this._dispFov = Math.exp(Math.log(cur) + (Math.log(want) - Math.log(cur)) * k);
+    return this._dispFov;
   },
   // 照準の視点に入る・出るとき: 視野角を戻すために覚える。船体の面の裏側を描かないようにする
   // （レーダーの中から見るので、レーダー自身や船体の面が視界をふさがないように）
@@ -916,6 +956,7 @@ const Weapons = {
         camera.updateProjectionMatrix();
       }
       this._savedFov = null;
+      this._dispFov = null;
     }
   },
   // ---------------------------------------------------------
@@ -1255,10 +1296,21 @@ const Weapons = {
     let p;
     const vm = this._viewMount && this.rig.mounts.includes(this._viewMount) ? this._viewMount : null;
     if (vm) {
-      // v89: 番号を押した砲の砲口から見る（砲身の後ろから見ると砲身が視界をふさぐので、砲口から）
+      // v89: 番号を押した砲塔の視点: 砲塔の屋根の少し上（砲塔の真上）から、砲とほとんど同じ向きを見る。
+      //   砲身・砲塔に視界をふさがれないように（屋根の高さが分からなければ砲口から）
       ship.mesh.updateMatrixWorld(true);
-      const { pos } = this._barrelMuzzle(vm, vm.barrels[0]);
-      p = { x: pos.x, y: pos.y, z: pos.z };
+      const top = this._occ && this._occ.turretTop && this._occ.turretTop.get(vm.turret);
+      if (top) {
+        const tp = new THREE.Vector3();
+        vm.turret.getWorldPosition(tp);
+        const tu = vm.U.clone().transformDirection(vm.turret.parent ? vm.turret.parent.matrixWorld : ship.mesh.matrixWorld);
+        const blen = (vm.barrels[0] && vm.barrels[0].length) || top * 3;
+        const h = top + Math.max(this._occ.cellWorld * 1.5, blen * 0.06);
+        p = { x: tp.x + tu.x * h, y: tp.y + tu.y * h, z: tp.z + tu.z * h };
+      } else {
+        const { pos } = this._barrelMuzzle(vm, vm.barrels[0]);
+        p = { x: pos.x, y: pos.y, z: pos.z };
+      }
     } else if (dir) {
       ship.mesh.updateMatrixWorld(true);
       const v = new THREE.Vector3();
@@ -1272,13 +1324,14 @@ const Weapons = {
     cam.position.set(p.x, p.y, p.z);
     cam.up.set(up.x, up.y, up.z);
     cam.lookAt(p.x + dl.x, p.y + dl.y, p.z + dl.z);
-    if (Math.abs(cam.fov - this._aimFov) > 1e-6) { cam.fov = this._aimFov; cam.updateProjectionMatrix(); }
+    const fov = this._viewFov(p);
+    if (Math.abs(cam.fov - fov) > 1e-6) { cam.fov = fov; cam.updateProjectionMatrix(); }
     const el = this._ui && this._ui.reticle;
-    if (el) { el.style.left = '50%'; el.style.top = '50%'; }
+    if (el) { el.style.left = '50%'; el.style.top = '50%'; el.classList.toggle('tracking', !!this.tracking); }
     this._placeGunMarks(cam);
     this._placeTargetMarks(cam);
     if (this._ui && this._ui.zoom) {
-      const t = `測距儀 ×${(this._savedFov / this._aimFov).toFixed(1)}`;
+      const t = `${this.tracking ? '追尾中 ' : ''}測距儀 ×${(this._savedFov / this._dispFov).toFixed(1)}`;
       if (this._ui.zoom.textContent !== t) this._ui.zoom.textContent = t;
     }
     return true;
@@ -1293,7 +1346,7 @@ const Weapons = {
       const dx = x - d.x, dy = y - d.y;
       d.x = x; d.y = y;
       // 指の下の景色が指についてくる速さ（視野角に合わせる。拡大しているほどゆっくり）
-      const k = ((this._aimFov * Math.PI) / 180) / Math.max(1, window.innerHeight);
+      const k = (((this._dispFov || this._aimFov) * Math.PI) / 180) / Math.max(1, window.innerHeight);
       this._rotateAim(-dx * k, -dy * k);
     };
     const end = (id) => { if (this._drag && this._drag.id === id) this._drag = null; };
@@ -2194,7 +2247,7 @@ const Weapons = {
         this._viewMount = this._viewMount === m ? null : m;
         if (!this.view) this.setView(true);
         for (const x of this.rig.mounts) if (x._chip) x._chip.classList.toggle('viewing', x === this._viewMount);
-        this._flashStatus(this._viewMount ? `${m.num}番（${m.key}）の砲口から見ています` : '射撃レーダーから見ています');
+        this._flashStatus(this._viewMount ? `${m.num}番（${m.key}）の砲塔の上から見ています` : '射撃レーダーから見ています');
       });
       const mk = document.createElement('div');
       mk.className = 'wpn-gunmark st-none';

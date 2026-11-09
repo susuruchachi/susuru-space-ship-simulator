@@ -291,6 +291,9 @@
     pointer-events: none;
     box-shadow: 0 0 6px rgba(255,90,60,0.6);
   }
+  /* v89: 照準で目標を追尾しているあいだはオレンジ */
+  .wpn-reticle.tracking { border-color: rgba(255,160,40,0.95); box-shadow: 0 0 8px rgba(255,160,40,0.75); }
+  .wpn-reticle.tracking::before, .wpn-reticle.tracking::after { background: rgba(255,160,40,0.95); }
   .wpn-reticle::before, .wpn-reticle::after {
     content: '';
     position: absolute;
