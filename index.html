@@ -30,6 +30,7 @@
     position: fixed;
     inset: 0;
     pointer-events: none;
+    z-index: 3; /* v89: 姿勢の図（.wpn-inset, z-index 2）より上。サイドメニュー・レバー・スティックのタッチを図に取られないように */
   }
   /* #hud-root > * は直下の子要素に一律pointer-events:autoを
      付ける意図だったが、.hud-touch-controls（全画面inset:0の
@@ -357,12 +358,13 @@
   .wpn-focus { background: rgba(255,60,40,0.18); }
   .wpn-focus.active { background: rgba(255,70,40,0.55); border-color: rgba(255,150,120,0.95); color: #fff; }
   body.clean-view .wpn-tmarks { display: none !important; }
-  .wpn-inset { position: fixed; border: 1px solid rgba(255,240,160,0.45); border-radius: 4px; pointer-events: auto; box-sizing: border-box; cursor: move; touch-action: none; }
+  .wpn-inset { position: fixed; z-index: 2; border: 1px solid rgba(255,240,160,0.45); border-radius: 4px; pointer-events: auto; box-sizing: border-box; cursor: move; touch-action: none; }
   /* v89: 右下の角をドラッグして大きさを変える */
   .wpn-inset-resize { position: absolute; right: -1px; bottom: -1px; width: 22px; height: 22px; cursor: nwse-resize;
     background: linear-gradient(135deg, transparent 50%, rgba(255,240,160,0.75) 50%); border-bottom-right-radius: 4px; }
   /* v89: 目標のまとまりの文字は枠の上に */
   .wpn-cluster .stm-text { top: auto; bottom: 100%; margin-top: 0; margin-bottom: 4px; }
+  .wpn-inset.free-look::after { content: '見ている方向 →奥'; }
   .wpn-inset::after { content: '射撃方向 →奥'; position: absolute; left: 4px; top: 2px; font-size: 9px; color: rgba(255,240,160,0.7); }
   /* v89: 砲塔ごとの照準マークと、下の番号（緑=撃てる・黄=旋回中・赤=装填中・灰=射線が当たる／寄せただけ・白灰=向けられない） */
   .wpn-gunmarks { position: fixed; inset: 0; pointer-events: none; }
@@ -370,6 +372,7 @@
     position: absolute; width: 16px; height: 16px; margin: -8px 0 0 -8px;
     border: 2px solid currentColor; border-radius: 50%; box-sizing: border-box;
   }
+  .wpn-gunmark.small { width: 6px; height: 6px; margin: -3px 0 0 -3px; border: none; background: currentColor; box-shadow: 0 0 2px rgba(0,0,0,0.8); }
   .wpn-gunmark span { position: absolute; left: 14px; top: -12px; font-size: 10px; font-weight: bold; text-shadow: 0 1px 2px #000; }
   .wpn-chips {
     position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
@@ -1068,6 +1071,8 @@
   .star-map-header { top: calc(8px + var(--sat)); left: calc(8px + var(--sal) + var(--wcl, 0px)); right: calc(8px + var(--sar)); }
   .wpn-hint { top: calc(152px + var(--sat)); }
   .wpn-chips { bottom: calc(26px + var(--sab)); }
+  /* v89: 武装のボタン・番号も、姿勢の図（z-index 2）より上で押せるように */
+  .weapon-controls, .wpn-chips { z-index: 4; }
   @media (max-width: 700px) and (min-height: 501px) {
     .space-nav-panel, .space-nav-panel.is-compact { top: calc(6px + var(--sat)) !important; left: calc(48px + var(--sal) + var(--wcl, 0px)) !important; }
     .hud-camera-controls { top: calc(84px + var(--sat)) !important; }

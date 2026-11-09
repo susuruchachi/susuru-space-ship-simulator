@@ -921,9 +921,9 @@ const Weapons = {
   // v89: 照準で目標を追尾しているあいだ（照準が目標に合っている）は、目標が画面の高さの約 1/6 に見えるまで拡大する。
   //   パンで目標へ回している途中・追尾していないときは、ふだんの倍率へなめらかに戻す
   TRACK_FILL: 1 / 6,
-  _viewFov(eye) {
-    const t = this.lock && this.lock.alive && this._practiceOn() ? this.lock : null;
-    this.tracking = !!(t && !this.lockPanning);
+  _viewFov(eye, own) {
+    const t = own || (this.lock && this.lock.alive && this._practiceOn() ? this.lock : null);
+    this.tracking = !!(t && (own || !this.lockPanning));
     let want = this._aimFov;
     if (this.tracking) {
       const d = Math.max(1, t.pos.distanceTo(new THREE.Vector3(eye.x, eye.y, eye.z)));
@@ -1016,11 +1016,13 @@ const Weapons = {
   // v89: 演習中の小さな図の「レーダー」: 艦のまわりの薄い球と、水平面（ふつうの艦は重心の面、重力場機関の艦は密度境界面）の
   //   距離の目盛り付きの薄い円。球の半径は自艦のいちばん長い射程（きりのよい値）。
   //   球の中の敵の艦隊（まとまり。ひとつだけ離れている攻撃機・駆逐艦は除く）を点で、球の外の艦隊はその方向を線で示す
+  RADAR_MAX_R: 3000e3,
   _niceStep(v) { const e = Math.pow(10, Math.floor(Math.log10(v))); const f = v / e; return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * e; },
   _buildInsetRadar(scene, rig, size) {
-    const maxRange = Math.max(1000, ...rig.mounts.map((m) => weaponRange(m.cfg)));
+    // v89: 球の半径は自艦のいちばん長い射程（ただし 3,000 km まで）
+    const maxRange = Math.min(this.RADAR_MAX_R, Math.max(1000, ...rig.mounts.map((m) => weaponRange(m.cfg))));
     const step = this._niceStep(maxRange / 4);
-    const R = Math.ceil(maxRange / step) * step;
+    const R = Math.min(this.RADAR_MAX_R, Math.ceil(maxRange / step) * step);
     const n = Math.round(R / step);
     const Rs = size * 0.62; // 図の中での球の半径
     const g = new THREE.Group();
@@ -1184,11 +1186,14 @@ const Weapons = {
   // メインの描画の後に、画面の下の小さな枠へ描く（index.html animateFrame）
   renderInset(renderer) {
     const s = this._inset;
-    const show = !!(s && this.view && this.hasWeapons() && this._modelRoot && !(typeof CleanView !== 'undefined' && CleanView.on));
-    if (s && s.frame) s.frame.style.display = show ? '' : 'none';
+    // v89: 演習中は、照準の視点でなくても出す（そのときは照準に関係なく、いま見ている向きを奥に）
+    const practiceShow = !!(this._practiceOn() && this.practice);
+    const show = !!(s && (this.view || practiceShow) && this.hasWeapons() && this._modelRoot && !(typeof CleanView !== 'undefined' && CleanView.on));
+    if (s && s.frame) { s.frame.style.display = show ? '' : 'none'; s.frame.classList.toggle('free-look', !this.view); }
     if (!show) return;
     const ship = State.ship;
-    const dl = this.aimDirLocal();
+    let dl = this.view ? (this._lookDir || this.aimDirLocal()) : null;
+    if (!this.view && typeof camera !== 'undefined' && camera) { const v = new THREE.Vector3(); camera.getWorldDirection(v); dl = { x: v.x, y: v.y, z: v.z }; }
     if (!ship || !dl) return;
     // 置き場所: 動かした・大きさを変えたならその場所（画面に収まるように）、そうでなければ装填の棒（番号）の上
     const small = window.innerWidth <= 700 || window.innerHeight <= 500;
@@ -1321,17 +1326,26 @@ const Weapons = {
       const size = (CameraSystem._shipScale || 1) * 8;
       p = { x: ship.position.x + up.x * size * 0.12, y: ship.position.y + up.y * size * 0.12, z: ship.position.z + up.z * size * 0.12 };
     }
+    // v89: 砲塔の視点で、その砲が独立して別の目標を狙っていれば、全体の照準は変えずに、その砲の目標の方を見る
+    let look = dl, lookT = null;
+    if (vm && vm.target && vm.target.alive && vm.target !== this.lock && this._practiceOn()) {
+      lookT = vm.target;
+      const d = vm.target.pos.clone().sub(new THREE.Vector3(p.x, p.y, p.z)).normalize();
+      look = { x: d.x, y: d.y, z: d.z };
+    }
+    this._lookDir = look;
+    this._lookIndep = lookT;
     cam.position.set(p.x, p.y, p.z);
     cam.up.set(up.x, up.y, up.z);
-    cam.lookAt(p.x + dl.x, p.y + dl.y, p.z + dl.z);
-    const fov = this._viewFov(p);
+    cam.lookAt(p.x + look.x, p.y + look.y, p.z + look.z);
+    const fov = this._viewFov(p, lookT);
     if (Math.abs(cam.fov - fov) > 1e-6) { cam.fov = fov; cam.updateProjectionMatrix(); }
     const el = this._ui && this._ui.reticle;
     if (el) { el.style.left = '50%'; el.style.top = '50%'; el.classList.toggle('tracking', !!this.tracking); }
     this._placeGunMarks(cam);
     this._placeTargetMarks(cam);
     if (this._ui && this._ui.zoom) {
-      const t = `${this.tracking ? '追尾中 ' : ''}測距儀 ×${(this._savedFov / this._dispFov).toFixed(1)}`;
+      const t = `${this._lookIndep ? `${this._viewMount.num}番が独立して${this._lookIndep.label}を追尾 ` : this.tracking ? '追尾中 ' : ''}測距儀 ×${(this._savedFov / this._dispFov).toFixed(1)}`;
       if (this._ui.zoom.textContent !== t) this._ui.zoom.textContent = t;
     }
     return true;
@@ -2250,8 +2264,11 @@ const Weapons = {
         this._flashStatus(this._viewMount ? `${m.num}番（${m.key}）の砲塔の上から見ています` : '射撃レーダーから見ています');
       });
       const mk = document.createElement('div');
-      mk.className = 'wpn-gunmark st-none';
-      mk.innerHTML = `<span>${m.num}</span>`;
+      // v89: 小口径砲は番号なしの小さな点にする（大口径砲は番号付きの丸）
+      const smallGun = !this._isLargeGun(m);
+      m._smallGun = smallGun;
+      mk.className = `wpn-gunmark st-none${smallGun ? ' small' : ''}`;
+      mk.innerHTML = smallGun ? '' : `<span>${m.num}</span>`;
       u.marks.appendChild(mk);
       m._mark = mk;
     }
@@ -2413,7 +2430,7 @@ const Weapons = {
       if (m._chip && m._lastState !== st) {
         m._lastState = st;
         m._chip.className = `wpn-chip st-${st}`;
-        if (m._mark) m._mark.className = `wpn-gunmark st-${st}`;
+        if (m._mark) m._mark.className = `wpn-gunmark st-${st}${m._smallGun ? ' small' : ''}`;
       }
       // 砲身ごとの装填の棒: 砲身の状態の色で、装填の済んだ割合だけ下から伸びる
       const rt = weaponReload(m.cfg);
