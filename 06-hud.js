@@ -9,10 +9,12 @@ const HUD = {
 
   init(domRoot) {
     this._buildTouchControls(domRoot);
-    this._buildDebugPanel(domRoot);
-    this._buildSettingsLink(domRoot);
+    // v89: 上の航法メニューと視点のボタン以外（デバッグ情報・表示の切り替え・ログ・設定）は、
+    // 左上の小さなボタンで開く1つのサイドメニューにしまう（画面のボタン同士が重なりすぎていたため）
+    const menu = this._buildSideMenu(domRoot);
+    this._buildSettingsLink(menu.querySelector('.side-menu-display'), menu.querySelector('.side-menu-panel'));
+    this._buildDebugPanel(menu.querySelector('.side-menu-debug'), menu.querySelector('.side-menu-log'));
     this._buildCameraControls(domRoot);
-    this._buildSideMenu(domRoot);
   },
 
   _buildTouchControls(domRoot) {
@@ -49,17 +51,13 @@ const HUD = {
     }
   },
 
-  _buildDebugPanel(domRoot) {
+  // v89: デバッグ情報はサイドメニューの中に出す（logRoot にログのボタン）
+  _buildDebugPanel(domRoot, logRoot) {
     const el = document.createElement('div');
     el.className = 'hud-debug-panel';
     domRoot.appendChild(el);
     this._debugEl = el;
-    // v83: 小さな画面（スマホ）ではタップで畳める（最初は畳んだ状態。CSS の
-    // @media で、畳んだときは1行目だけ表示し、ログのボタンも隠す）
-    const small = window.matchMedia && window.matchMedia('(max-width: 700px), (max-height: 500px)').matches;
-    if (small) document.body.classList.add('hud-debug-collapsed');
-    el.addEventListener('click', () => document.body.classList.toggle('hud-debug-collapsed'));
-    this._buildDockingLogButton(domRoot);
+    this._buildDockingLogButton(logRoot || domRoot);
   },
 
   // -----------------------------------------------------------
@@ -116,28 +114,39 @@ const HUD = {
   // 「進入軸の下」という位置関係を作れないため、上段（設定＋進入軸の
   // 横並び）と下段（航路/航跡トグル、進入軸ボタンの真下に配置）の
   // 2段構成に変更する。
-  _buildSettingsLink(domRoot) {
-    const col = document.createElement('div');
-    col.className = 'hud-top-right-col';
-    domRoot.appendChild(col);
-
-    const topRow = document.createElement('div');
-    topRow.className = 'hud-top-right-row';
-    col.appendChild(topRow);
+  // v89: 進入軸・航路/航跡・デバッグ情報の表示の切り替えはサイドメニューの「表示」に、設定へのリンクはサイドメニューの最後に
+  _buildSettingsLink(displayRoot, panel) {
+    this._buildApproachGuidesToggle(displayRoot);
+    this._buildRouteLineToggle(displayRoot);
+    this._buildDebugHudToggle(displayRoot);
 
     const link = document.createElement('a');
     link.className = 'hud-settings-link';
     link.href = 'settings.html';
     link.textContent = '⚙ 設定';
-    topRow.appendChild(link);
+    panel.appendChild(link);
+  },
 
-    this._buildApproachGuidesToggle(topRow);
-
-    const bottomRow = document.createElement('div');
-    bottomRow.className = 'hud-top-right-row hud-top-right-row-secondary';
-    col.appendChild(bottomRow);
-
-    this._buildRouteLineToggle(bottomRow);
+  // v89: デバッグ情報の表示・非表示（設定の「デバッグHUD」と同じ値）
+  _buildDebugHudToggle(domRoot) {
+    const btn = document.createElement('button');
+    btn.className = 'btn-approach-guides-toggle';
+    domRoot.appendChild(btn);
+    const refresh = () => {
+      const on = !!State.settings.showDebugHud;
+      btn.textContent = on ? '🛠 デバッグ情報: ON' : '🛠 デバッグ情報: OFF';
+      btn.classList.toggle('is-off', !on);
+      if (this._debugEl) this._debugEl.style.display = on ? '' : 'none';
+      const t = document.querySelector('.side-menu-debug-title');
+      if (t) t.style.display = on ? '' : 'none';
+    };
+    btn.addEventListener('click', () => {
+      State.settings.showDebugHud = !State.settings.showDebugHud;
+      savePersistedSettings({ showDebugHud: State.settings.showDebugHud });
+      refresh();
+    });
+    this._refreshDebugToggle = refresh;
+    setTimeout(refresh, 0);
   },
 
   // -----------------------------------------------------------
@@ -271,8 +280,13 @@ const HUD = {
     const wrap = document.createElement('div');
     wrap.className = 'hud-side-menu';
     wrap.innerHTML = `
-      <button class="side-menu-tab">☰</button>
+      <button class="side-menu-tab" title="メニュー">☰</button>
       <div class="side-menu-panel">
+        <div class="side-menu-section-title">表示</div>
+        <div class="side-menu-display"></div>
+        <div class="side-menu-section-title side-menu-debug-title">デバッグ情報</div>
+        <div class="side-menu-debug"></div>
+
         <div class="side-menu-section-title">飛行支援</div>
         <button class="hud-damping-toggle">自動制動(回転): OFF</button>
         <button class="hud-retro-damping-toggle">自動制動(逆噴射): OFF</button>
@@ -299,6 +313,9 @@ const HUD = {
         <button class="btn-docking-set-coords">🎯 この座標を目的地に設定</button>
         <button class="btn-docking-save">📍 現在地を目的地として保存</button>
         <button class="btn-docking-toggle">自動操船: OFF</button>
+
+        <div class="side-menu-section-title">ログ（自動ドッキング）</div>
+        <div class="side-menu-log"></div>
       </div>
     `;
     domRoot.appendChild(wrap);
@@ -314,6 +331,7 @@ const HUD = {
     this._bindDampingToggle(wrap);
     this._bindRetroDampingToggle(wrap);
     this._bindDockingControls(wrap);
+    return wrap;
   },
 
   // -----------------------------------------------------------

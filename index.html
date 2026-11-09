@@ -968,6 +968,43 @@
     position: fixed; left: 50%; bottom: 74px; transform: translateX(-50%); z-index: 61; display: none;
     background: rgba(10, 20, 40, 0.75); color: #fff; font-size: 13px; padding: 6px 12px; border-radius: 14px;
   }
+
+  /* -----------------------------------------------------------
+     v89: 画面のボタンの整理。上の航法メニューと視点のボタン以外（デバッグ情報・表示の切り替え・ログ・設定・
+     飛行支援・目的地）は、左上の小さな「☰」で開く1つのサイドメニューにしまう
+  ----------------------------------------------------------- */
+  .hud-side-menu, #hud-root > .hud-side-menu { top: 8px !important; left: 8px; z-index: 30; }
+  .side-menu-tab {
+    width: 34px; height: 34px; border-radius: 8px;
+    border: 1px solid rgba(108,195,255,0.45); font-size: 15px; line-height: 1;
+  }
+  .side-menu-panel {
+    position: absolute; top: 40px; left: 0;
+    width: 270px; max-height: calc(100vh - 180px) !important; margin-left: 0;
+    border-radius: 10px; border: 1px solid rgba(108,195,255,0.4);
+    transform: translateX(calc(-100% - 20px));
+  }
+  .side-menu-display { display: flex; flex-direction: column; gap: 6px; }
+  .side-menu-display .btn-approach-guides-toggle { text-align: left; padding: 7px 10px; font-size: 12px; }
+  .side-menu-panel .hud-debug-panel {
+    position: static; pointer-events: auto; max-width: none; max-height: none !important;
+    font-size: 11px; line-height: 1.5; padding: 6px 8px; overflow: visible !important;
+  }
+  .side-menu-log { display: flex; gap: 6px; }
+  .side-menu-log .hud-docking-log-controls { position: static !important; display: flex !important; gap: 6px; width: 100%; z-index: auto; }
+  .side-menu-log .hud-docking-log-controls button { flex: 1; font-size: 12px !important; padding: 7px 8px !important; text-align: center; }
+  .side-menu-panel { box-sizing: border-box; }
+  .side-menu-log button { flex: 1; text-align: center; }
+  .side-menu-panel .hud-settings-link { text-align: center; margin-top: 8px; }
+  .hud-camera-controls { top: 8px !important; right: 8px !important; }
+  @media (max-width: 700px) and (min-height: 501px) {
+    .space-nav-panel, .space-nav-panel.is-compact { left: 48px !important; }
+    .hud-camera-controls { top: 84px !important; }
+    .side-menu-panel { width: min(270px, calc(100vw - 24px)); }
+  }
+  @media (max-height: 500px) {
+    .side-menu-panel { max-height: calc(100vh - 60px) !important; }
+  }
 </style>
 </head>
 <body>
