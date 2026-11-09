@@ -1766,7 +1766,8 @@ const Weapons = {
   //   被弾した点から区画の半径の2倍以内にある区画に、近いほど多くダメージが入る。区画の働き = 残りの耐久の割合。
   //   応急修理: 重いほど長く（10〜120秒）。修理中にその区画がまた被弾したら、修理の時間は最初から。同時に5か所まで
   // =========================================================
-  REPAIR_MAX: 5,
+  REPAIR_MAX: 20, // v89: 同時に修理できる数（砲塔・砲も含めて）
+  autoRepair: true, // v89: 傷みのひどいところから自動で修理を始める
   REPAIR_MIN_S: 10,
   REPAIR_MAX_S: 120,
   TURRET_JAM: 0.5, // 砲塔の働きがこれより下だと旋回・俯仰が止まる
@@ -1784,6 +1785,7 @@ const Weapons = {
   },
   _initDamage(hpMax) {
     const ship = State.ship;
+    try { const v = localStorage.getItem('spaceSimAutoRepair'); if (v !== null) this.autoRepair = v === '1'; } catch (e) { /* ignore */ }
     const parts = [];
     const size = (CameraSystem._shipScale || 1) * 8;
     const design = this._design;
@@ -1842,22 +1844,26 @@ const Weapons = {
     this._renderDamageUi(true);
   },
   _repairTime(pt) { return this.REPAIR_MIN_S + (this.REPAIR_MAX_S - this.REPAIR_MIN_S) * clamp(1 - pt.hp / pt.max, 0, 1); },
-  startRepair(key) {
+  startRepair(key, quiet) {
     const D = this._dmg;
     if (!D) return false;
     const pt = D.parts.find((x) => x.key === key);
     if (!pt || pt.hp >= pt.max || pt.repair) return false;
-    if (D.parts.filter((x) => x.repair).length >= this.REPAIR_MAX) { this._flashStatus(`同時に修理できるのは${this.REPAIR_MAX}か所までです`); return false; }
+    if (D.parts.filter((x) => x.repair).length >= this.REPAIR_MAX) { if (!quiet) this._flashStatus(`同時に修理できるのは${this.REPAIR_MAX}か所までです`); return false; }
     pt.repair = { t: 0, total: this._repairTime(pt) };
     this._renderDamageUi(true);
     return true;
   },
-  repairAll() {
+  // 傷みのひどい順（同じくらいなら、艦橋・機関・防御・射撃統制・測距・砲塔の順）に修理を始める
+  REPAIR_ORDER: { bridge: 0, engine: 1, defense: 2, fcs: 3, director: 4, turret: 5 },
+  repairAll(quiet) {
     const D = this._dmg;
     if (!D) return 0;
     let n = 0;
-    const list = D.parts.filter((x) => x.hp < x.max && !x.repair).sort((a, b) => a.hp / a.max - b.hp / b.max);
-    for (const pt of list) if (this.startRepair(pt.key)) n++;
+    const sev = (x) => x.hp / x.max + (this.REPAIR_ORDER[x.kind] || 0) * 0.01;
+    const list = D.parts.filter((x) => x.hp < x.max - 1e-6 && !x.repair).sort((a, b) => sev(a) - sev(b));
+    for (const pt of list) { if (D.parts.filter((x) => x.repair).length >= this.REPAIR_MAX) break; if (this.startRepair(pt.key, true)) n++; }
+    if (!quiet && !n && list.length) this._flashStatus(`同時に修理できるのは${this.REPAIR_MAX}か所までです`);
     return n;
   },
   // 区画の働き（0〜1）。種類ごとにいちばん傷んでいるもの
@@ -1969,6 +1975,9 @@ const Weapons = {
     const D = this._dmg;
     if (!D) return;
     const ship = State.ship;
+    // 自動修理: 空きがあれば、傷みのひどいところから始める（0.5秒ごと）
+    D.autoT = (D.autoT || 0) - dt;
+    if (this.autoRepair && D.autoT <= 0) { D.autoT = 0.5; if (this.repairAll(true)) this._renderDamageUi(); }
     // 修理
     let done = false;
     for (const pt of D.parts) {
@@ -2007,8 +2016,9 @@ const Weapons = {
         el.innerHTML = '';
         const head = document.createElement('div');
         head.className = 'dm-head';
-        head.innerHTML = '<span class="dm-sum"></span><button type="button" class="dm-all">まとめて修理</button>';
+        head.innerHTML = '<span class="dm-sum"></span><button type="button" class="dm-auto"></button><button type="button" class="dm-all">まとめて修理</button>';
         head.querySelector('.dm-all').addEventListener('click', () => { const n = this.repairAll(); if (!n) this._flashStatus('修理を始められる区画がありません'); });
+        head.querySelector('.dm-auto').addEventListener('click', () => { this.autoRepair = !this.autoRepair; try { localStorage.setItem('spaceSimAutoRepair', this.autoRepair ? '1' : '0'); } catch (e) { /* ignore */ } this._renderDamageUi(); });
         el.appendChild(head);
         const list = document.createElement('div');
         list.className = 'dm-list';
@@ -2048,6 +2058,9 @@ const Weapons = {
       row.querySelector('.dm-note').textContent = note;
     }
     const nRep = D.parts.filter((x) => x.repair).length;
+    const ab = el._head.querySelector('.dm-auto');
+    ab.textContent = this.autoRepair ? '自動修理: 入' : '自動修理: 切';
+    ab.classList.toggle('on', this.autoRepair);
     el._head.querySelector('.dm-sum').textContent = hurt.length ? `損傷 ${hurt.length}か所・修理中 ${nRep}/${this.REPAIR_MAX}` : '損傷なし';
   },
 
@@ -2935,12 +2948,15 @@ const Weapons = {
     for (const m of this.rig.mounts) {
       const st = this.aim.active ? m.state : 'none';
       const ds = this._turretDamageState(m);
-      if (m._chip && (m._lastState !== st || m._lastDs !== ds)) {
+      const rp = m._dmgPart && m._dmgPart.repair ? Math.floor((m._dmgPart.repair.t / m._dmgPart.repair.total) * 10) * 10 : -1;
+      const dk = `${ds}|${rp}`;
+      if (m._chip && (m._lastState !== st || m._lastDs !== dk)) {
         m._lastState = st;
-        m._lastDs = ds;
+        m._lastDs = dk;
         m._chip.className = `wpn-chip st-${st}${ds ? ` dmg-${ds}` : ''}`;
         if (m._mark) m._mark.className = `wpn-gunmark st-${st}${m._smallGun ? ' small' : ''}`;
-        if (m._dtag) { m._dtag.textContent = { jam: '旋回×', nofire: '砲撃×', dead: '停止' }[ds] || ''; m._dtag.className = `wpn-chip-dmg${ds ? ` dmg-${ds}` : ''}`; }
+        // 砲塔の損傷と、修理中ならその進み具合
+        if (m._dtag) { m._dtag.textContent = ({ jam: '旋回×', nofire: '砲撃×', dead: '停止' }[ds] || '') + (rp >= 0 ? `${ds ? ' ' : ''}修${rp}%` : ''); m._dtag.className = `wpn-chip-dmg${ds ? ` dmg-${ds}` : ''}${rp >= 0 ? ' rep' : ''}`; }
       }
       // 砲身ごとの装填の棒: 砲身の状態の色で、装填の済んだ割合だけ下から伸びる
       const rt = weaponReload(m.cfg);
