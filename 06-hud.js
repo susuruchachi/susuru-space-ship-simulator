@@ -285,6 +285,9 @@ const HUD = {
         <div class="side-menu-section-title">モード</div>
         <a class="hud-settings-link side-menu-mode-link"></a>
 
+        <div class="side-menu-section-title side-menu-practice-only">演習の状況</div>
+        <div class="side-menu-practice-info side-menu-practice-only"></div>
+
         <div class="side-menu-section-title">表示</div>
         <div class="side-menu-display"></div>
         <div class="side-menu-section-title side-menu-debug-title">デバッグ情報</div>

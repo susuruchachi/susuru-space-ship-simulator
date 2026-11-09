@@ -33,11 +33,11 @@ if (PRACTICE_MODE && typeof document !== 'undefined') {
 // v89: 演習の敵の艦種・機種。L/W/H: 大きさ [m]、hp: 耐久、guns: 1回に撃つ門数、cal: 口径 [mm]、types: 砲の種類、
 //   reload [s]、range [m]、ikn: 最高速度 [IKn]、rel: 自艦に対して近づく・回る速さ [m/s]、tau: 速さを合わせる時間 [s]、standoff: 近づく距離 [m]
 const ENEMY_CLASSES = {
-  bb: { label: '戦艦', L: 230, W: 34, H: 30, color: 0xc0392b, hp: 900, guns: 6, cal: [356, 460], types: ['ap', 'he'], reload: [22, 30], range: 40000, ikn: [15, 18], rel: 250, tau: 3, standoff: [15000, 25000] },
-  ca: { label: '重巡洋艦', L: 190, W: 22, H: 20, color: 0xe67e22, hp: 450, guns: 4, cal: [203, 254], types: ['ap', 'he', 'rail'], reload: [12, 16], range: 30000, ikn: [18, 22], rel: 350, tau: 2.5, standoff: [10000, 18000] },
-  cl: { label: '軽巡洋艦', L: 160, W: 17, H: 16, color: 0xf1c40f, hp: 260, guns: 4, cal: [140, 155], types: ['he', 'coil', 'pulse'], reload: [7, 10], range: 25000, ikn: [20, 25], rel: 450, tau: 2, standoff: [7000, 13000] },
-  dd: { label: '駆逐艦', L: 115, W: 11, H: 10, color: 0x1abc9c, hp: 140, guns: 2, cal: [100, 130], types: ['he', 'coil', 'pulse'], reload: [4, 6], range: 16000, ikn: [24, 30], rel: 600, tau: 1.5, standoff: [4000, 8000] },
-  ac: { label: '対艦攻撃機', L: 18, W: 14, H: 4, color: 0xd35eff, hp: 30, guns: 1, cal: [75, 120], types: ['rail', 'xray'], reload: [3, 5], range: 6000, ikn: [45, 60], rel: 2500, tau: 0.4, standoff: [1000, 3000] },
+  bb: { label: '戦艦', L: 230, W: 34, H: 30, color: 0xc0392b, hp: 900, guns: 6, cal: [356, 460], types: ['ap', 'he'], reload: [22, 30], range: 40000, ikn: [22, 26], rel: 600, tau: 3, standoff: [15000, 25000] },
+  ca: { label: '重巡洋艦', L: 190, W: 22, H: 20, color: 0xe67e22, hp: 450, guns: 4, cal: [203, 254], types: ['ap', 'he', 'rail'], reload: [12, 16], range: 30000, ikn: [26, 31], rel: 800, tau: 2.5, standoff: [10000, 18000] },
+  cl: { label: '軽巡洋艦', L: 160, W: 17, H: 16, color: 0xf1c40f, hp: 260, guns: 4, cal: [140, 155], types: ['he', 'coil', 'pulse'], reload: [7, 10], range: 25000, ikn: [29, 35], rel: 1000, tau: 2, standoff: [7000, 13000] },
+  dd: { label: '駆逐艦', L: 115, W: 11, H: 10, color: 0x1abc9c, hp: 140, guns: 2, cal: [100, 130], types: ['he', 'coil', 'pulse'], reload: [4, 6], range: 16000, ikn: [33, 40], rel: 1300, tau: 1.5, standoff: [4000, 8000] },
+  ac: { label: '対艦攻撃機', L: 18, W: 14, H: 4, color: 0xd35eff, hp: 30, guns: 1, cal: [75, 120], types: ['rail', 'xray'], reload: [3, 5], range: 6000, ikn: [70, 90], rel: 4000, tau: 0.4, standoff: [1000, 3000] },
 };
 // 難易度: 艦種の出やすさ（重み）、敵の火力の倍率、目標の数
 const PRACTICE_DIFFICULTIES = {
@@ -691,9 +691,91 @@ const Weapons = {
     this._syncUi();
   },
 
+  // ---------------------------------------------------------
+  // v89: 演習海域。演習モードで開いたら、太陽系の惑星・衛星の近く（半径の 8〜40 倍の距離、その天体を回る円軌道）か、
+  //   惑星間の空間（太陽から 0.6〜12 天文単位）のどこかへ艦を移す
+  // ---------------------------------------------------------
+  ARENA_BODIES: ['mercury', 'venus', 'earth', 'moon', 'mars', 'jupiter', 'io', 'europa', 'ganymede', 'callisto', 'saturn', 'titan', 'rhea', 'iapetus', 'uranus', 'titania', 'oberon', 'neptune', 'triton', 'pluto', 'ceres'],
+  _placeArena(dt) {
+    const ship = State.ship;
+    if (typeof Navigation === 'undefined' || !Navigation.frame || typeof SolarSystem === 'undefined' || !SolarSystem.byId || !ship) return;
+    this._arenaWait = (this._arenaWait || 0) + dt;
+    if (this._arenaWait < 0.3) return; // 天体の位置が決まるまで少し待つ
+    const AU = 1.495978707e11;
+    const rndDir = () => { const z = Math.random() * 2 - 1, a = Math.random() * Math.PI * 2, r = Math.sqrt(1 - z * z); return { x: r * Math.cos(a), y: r * Math.sin(a), z }; };
+    const ids = this.ARENA_BODIES.filter((id) => SolarSystem.byId[id]);
+    let body, dist, label;
+    if (Math.random() < 0.2 || !ids.length) {
+      body = SolarSystem.byId.sun;
+      dist = (0.6 + Math.random() * 11.4) * AU;
+      label = `惑星間の空間（太陽から ${(dist / AU).toFixed(1)} 天文単位）`;
+    } else {
+      body = SolarSystem.byId[ids[Math.floor(Math.random() * ids.length)]];
+      dist = body.rM * (8 + Math.random() * 32);
+      label = `${body.ja}の近く（高度 ${Math.round((dist - body.rM) / 1000).toLocaleString()} km）`;
+    }
+    const n = rndDir();
+    const offset = { x: n.x * dist, y: n.y * dist, z: n.z * dist };
+    // 港から離れる（入港・自動航行・到着の姿勢合わせを止める）
+    ship.autoDockingEnabled = false;
+    ship._dockingPhase = null;
+    Navigation.approach = null; Navigation.departure = null; Navigation.arrivalHold = null;
+    Navigation.switchFrame(Navigation._makeFrame(body.id, offset, [1, 0, 0, 0, 1, 0, 0, 0, 1], false), false);
+    ship.position = { x: 0, y: 0, z: 0 };
+    ship.angularVelocity = { x: 0, y: 0, z: 0 };
+    // その天体を回る円軌道の速さ（重力で落ちていかないように）
+    const gm = (body.gm || 0) * 1e9;
+    const up = Math.abs(n.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+    const t = new THREE.Vector3(n.y * up.z - n.z * up.y, n.z * up.x - n.x * up.z, n.x * up.y - n.y * up.x).normalize();
+    const vc = gm > 0 ? Math.sqrt(gm / dist) : 0;
+    ship.velocity = { x: t.x * vc, y: t.y * vc, z: t.z * vc };
+    if (ship.boundaryPoint) ship.boundaryPoint = { x: 0, y: 0, z: 0 };
+    this._arena = { bodyId: body.id, label };
+    this._flashStatus(`演習海域: ${label}`);
+  },
+  // v89: サイドメニューの「演習の状況」（敵の艦種ごとの数・耐久、波、自艦の耐久）。0.5秒ごとに書き直す
+  _updatePracticeInfo(dt) {
+    if (!PRACTICE_MODE) return;
+    this._infoT = (this._infoT || 0) - dt;
+    if (this._infoT > 0) return;
+    this._infoT = 0.5;
+    const el = document.querySelector('.side-menu-practice-info');
+    if (!el) return;
+    const P = this.practice;
+    const rows = [];
+    if (this._arena) rows.push(`<div class="pi-line">海域: ${this._arena.label}</div>`);
+    if (!P) {
+      rows.push(`<div class="pi-line">${this.hasWeapons() ? '演習していません（照準の画面の「演習開始」で始めます）' : 'この艦には砲がありません（艦船建造で砲を設定すると演習できます）'}</div>`);
+      rows.push(`<div class="pi-line">難易度: ${(PRACTICE_DIFFICULTIES[this.difficulty] || PRACTICE_DIFFICULTIES.normal).label}</div>`);
+    } else {
+      const D = PRACTICE_DIFFICULTIES[P.difficulty] || PRACTICE_DIFFICULTIES.normal;
+      rows.push(`<div class="pi-line">難易度 ${D.label}（敵の火力 ×${D.dmg}）・第${P.wave}波・残り <b>${P.alive}</b> / ${P.total}</div>`);
+      if (P.shipHPMax) rows.push(`<div class="pi-line">自艦の耐久: ${Math.round(Math.max(0, P.shipHP)).toLocaleString()} / ${Math.round(P.shipHPMax).toLocaleString()}</div>`);
+      const by = {};
+      for (const t of P.targets) {
+        const r = by[t.cls] || (by[t.cls] = { n: 0, alive: 0, hp: 0, max: 0, near: Infinity });
+        r.n++; r.max += t.hpMax || 0;
+        if (t.alive) { r.alive++; r.hp += Math.max(0, t.hp || 0); r.near = Math.min(r.near, t.distShip || Infinity); }
+      }
+      rows.push('<table class="pi-table"><tr><th>艦種</th><th>残り</th><th>耐久</th><th>最も近い</th></tr>');
+      for (const [k, C] of Object.entries(ENEMY_CLASSES)) {
+        const r = by[k];
+        if (!r) continue;
+        const col = '#' + C.color.toString(16).padStart(6, '0');
+        const near = Number.isFinite(r.near) ? (r.near >= 1e6 ? `${Math.round(r.near / 1000).toLocaleString()} km` : `${(r.near / 1000).toFixed(1)} km`) : '—';
+        rows.push(`<tr class="${r.alive ? '' : 'pi-dead'}" title="${C.label}: 砲 ${C.cal[0]}〜${C.cal[1]} mm × ${C.guns}・射程 ${C.range / 1000} km・最高速度 ${C.ikn[0]}〜${C.ikn[1]} IKn"><td><span class="pi-sw" style="background:${col}"></span>${C.label}</td><td>${r.alive}/${r.n}</td><td>${r.max ? Math.round((r.hp / r.max) * 100) : 0}%</td><td>${near}</td></tr>`);
+      }
+      rows.push('</table>');
+    }
+    el.innerHTML = rows.join('');
+  },
+
   // ShipController.update の後、毎フレーム
   update(dt) {
     this._updateEffects(dt);
+    // v89: 演習モードは、太陽系のどこかランダムな場所（演習海域）で始める
+    if (PRACTICE_MODE && !this._arena) this._placeArena(dt);
+    this._updatePracticeInfo(dt);
     const ship = State.ship;
     if (!this.rig || !ship || !ship.mesh) return;
     ship.mesh.updateMatrixWorld(true);
@@ -882,12 +964,130 @@ const Weapons = {
     const camera = new THREE.PerspectiveCamera(30, 1.5, 0.1, 1e6);
     const size = Math.max(nx, ny, nz) * cell;
     this._inset = { scene, ship, inst, lines, camera, size };
+    this._inset.radar = this._buildInsetRadar(scene, rig, size);
     const frame = document.createElement('div');
     frame.className = 'wpn-inset';
-    frame.innerHTML = '<div class="wpn-inset-resize" title="ドラッグで大きさを変える"></div>';
+    frame.innerHTML = '<div class="wpn-inset-resize" title="ドラッグで大きさを変える"></div><div class="wpn-inset-scale"></div>';
     document.body.appendChild(frame);
     this._inset.frame = frame;
     this._bindInsetDrag(frame);
+  },
+  // v89: 演習中の小さな図の「レーダー」: 艦のまわりの薄い球と、水平面（ふつうの艦は重心の面、重力場機関の艦は密度境界面）の
+  //   距離の目盛り付きの薄い円。球の半径は自艦のいちばん長い射程（きりのよい値）。
+  //   球の中の敵の艦隊（まとまり。ひとつだけ離れている攻撃機・駆逐艦は除く）を点で、球の外の艦隊はその方向を線で示す
+  _niceStep(v) { const e = Math.pow(10, Math.floor(Math.log10(v))); const f = v / e; return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * e; },
+  _buildInsetRadar(scene, rig, size) {
+    const maxRange = Math.max(1000, ...rig.mounts.map((m) => weaponRange(m.cfg)));
+    const step = this._niceStep(maxRange / 4);
+    const R = Math.ceil(maxRange / step) * step;
+    const n = Math.round(R / step);
+    const Rs = size * 0.62; // 図の中での球の半径
+    const g = new THREE.Group();
+    g.visible = false;
+    scene.add(g);
+    const sphere = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 16), new THREE.MeshBasicMaterial({ color: 0x7fb8ff, transparent: true, opacity: 0.07, depthWrite: false, side: THREE.DoubleSide }));
+    sphere.scale.setScalar(Rs);
+    sphere.renderOrder = 2;
+    g.add(sphere);
+    // 水平面の円と目盛り（内側の円は目盛りの距離ごと、外の円に30°おきの短い線）
+    const pts = [], seg = 72;
+    for (let k = 1; k <= n; k++) {
+      const r = (k / n) * Rs;
+      for (let i = 0; i < seg; i++) {
+        const a0 = (i / seg) * Math.PI * 2, a1 = ((i + 1) / seg) * Math.PI * 2;
+        pts.push(r * Math.cos(a0), 0, r * Math.sin(a0), r * Math.cos(a1), 0, r * Math.sin(a1));
+      }
+    }
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2, c = Math.cos(a), sn = Math.sin(a);
+      const r0 = Rs * (i % 3 === 0 ? 0.9 : 0.95);
+      pts.push(r0 * c, 0, r0 * sn, Rs * 1.04 * c, 0, Rs * 1.04 * sn);
+    }
+    const rgeo = new THREE.BufferGeometry();
+    rgeo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+    const ring = new THREE.LineSegments(rgeo, new THREE.LineBasicMaterial({ color: 0x9fd0ff, transparent: true, opacity: 0.35, depthWrite: false }));
+    ring.renderOrder = 3;
+    g.add(ring);
+    // 艦隊の点・遠い艦隊の向きの線（艦の位置を原点にしたゲームの座標で、毎フレーム書き直す）
+    const MAX = 64;
+    const dgeo = new THREE.BufferGeometry();
+    dgeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAX * 3), 3));
+    dgeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(MAX * 3), 3));
+    const dots = new THREE.Points(dgeo, new THREE.PointsMaterial({ size: 10, sizeAttenuation: false, vertexColors: true, map: this._dotTexture(), transparent: true, depthTest: false, depthWrite: false }));
+    dots.frustumCulled = false; dots.renderOrder = 6;
+    scene.add(dots);
+    const fgeo = new THREE.BufferGeometry();
+    fgeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAX * 6), 3));
+    fgeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(MAX * 6), 3));
+    const far = new THREE.LineSegments(fgeo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.9, depthTest: false, depthWrite: false }));
+    far.frustumCulled = false; far.renderOrder = 6;
+    scene.add(far);
+    return { g, sphere, ring, dots, far, R, step, Rs, MAX, mats: [sphere.material, ring.material, dots.material, far.material], geos: [sphere.geometry, rgeo, dgeo, fgeo] };
+  },
+  // 演習の敵を艦隊（まとまり）に分ける: 互いに LINK m 以内でつながっているものを1つの艦隊に。
+  //   ひとつだけ離れている攻撃機・駆逐艦は艦隊として数えない
+  FLEET_LINK: 5000,
+  _fleets() {
+    const P = this.practice;
+    if (!P) return [];
+    const list = P.targets.filter((t) => t.alive);
+    const parent = list.map((_, i) => i);
+    const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+    const L2 = this.FLEET_LINK * this.FLEET_LINK;
+    for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+      if (list[i].pos.distanceToSquared(list[j].pos) <= L2) { const a = find(i), b = find(j); if (a !== b) parent[a] = b; }
+    }
+    const groups = new Map();
+    list.forEach((t, i) => { const r = find(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(t); });
+    const rank = { bb: 4, ca: 3, cl: 2, dd: 1, ac: 0 };
+    const out = [];
+    for (const m of groups.values()) {
+      if (m.length === 1 && (m[0].cls === 'ac' || m[0].cls === 'dd')) continue;
+      const c = new THREE.Vector3();
+      let top = m[0];
+      for (const t of m) { c.add(t.pos); if (rank[t.cls] > rank[top.cls]) top = t; }
+      c.divideScalar(m.length);
+      out.push({ center: c, members: m, cls: top.cls });
+    }
+    return out;
+  },
+  _updateInsetRadar(s, ship) {
+    const r = s.radar;
+    if (!r) return false;
+    const on = !!(this._practiceOn() && this.practice);
+    r.g.visible = on; r.dots.visible = on; r.far.visible = on;
+    if (!on) return false;
+    // 水平面: 重力場機関の艦は密度境界面（重心の真上・真下の境界面の高さ）、ふつうの艦は重心の面
+    const q = ship.gravityDrive && ship.boundaryQuat ? ship.boundaryQuat : ship.quaternion;
+    const c = ship.gravityDrive && ship.boundaryHeight ? rotateVecByQuat({ x: 0, y: ship.boundaryHeight, z: 0 }, ship.quaternion) : { x: 0, y: 0, z: 0 };
+    r.g.position.set(c.x, c.y, c.z);
+    r.g.quaternion.set(q.x, q.y, q.z, q.w);
+    const k = r.Rs / r.R;
+    const dp = r.dots.geometry.attributes.position, dc = r.dots.geometry.attributes.color;
+    const fp = r.far.geometry.attributes.position, fc = r.far.geometry.attributes.color;
+    const col = new THREE.Color();
+    let nd = 0, nf = 0;
+    for (const f of this._fleets()) {
+      col.setHex(ENEMY_CLASSES[f.cls].color);
+      const v = new THREE.Vector3(f.center.x - ship.position.x - c.x, f.center.y - ship.position.y - c.y, f.center.z - ship.position.z - c.z);
+      const d = v.length();
+      if (d <= r.R && nd < r.MAX) {
+        dp.setXYZ(nd, c.x + v.x * k, c.y + v.y * k, c.z + v.z * k);
+        dc.setXYZ(nd, col.r, col.g, col.b);
+        nd++;
+      } else if (d > r.R && nf < r.MAX) {
+        v.divideScalar(d);
+        fp.setXYZ(nf * 2, c.x + v.x * r.Rs * 1.02, c.y + v.y * r.Rs * 1.02, c.z + v.z * r.Rs * 1.02);
+        fp.setXYZ(nf * 2 + 1, c.x + v.x * r.Rs * 1.3, c.y + v.y * r.Rs * 1.3, c.z + v.z * r.Rs * 1.3);
+        fc.setXYZ(nf * 2, col.r, col.g, col.b); fc.setXYZ(nf * 2 + 1, col.r, col.g, col.b);
+        nf++;
+      }
+    }
+    r.dots.geometry.setDrawRange(0, nd);
+    r.far.geometry.setDrawRange(0, nf * 2);
+    dp.needsUpdate = true; dc.needsUpdate = true; fp.needsUpdate = true; fc.needsUpdate = true;
+    r.counts = { near: nd, far: nf };
+    return true;
   },
   // v89: 小さな図は、ドラッグで動かし、右下の角で大きさを変えられる（最後の状態をこの端末に保存。ダブルタップで元の場所へ）
   INSET_LAYOUT_KEY: 'spaceSimWeaponInset',
@@ -936,6 +1136,7 @@ const Weapons = {
     if (!s) return;
     s.inst.geometry.dispose(); s.inst.material.dispose();
     s.lines.geometry.dispose(); s.lines.material.dispose();
+    if (s.radar) { s.radar.geos.forEach((x) => x.dispose()); s.radar.mats.forEach((x) => x.dispose()); }
     if (s.frame) s.frame.remove();
     this._inset = null;
   },
@@ -999,9 +1200,20 @@ const Weapons = {
     const up = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
     // 艦の長さが枠の幅にほぼ収まる距離（縦・横の視野角の狭い方に合わせる）
     const tv = Math.tan((s.camera.fov * Math.PI) / 360), th = tv * (w / h);
-    const dist = (s.size * 0.5) / Math.min(tv * 1.6, th) * 1.02;
+    let dist = (s.size * 0.5) / Math.min(tv * 1.6, th) * 1.02;
+    // 演習中は、レーダーの球（と外へ出る線）が収まるように引く
+    const radarOn = this._updateInsetRadar(s, ship);
+    if (radarOn) dist = Math.max(dist, (s.radar.Rs * 1.32) / Math.min(tv, th));
+    const sc = s.frame.querySelector('.wpn-inset-scale');
+    if (sc) {
+      const fmt = (m) => (m >= 1000 ? `${+(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`);
+      sc.style.display = radarOn ? '' : 'none';
+      if (radarOn) sc.textContent = `球 ${fmt(s.radar.R)}・目盛り ${fmt(s.radar.step)}・艦隊 ${s.radar.counts.near}／外 ${s.radar.counts.far}`;
+    }
     s.camera.aspect = w / h;
-    s.camera.position.set(-dl.x * dist, -dl.y * dist, -dl.z * dist);
+    // 演習中は少し上から見下ろす（水平面の目盛りの円が線にならないように）
+    const lift = radarOn ? 0.45 : 0;
+    s.camera.position.set((-dl.x + up.x * lift) * dist, (-dl.y + up.y * lift) * dist, (-dl.z + up.z * lift) * dist);
     s.camera.up.set(up.x, up.y, up.z);
     s.camera.lookAt(0, 0, 0);
     s.camera.near = dist * 0.05; s.camera.far = dist * 4;
@@ -1208,7 +1420,7 @@ const Weapons = {
     for (const m of P.mats) m.dispose();
     this.practice = null;
     this.lock = null;
-    this.autoManeuver = keepUi ? this.autoManeuver : false;
+    if (!keepUi) { this.autoManeuver = false; this.maneuverMode = 'off'; }
     if (this._ui && this._ui.tmarks) this._ui.tmarks.innerHTML = '';
     if (this.rig) for (const m of this.rig.mounts) { m.target = null; m._indep = null; m._near = null; }
     if (!keepUi) this._syncUi();
@@ -1227,19 +1439,25 @@ const Weapons = {
       const rh = R.clone().divideScalar(Math.max(1, dist));
       let desired;
       // 遠いほど速く詰める（自艦が高速で動いて離されても、最高速度の範囲で追いつく）
-      if (dist > t.standoff * 1.15) desired = rh.clone().multiplyScalar(Math.max(t.rel * (dist > t.standoff * 3 ? 3 : 1), (dist - t.standoff) / 8));
+      // 間合いの3倍より遠く（置いていかれた）なら、遠いほど速く詰める（最高速度まで）。それより近ければ巡航の速さで近づく
+      if (dist > t.standoff * 3) desired = rh.clone().multiplyScalar(Math.max(t.rel * 3, (dist - t.standoff * 2) / 3));
+      else if (dist > t.standoff * 1.15) desired = rh.clone().multiplyScalar(t.rel);
       else {
         let tang = new THREE.Vector3().crossVectors(rh, new THREE.Vector3(0, 1, 0));
         if (tang.lengthSq() < 1e-6) tang.set(1, 0, 0);
-        tang.normalize().multiplyScalar(t.orbitSign * t.rel * 0.7);
+        tang.normalize().multiplyScalar(t.orbitSign * Math.min(t.rel * 0.7, t.standoff * 0.15)); // 回る速さは 0.15 rad/s まで（速い攻撃機が外へ膨らまないように）
         desired = tang.addScaledVector(rh, clamp((dist - t.standoff) * 0.05, -t.rel, t.rel));
       }
-      desired.add(sv);
-      t.vel.lerp(desired, 1 - Math.exp(-dt / t.tau));
-      if (t.vel.length() > t.maxSpeed) t.vel.setLength(t.maxSpeed);
+      // v89: 自艦の速さの変化にはすぐ合わせ（最高速度まで）、自艦に対する動き（近づく・回る）だけを tau でなめらかに変える。
+      //   以前は速度全体を tau（1.5〜3秒）で合わせていたため、加速の大きい艦（Hood など）が数 IKn まで加速すると、
+      //   合わせ終わるまでに数千 km 置いていかれていた
+      if (!t.rv) t.rv = t.vel.clone().sub(sv);
+      t.rv.lerp(desired, 1 - Math.exp(-dt / t.tau));
+      t.vel.copy(sv).add(t.rv);
+      if (t.vel.length() > t.maxSpeed) { t.vel.setLength(t.maxSpeed); t.rv.copy(t.vel).sub(sv); }
       t.pos.addScaledVector(t.vel, dt);
       // 進む向き（自艦に対する速度の向き）へ艦首を向ける
-      const vr = t.vel.clone().sub(sv);
+      const vr = t.rv;
       if (vr.lengthSq() > 1) t.mesh.lookAt(t.pos.clone().add(vr));
       t.mesh.position.copy(t.pos);
       t.distShip = t.pos.distanceTo(sp);
@@ -1285,19 +1503,36 @@ const Weapons = {
   //   ShipController.update から毎フレーム（Navigation.approachInput などと同じく入力を書き換える）
   // ---------------------------------------------------------
   autoManeuver: false,
+  // v89: 自動操艦の間合い: keep（主砲の射程の45%を保つ）／close（接近: 副砲の射程の中まで寄せる）／open（離す: 主砲の射程いっぱいまで離れる）
+  maneuverMode: 'off',
+  MANEUVER_MODES: { off: '自動操艦: 切', keep: '自動操艦: 間合いを保つ', close: '自動操艦: 接近する', open: '自動操艦: 離す' },
+  setManeuverMode(mode) {
+    this.maneuverMode = this.MANEUVER_MODES[mode] ? mode : 'off';
+    this.autoManeuver = this.maneuverMode !== 'off';
+    this._mvQ = null;
+    this._syncUi();
+  },
+  _maneuverDistance() {
+    const ranges = this.rig.mounts.map((m) => weaponRange(m.cfg));
+    const mainRange = Math.max(...ranges);
+    const minRange = Math.min(...ranges);
+    if (this.maneuverMode === 'close') return clamp(minRange * 0.5, 1500, 10000);
+    if (this.maneuverMode === 'open') return Math.max(mainRange * 0.9, 5000);
+    return clamp(mainRange * 0.45, 3000, 15000);
+  },
   maneuverInput(ship, input, dt) {
     if (!this.autoManeuver || !this._practiceOn() || !this.rig || !ship.mesh) return input;
     if (typeof Navigation !== 'undefined' && (Navigation.isWarping() || Navigation.approach || Navigation.departure)) return input;
     const P = this.practice;
     const sp = new THREE.Vector3(ship.position.x, ship.position.y, ship.position.z);
-    // 目標の方向（近いほど重く）と、まとまりまでの距離
+    // 目標の方向（近いほど・大きな艦ほど重く）と、敵までの距離（耐久で重みづけ。まわりを飛ぶ攻撃機に引っぱられないように）
     const D = new THREE.Vector3();
     let wsum = 0, dsum = 0;
     for (const t of P.targets) {
       if (!t.alive) continue;
       const r = t.pos.clone().sub(sp);
       const d = Math.max(1000, r.length());
-      const w = 1 / d;
+      const w = (t.hpMax || 100) / d;
       D.addScaledVector(r.normalize(), w);
       wsum += w; dsum += d * w;
     }
@@ -1327,9 +1562,10 @@ const Weapons = {
     }
     // 動かす: まとまりまでの距離を、主砲の射程の 45%（3〜15 km）に保つ（スロットルレバーを使っていなければ）
     if (Math.abs(input.thrustForward) < 0.02 && Math.abs(input.thrustStrafeX) < 0.05 && Math.abs(input.thrustStrafeY) < 0.05) {
-      const mainRange = Math.max(...this.rig.mounts.map((m) => weaponRange(m.cfg)));
-      const want = clamp(mainRange * 0.45, 3000, 15000);
-      const vdes = clamp((dist - want) * 0.05, -150, 150);
+      const want = this._maneuverDistance();
+      // 接近・離すは速く（3 km/s まで）。離すときは、足の遅い大型艦からは離れられるが、速い攻撃機は追いついてくる
+      const vmax = this.maneuverMode === 'keep' ? 150 : 3000;
+      const vdes = clamp((dist - want) * (this.maneuverMode === 'keep' ? 0.05 : 0.1), -vmax, vmax);
       const dv = D.clone().multiplyScalar(vdes).sub(new THREE.Vector3(ship.velocity.x, ship.velocity.y, ship.velocity.z));
       const dvL = dv.applyQuaternion(new THREE.Quaternion(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w).invert());
       out.thrustForward = clamp(-dvL.z / 30, -1, 1);
@@ -1422,7 +1658,8 @@ const Weapons = {
       let best = null, bestD = Infinity;
       for (const o of this.practice.targets) {
         if (!o.alive) continue;
-        const d = o.pos.distanceTo(t.pos) * (o.group === t.group ? 1 : 3);
+        // 大型艦（戦艦・重巡）を先に。距離を小さく見積もる
+        const d = o.pos.distanceTo(t.pos) * (o.group === t.group ? 1 : 3) * (o.cls === 'bb' ? 0.25 : o.cls === 'ca' ? 0.5 : 1);
         if (d < bestD && d < 15000) { bestD = d; best = o; }
       }
       this.lock = best;
@@ -1445,6 +1682,7 @@ const Weapons = {
       const vo = nav._framePointVelocity(oldF, t.pos), vn = nav._framePointVelocity(newF, np);
       const v = Astro.mat3MulVec(newF.rotT, { x: vu.x + vo.x - vn.x, y: vu.y + vo.y - vn.y, z: vu.z + vo.z - vn.z });
       t.pos.copy(np); t.vel.set(v.x, v.y, v.z);
+      if (t.rv) { const r = Astro.mat3MulVec(newF.rotT, Astro.mat3MulVec(oldF.rot, t.rv)); t.rv.set(r.x, r.y, r.z); }
       t.mesh.position.copy(np);
     }
     const seen = new Set();
@@ -1467,11 +1705,13 @@ const Weapons = {
     const D = new THREE.Vector3(dl.x, dl.y, dl.z);
     const cone = Math.PI / 2; // v89: 見ている方向の半球全体（中央から 90° まで）
     const angOf = (t) => Math.acos(clamp(t.pos.clone().sub(o).normalize().dot(D), -1, 1));
+    // v89: 照準（射撃レーダーの視線）は主砲の超遠距離射撃の目標。大型艦を優先する（戦艦は中央から 60°、重巡は 30° 離れていても先に選ぶ）
+    const score = (t) => angOf(t) - (this.LOCK_CLASS_BONUS[t.cls] || 0);
     if (this.lock && !this.lock.alive) this.lock = null;
     this._visibleTarget = null;
     {
-      let best = null, bestA = cone;
-      for (const t of this.practice.targets) { if (!t.alive) continue; const a = angOf(t); if (a < bestA) { bestA = a; best = t; } }
+      let best = null, bestA = Infinity;
+      for (const t of this.practice.targets) { if (!t.alive || angOf(t) >= cone) continue; const a = score(t); if (a < bestA) { bestA = a; best = t; } }
       this._visibleTarget = best;
       // v89: 見ている方向の半球に目標があれば自動で照準を合わせる（自分で照準を動かした直後の1.5秒は合わせない）
       if (!this.lock && best && !(this._noAutoLockUntil > this._time)) this.lock = best;
@@ -1494,6 +1734,7 @@ const Weapons = {
       this.aim.dirU = this._toUniverse({ x: nd.x, y: nd.y, z: nd.z });
     } else this.lockPanning = false;
   },
+  LOCK_CLASS_BONUS: { bb: Math.PI / 3, ca: Math.PI / 6 },
   PAN_TAU: 0.3, // 照準のパンの滑らかさ [s]
   PAN_MIN_RATE: 0.08, // [rad/s] 最後まで止まらずに合わせ切るための最低の速さ
   PAN_MAX_RATE: 2.1, // [rad/s] 約120°/s
@@ -1854,7 +2095,7 @@ const Weapons = {
       <select class="wpn-difficulty" title="演習の難易度"></select>
       <button type="button" class="wpn-btn wpn-practice">演習</button>
       <div class="wpn-hp"><div class="wpn-hp-fill"></div><span class="wpn-hp-text"></span></div>
-      <button type="button" class="wpn-btn wpn-maneuver">自動操艦</button>
+      <select class="wpn-maneuver" title="自動操艦: 目標の多い方へ、撃てる砲の多い向きに回し、間合いを合わせる"></select>
       <button type="button" class="wpn-btn wpn-focus" title="オン: すべての砲を照準の目標へ向ける／オフ: 自動射撃の砲は艦種や距離で自分の目標を選ぶ">全門指向</button>
       <button type="button" class="wpn-btn wpn-fire">撃て</button>
       <button type="button" class="wpn-btn wpn-view">照準</button>
@@ -1903,11 +2144,12 @@ const Weapons = {
     box.querySelector('.wpn-practice').addEventListener('click', () => {
       if (this.practice) { this.stopPractice(); this._flashStatus('演習をやめました'); } else this.startPractice();
     });
-    box.querySelector('.wpn-maneuver').addEventListener('click', () => {
-      this.autoManeuver = !this.autoManeuver;
-      this._mvQ = null;
-      this._flashStatus(this.autoManeuver ? '自動操艦: 目標の多い方へ、撃てる砲の多い向きに回します' : '自動操艦を切りました');
-      this._syncUi();
+    const msel = box.querySelector('.wpn-maneuver');
+    for (const [k, label] of Object.entries(this.MANEUVER_MODES)) msel.appendChild(new Option(label, k));
+    msel.addEventListener('change', () => {
+      this.setManeuverMode(msel.value);
+      const msg = { off: '自動操艦を切りました', keep: '自動操艦: 主砲の射程の半分ほどの間合いを保ちます', close: '自動操艦: 敵に接近します（副砲の射程の中まで）', open: '自動操艦: 敵から離れます（主砲の射程いっぱいまで）' };
+      this._flashStatus(msg[this.maneuverMode]);
     });
     box.querySelector('.wpn-focus').addEventListener('click', () => {
       this.setFocusAll(!this.focusAll);
@@ -2084,7 +2326,7 @@ const Weapons = {
     u.view.classList.toggle('active', this.view);
     u.stop.style.display = this.aim.active ? '' : 'none';
     if (u.focusBtn) { u.focusBtn.style.display = this.aim.active ? '' : 'none'; u.focusBtn.classList.toggle('active', !!this.focusAll); }
-    if (u.maneuverBtn) { u.maneuverBtn.style.display = this.practice ? '' : 'none'; u.maneuverBtn.classList.toggle('active', !!this.autoManeuver); }
+    if (u.maneuverBtn) { u.maneuverBtn.style.display = this.practice ? '' : 'none'; u.maneuverBtn.value = this.maneuverMode; u.maneuverBtn.classList.toggle('active', !!this.autoManeuver); }
     if (u.hp) u.hp.style.display = this.practice ? '' : 'none';
     // v89: 演習は演習モード（index.html?mode=practice）だけ
     if (u.practice) { u.practice.style.display = PRACTICE_MODE ? '' : 'none'; u.practice.textContent = this.practice ? '演習をやめる' : '演習開始'; u.practice.classList.toggle('active', !!this.practice); }

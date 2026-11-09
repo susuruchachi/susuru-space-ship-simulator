@@ -329,7 +329,18 @@
   .wpn-hp-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 100%; background: #3dff6e; opacity: 0.7; }
   .wpn-hp-text { position: relative; display: block; text-align: center; font-size: 10px; line-height: 14px; color: #fff; text-shadow: 0 1px 2px #000; }
   .wpn-maneuver.active { background: rgba(80,180,255,0.35); border-color: rgba(140,210,255,0.9); color: #fff; }
-  .practice-badge { position: fixed; bottom: calc(var(--sab, 0px) + 24px); left: 50%; transform: translateX(-50%); z-index: 30; padding: 5px 10px; border-radius: 8px; font-size: 12px; color: #ffd08a; background: rgba(60,30,0,0.6); border: 1px solid rgba(255,170,80,0.6); pointer-events: auto; }
+  .practice-badge { position: fixed; top: calc(var(--sat, 0px) + 54px); right: calc(var(--sar, 0px) + 8px); z-index: 30; padding: 5px 10px; border-radius: 8px; font-size: 12px; color: #ffd08a; background: rgba(60,30,0,0.6); border: 1px solid rgba(255,170,80,0.6); pointer-events: auto; }
+  body:not(.mode-practice) .side-menu-practice-only { display: none !important; }
+  .side-menu-practice-info { font-size: 11px; line-height: 1.5; color: #dfe8f2; }
+  .side-menu-practice-info .pi-line { margin: 2px 0; }
+  .side-menu-practice-info .pi-table { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 10.5px; }
+  .side-menu-practice-info .pi-table th { text-align: left; font-weight: normal; color: #9fb3c8; border-bottom: 1px solid rgba(255,255,255,0.15); padding: 1px 3px; }
+  .side-menu-practice-info .pi-table td { padding: 1px 3px; white-space: nowrap; }
+  .side-menu-practice-info .pi-dead { opacity: 0.4; }
+  .side-menu-practice-info .pi-sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+  select.wpn-maneuver { font-size: 11px; padding: 4px 2px; border-radius: 6px; background: rgba(0,0,0,0.55); color: #cfe8ff; border: 1px solid rgba(140,200,255,0.5); }
+  select.wpn-maneuver.active { background: rgba(80,180,255,0.35); border-color: rgba(140,210,255,0.9); color: #fff; }
+  .wpn-inset-scale { position: absolute; left: 4px; bottom: 2px; font-size: 9.5px; color: rgba(190,225,255,0.85); pointer-events: none; text-shadow: 0 0 3px #000; }
   .wpn-difficulty { font-size: 11px; padding: 4px 2px; border-radius: 6px; background: rgba(0,0,0,0.55); color: #ffe2b0; border: 1px solid rgba(255,200,120,0.5); }
   /* v89: 演習モード（?mode=practice）: 自動航行・ワープ・星図・目的地・周回姿勢のボタンを出さない */
   body.mode-practice .btn-space-map, body.mode-practice .btn-space-autopilot, body.mode-practice .btn-space-warp,
