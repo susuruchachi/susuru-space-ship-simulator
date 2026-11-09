@@ -32,6 +32,10 @@
   let hullVersion = 0;      // 船体の形が変わるたびに+1（表面の三角形キャッシュの無効化）
   let triCache = null;
   let pendingLegacyScale = null; // 旧方式（艦種ごと）のモデルの倍率。大きさの引き継ぎに使う
+  // v89: 船体モデルは設計の値を出したあとに裏で読み込む（大きなモデルは iPad で時間がかかり、その間は設定欄が空のように見えていた）
+  let modelState = 'none'; // 'none' | 'loading' | 'ready' | 'missing'（この端末にデータが無い）| 'failed'
+  let openToken = 0;
+  let modelChain = Promise.resolve();
 
   // -----------------------------------------------------------
   // 表示用の書式
@@ -763,7 +767,10 @@
     const hasModel = !!core.getModelRoot();
     $('modelLine').textContent = hasModel
       ? `モデル: ${design.hull.modelFileName || '（読み込み済み）'}`
-      : 'モデルなし（箱の仮船体）';
+      : modelState === 'loading' ? `モデル: ${design.hull.modelFileName || ''} 読み込み中…`
+        : modelState === 'missing' ? `モデル: ${design.hull.modelFileName || ''}（この端末にデータがありません）`
+          : modelState === 'failed' ? `モデル: ${design.hull.modelFileName || ''}（読み込みに失敗）`
+            : 'モデルなし（箱の仮船体）';
     $('removeModelBtn').style.display = hasModel ? '' : 'none';
     $('boxShapeRows').style.display = hasModel ? 'none' : '';
     $('rotationRows').style.display = hasModel ? '' : 'none';
@@ -1933,22 +1940,10 @@
     core.applyAdjust();
     hullVersion++;
     core.setDockingFace(design.dockingFace);
-    const modelData = opts && opts.modelData !== undefined
-      ? opts.modelData
-      : (design.hull.hasModel ? await loadShipDesignModel(design.id) : null);
-    if (modelData) {
-      try {
-        core.setStatus('船体モデルを読み込んでいます…');
-        await core.restoreModelFromData(modelData);
-        core.setStatus('');
-      } catch (e) {
-        console.error(e);
-        core.setStatus('船体モデルの読み込みに失敗しました。箱の仮船体で表示しています。', true);
-        design.hull.hasModel = false;
-      }
-    } else if (design.hull.hasModel) {
-      design.hull.hasModel = false;
-    }
+    // v89: 設計の値（部品・重心など）をすぐ画面に出す。船体モデルはそのあと裏で読み込む
+    const token = ++openToken;
+    const wantModel = opts && opts.modelData !== undefined ? !!opts.modelData : !!design.hull.hasModel;
+    modelState = wantModel ? 'loading' : 'none';
     hullVersion++;
     core.setSceneScale(design.hull.size);
     rebuildBoxHull();
@@ -1958,7 +1953,43 @@
     syncUi();
     dirty = !!(opts && opts.dirty);
     modelDirty = !!(opts && opts.modelDirty);
-    await refreshDesignList();
+    refreshDesignList().catch((e) => console.warn(e));
+    if (!wantModel) return;
+    core.setStatus('船体モデルを読み込んでいます…（設定はこのまま見たり変えたりできます）');
+    // 読み込みは1つずつ順に（別の設計を開いたら、前の設計のモデルは使わない）
+    const job = modelChain.then(async () => {
+      if (token !== openToken) return;
+      try {
+        const modelData = opts && opts.modelData !== undefined ? opts.modelData : await loadShipDesignModel(design.id);
+        if (token !== openToken) return;
+        if (!modelData) {
+          modelState = 'missing';
+          core.setStatus('この端末に船体モデルのデータがありません（同期でまだ届いていないかもしれません）。箱の仮船体で表示しています。モデルの設定は消さずに残します。', true);
+          syncUi();
+          return;
+        }
+        core.removeModel();
+        await core.restoreModelFromData(modelData);
+        if (token !== openToken) { core.removeModel(); return; }
+        modelState = 'ready';
+        hullVersion++;
+        core.setSceneScale(design.hull.size);
+        rebuildBoxHull();
+        rebuildMarkers();
+        core.rebuildDockingFaceGizmo();
+        frameCamera();
+        syncUi();
+        core.setStatus('');
+      } catch (e) {
+        console.error(e);
+        if (token !== openToken) return;
+        modelState = 'failed';
+        core.setStatus('船体モデルの読み込みに失敗しました。箱の仮船体で表示しています（モデルの設定は消さずに残します。開き直すと、もう一度読み込みます）。', true);
+        syncUi();
+      }
+    });
+    modelChain = job.catch(() => {});
+    if (opts && opts.awaitModel) await job;
   }
 
   // 艦種ごとに保存されていた旧方式のモデル（ship-builder.html v77以前）があれば、
@@ -1978,7 +2009,7 @@
         d.name = `${shipTemplateSpec(baseClass).label}（${legacy.fileName || 'モデル'}）`;
       }
     }
-    await openDesign(d, { modelData, dirty: true, modelDirty: !!modelData });
+    await openDesign(d, { modelData, dirty: true, modelDirty: !!modelData, awaitModel: true }); // 大きさの引き継ぎはモデルを読み込んでから
     if (modelData) {
       // 旧方式で合わせていた大きさをそのまま使い、性能はその大きさの目安値にする
       const auto = shipDesignAutoSpec(design.baseClass, design.hull.size);
@@ -2004,8 +2035,13 @@
     design.hull.scale = core.adjust.scale;
     design.hull.offset = { ...core.adjust.offset };
     const modelData = core.getModelDataForSave();
-    design.hull.hasModel = !!modelData;
-    design.hull.modelFileName = modelData ? modelData.fileName : null;
+    // v89: モデルを読み込み中・この端末にデータが無い・読み込めなかったときは、保存してあるモデルをそのまま使う
+    // （以前は「モデルなし」として保存してしまい、ゲームでもモデルが出なくなっていた）
+    const keepStoredModel = !modelDirty && design.hull.hasModel && !modelData && modelState !== 'ready';
+    if (!keepStoredModel) {
+      design.hull.hasModel = !!modelData;
+      design.hull.modelFileName = modelData ? modelData.fileName : null;
+    }
     $('saveBtn').disabled = true;
     $('saveAndFlyBtn').disabled = true;
     core.setStatus('保存中…');
@@ -2120,6 +2156,7 @@
   // テスト・デバッグ用
   window.ShipDesigner = {
     get design() { return design; },
+    get modelState() { return modelState; },
     get active() { return active; },
     snapToHull,
     setSize,
