@@ -43,6 +43,8 @@ const ShipController = {
     if (typeof Navigation !== 'undefined' && Navigation.approach) input = Navigation.approachInput(ship, input);
     // v88: 母港からの出港（時速100kmで前進だけ）
     if (typeof Navigation !== 'undefined' && Navigation.departure) input = Navigation.departureInput(ship, input);
+    // v89: 演習中の自動操艦（29-weapons.js）: 撃てる砲の多い向きへ回し、目標との距離を保つ
+    if (typeof Weapons !== 'undefined' && Weapons.maneuverInput) input = Weapons.maneuverInput(ship, input, dt);
     // v77: ワープ中は並進をワープ航法（16-navigation.js）が受け持ち、
     // 回転だけ通常の物理（RCSによる姿勢制御）で動かす。
     if (typeof Navigation !== 'undefined' && Navigation.isWarping()) {
