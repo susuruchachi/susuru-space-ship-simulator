@@ -1315,6 +1315,9 @@ const Weapons = {
       const g = new THREE.Group();
       g.add(beam); g.add(core);
       g.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+      // v89: 撃った瞬間から砲口に置く（以前は次の更新まで座標の原点にあり、自動射撃では原点から出た光線が描かれていた。
+      // 原点は艦から最大 20 km 離れることがあり、艦から離れたところから撃っているように見えた）
+      g.position.copy(pos);
       g.frustumCulled = false; beam.frustumCulled = false; core.frustumCulled = false;
       this._fx.add(g);
       // レーザーは砲身に付いたまま（撃っている間、砲の向きに沿う）
@@ -1325,12 +1328,13 @@ const Weapons = {
         x: ship.velocity.x + dir.x * info.speed, y: ship.velocity.y + dir.y * info.speed, z: ship.velocity.z + dir.z * info.speed,
       };
       const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+      // v89: 曳光弾も撃った瞬間から砲口に（座標の原点に1フレームだけ点が出ないように）
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([pos.x, pos.y, pos.z, pos.x, pos.y, pos.z]), 3));
       const mat = new THREE.LineBasicMaterial({ color: info.tracer, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
       const line = new THREE.Line(geo, mat);
       const pmat = new THREE.PointsMaterial({ map: this._dotTexture(), color: info.tracer, size: clamp(m.cfg.caliber / 60, 3, 9), sizeAttenuation: false, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
       const pgeo = new THREE.BufferGeometry();
-      pgeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3), 3));
+      pgeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([pos.x, pos.y, pos.z]), 3));
       const pt = new THREE.Points(pgeo, pmat);
       line.frustumCulled = false; pt.frustumCulled = false;
       this._fx.add(line); this._fx.add(pt);
