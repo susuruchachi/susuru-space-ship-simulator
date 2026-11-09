@@ -1037,6 +1037,12 @@
           <button type="button" id="wpnGroupElevBtn">この仰角をグループ全部にそろえる</button>
         </div>
         <label class="check-row"><input type="checkbox" id="wpnGroupAuto"> 自動射撃（ゲームを始めたときに入れておく）</label>
+        <div class="field-row">
+          <label for="wpnGroupPower">自動射撃の出力</label>
+          <input type="number" id="wpnGroupPower" class="num-input" min="1" max="100" step="1">
+          <span class="unit">%</span>
+        </div>
+        <p class="hint">レーザー砲は充電の途中でも撃てます（充電の割合だけ光線が細くなります）。ゲームのグループのボタンで、自動射撃を「切 → 最大 → この出力」と切り替えられます。「最大」は満タンになるたびに、「この出力」は充電がこの割合になるたびに撃ちます（実弾砲は装填が済むたび）。</p>
         <div class="btn-row">
           <button type="button" id="wpnGroupAddBtn">＋ 新しいグループ</button>
           <button type="button" id="wpnGroupDelBtn" class="danger">このグループを消す</button>

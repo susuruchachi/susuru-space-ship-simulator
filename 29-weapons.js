@@ -128,6 +128,8 @@ function normalizeShipWeapons(w) {
   // v89: 砲塔のグループ（主砲・副砲など。名前は自由）。autoFire はゲーム開始時の自動射撃
   const groups = (Array.isArray(w.groups) ? w.groups : []).filter((g) => g && g.id).map((g) => ({
     id: String(g.id), name: String(g.name || 'グループ').slice(0, 20), autoFire: !!g.autoFire,
+    // v89: 自動射撃の出力（レーザー。充電がこの割合になったら撃つ）[%]
+    autoPower: Number(g.autoPower) >= 1 ? Math.min(100, Math.round(Number(g.autoPower))) : 50,
   }));
   return { mounts, directors, groups };
 }
@@ -498,8 +500,11 @@ const Weapons = {
     try { this._occ = WeaponRig.buildOcclusion(modelRoot, rig); } catch (e) { console.warn('射線の判定の準備に失敗しました', e); this._occ = null; }
     if (this._occ) for (const m of rig.mounts) for (const b of m.barrels) b.length = this._occ.barrelLen.get(b.node) || null;
     try { this._buildInset(modelRoot, rig); } catch (e) { console.warn('照準の小さな艦の図の準備に失敗しました', e); this._inset = null; }
-    this.groups = this.cfg.groups.map((g) => ({ id: g.id, name: g.name, auto: g.autoFire, mounts: rig.mounts.filter((m) => m.groupId === g.id) }))
-      .filter((g) => g.mounts.length);
+    // 自動射撃: mode 'off' 切 / 'max' 最大（満タンで撃つ）/ 'set' 設定した出力（レーザーがその割合まで充電できたら撃つ）
+    this.groups = this.cfg.groups.map((g) => {
+      const mounts = rig.mounts.filter((m) => m.groupId === g.id);
+      return { id: g.id, name: g.name, mode: g.autoFire ? 'max' : 'off', power: g.autoPower, mounts, hasLaser: mounts.some((m) => m.cfg.kind === 'laser') };
+    }).filter((g) => g.mounts.length);
     this._buildMountUi();
     this._buildGroupUi();
     this._syncUi();
@@ -626,18 +631,18 @@ const Weapons = {
       m.barrelStates = m.barrels.map((b, i) => (m.state === 'none' || m.state === 'near' || m.state === 'moving' ? m.state
         : m.blocked[i] ? 'blocked' : m.reloadLeft[i] > 0 ? 'reload' : 'ready'));
       if (m.onTarget) aimed++;
-      if (m.state === 'ready') ready++;
+      if (m.barrels.some((b, i) => this._canFireBarrel(m, i))) ready++;
     }
     // v89: 自動射撃のグループは、狙いが合って装填ができ次第、撃てる砲身を撃ち続ける
     if (this.aim.active && this.groups) {
       for (const g of this.groups) {
-        if (!g.auto) continue;
+        if (g.mode === 'off') continue;
+        // レーザーは「最大」なら満タンで、「%」ならその割合まで充電できたら撃つ（実弾砲は装填が済んだら）
+        const thr = g.mode === 'set' ? g.power / 100 : 1;
         for (const m of g.mounts) {
-          if (m.state !== 'ready') continue;
           m.barrels.forEach((b, i) => {
-            if (!this._canFireBarrel(m, i)) return;
-            m.reloadLeft[i] = weaponReload(m.cfg);
-            this._spawnShot(ship, m, b);
+            if (!this._canFireBarrel(m, i, thr)) return;
+            this._shoot(m, b, i);
           });
         }
       }
@@ -915,8 +920,19 @@ const Weapons = {
     }
     return list;
   },
-  _canFireBarrel(m, i) {
-    return m.onTarget && m.state === 'ready' && m.reloadLeft[i] <= 0 && !(m.blocked && m.blocked[i]);
+  // v89: レーザーは充電の途中でも撃てる（充電の割合 = 1 − 残り時間 / 充電時間。光線の太さがその割合になる）
+  LASER_MIN_CHARGE: 0.05,
+  _charge(m, i) { return clamp(1 - m.reloadLeft[i] / weaponReload(m.cfg), 0, 1); },
+  // minCharge: レーザーの撃てる充電の割合（省略時は LASER_MIN_CHARGE）。実弾砲は装填が済んでいること
+  _canFireBarrel(m, i, minCharge) {
+    if (!m.onTarget || (m.blocked && m.blocked[i])) return false;
+    if (m.cfg.kind === 'laser') return this._charge(m, i) >= Math.max(this.LASER_MIN_CHARGE, (minCharge ?? 0) - 1e-9);
+    return m.reloadLeft[i] <= 0;
+  },
+  _shoot(m, b, i) {
+    const power = m.cfg.kind === 'laser' ? this._charge(m, i) : 1;
+    m.reloadLeft[i] = weaponReload(m.cfg);
+    this._spawnShot(State.ship, m, b, power);
   },
   // 一門ずつ: 前に撃った砲身の次から順に探して、撃てる砲身を1つ撃つ
   fireOne() {
@@ -926,8 +942,7 @@ const Weapons = {
     for (let k = 0; k < order.length; k++) {
       const e = order[(start + k) % order.length];
       if (!this._canFireBarrel(e.m, e.i)) continue;
-      e.m.reloadLeft[e.i] = weaponReload(e.m.cfg);
-      this._spawnShot(State.ship, e.m, e.b);
+      this._shoot(e.m, e.b, e.i);
       this._lastShot = { m: e.m, i: e.i };
       return 1;
     }
@@ -939,11 +954,9 @@ const Weapons = {
     const ship = State.ship;
     let n = 0;
     for (const m of this.rig.mounts) {
-      if (!m.onTarget || m.state !== 'ready') continue;
       m.barrels.forEach((b, i) => {
-        if (m.reloadLeft[i] > 0 || (m.blocked && m.blocked[i])) return;
-        m.reloadLeft[i] = weaponReload(m.cfg);
-        this._spawnShot(ship, m, b);
+        if (!this._canFireBarrel(m, i)) return;
+        this._shoot(m, b, i);
         n++;
       });
     }
@@ -975,7 +988,9 @@ const Weapons = {
     this._dotTex = new THREE.CanvasTexture(c);
     return this._dotTex;
   },
-  _spawnShot(ship, m, b) {
+  // power: レーザーの充電の割合（0〜1。光線の太さ・明るさ）
+  _spawnShot(ship, m, b, power) {
+    const pw = power === undefined ? 1 : clamp(power, 0, 1);
     const { pos, dir } = this._barrelMuzzle(m, b);
     const rel = { x: pos.x - ship.position.x, y: pos.y - ship.position.y, z: pos.z - ship.position.z };
     const size = (CameraSystem._shipScale || 1) * 8;
@@ -983,10 +998,10 @@ const Weapons = {
       const info = weaponTypeInfo('laser', m.cfg.type);
       const color = new THREE.Color(m.cfg.color);
       const len = Math.max(size * 60, 20000);
-      const r = Math.max((m.cfg.caliber / 1000) * 1.5, size * 0.0015);
+      const r = Math.max((m.cfg.caliber / 1000) * 1.5, size * 0.0015) * Math.max(0.12, pw); // 充電の途中で撃つと細い
       const geo = new THREE.CylinderGeometry(r, r, len, 8, 1, true);
       geo.translate(0, len / 2, 0);
-      const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false });
+      const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9 * (0.5 + 0.5 * pw), blending: THREE.AdditiveBlending, depthWrite: false });
       const beam = new THREE.Mesh(geo, mat);
       const core = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, len, 0)]),
         new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
@@ -996,7 +1011,7 @@ const Weapons = {
       g.frustumCulled = false; beam.frustumCulled = false; core.frustumCulled = false;
       this._fx.add(g);
       // レーザーは砲身に付いたまま（撃っている間、砲の向きに沿う）
-      this._effects.push({ kind: 'beam', obj: g, mount: m, barrel: b, t: 0, life: info.beamTime, mats: [mat, core.material] });
+      this._effects.push({ kind: 'beam', obj: g, mount: m, barrel: b, t: 0, life: info.beamTime, mats: [mat, core.material], base: 0.9 * (0.5 + 0.5 * pw) });
     } else {
       const info = weaponTypeInfo('kinetic', m.cfg.type);
       const v = {
@@ -1037,7 +1052,7 @@ const Weapons = {
         const { pos, dir } = this._barrelMuzzle(e.mount, e.barrel);
         e.obj.position.copy(pos);
         e.obj.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
-        e.mats[0].opacity = 0.9 * Math.min(1, k * 3);
+        e.mats[0].opacity = (e.base ?? 0.9) * Math.min(1, k * 3);
         e.mats[1].opacity = Math.min(1, k * 3);
       } else if (e.kind === 'flash') {
         const a = e.obj.geometry.attributes.position;
@@ -1174,12 +1189,18 @@ const Weapons = {
     for (const g of this.groups || []) {
       const b = document.createElement('button');
       b.type = 'button';
-      b.className = `wpn-btn wpn-auto${g.auto ? ' active' : ''}`;
+      b.className = `wpn-btn wpn-auto${g.mode !== 'off' ? ' active' : ''}`;
       b.innerHTML = `<span class="wpn-auto-name"></span><span class="wpn-auto-state"></span>`;
       b.querySelector('.wpn-auto-name').textContent = g.name;
-      const sync = () => { b.classList.toggle('active', g.auto); b.querySelector('.wpn-auto-state').textContent = g.auto ? '自動 入' : '自動 切'; };
+      const label = () => (g.mode === 'off' ? '自動 切' : g.mode === 'max' ? '自動 最大' : `自動 ${g.power}%`);
+      const sync = () => { b.classList.toggle('active', g.mode !== 'off'); b.querySelector('.wpn-auto-state').textContent = label(); };
       sync();
-      b.addEventListener('click', () => { g.auto = !g.auto; sync(); this._flashStatus(`${g.name}: 自動射撃を${g.auto ? '入れました' : '切りました'}`); });
+      // 押すたびに 切 → 最大 → 設定した出力（レーザーのあるグループだけ） → 切
+      b.addEventListener('click', () => {
+        g.mode = g.mode === 'off' ? 'max' : g.mode === 'max' && g.hasLaser ? 'set' : 'off';
+        sync();
+        this._flashStatus(`${g.name}: ${g.mode === 'off' ? '自動射撃を切りました' : g.mode === 'max' ? '自動射撃（最大の出力で）' : `自動射撃（出力 ${g.power}% で）`}`);
+      });
       u.groups.appendChild(b);
     }
   },
@@ -1295,6 +1316,7 @@ const WeaponDesigner = {
     $('wpnGroupSel').addEventListener('change', () => this._edit((m) => { m.group = $('wpnGroupSel').value; }));
     $('wpnGroupName').addEventListener('change', () => this._editGroup((g) => { g.name = $('wpnGroupName').value.trim().slice(0, 20) || g.name; }));
     $('wpnGroupAuto').addEventListener('change', () => this._editGroup((g) => { g.autoFire = $('wpnGroupAuto').checked; }));
+    $('wpnGroupPower').addEventListener('change', () => this._editGroup((g) => { const v = Number($('wpnGroupPower').value); if (v >= 1) g.autoPower = Math.min(100, Math.round(v)); }));
     $('wpnGroupElevBtn').addEventListener('click', () => {
       const g = this._currentGroup();
       if (!g) return;
@@ -1486,6 +1508,7 @@ const WeaponDesigner = {
     if (cg) {
       if (document.activeElement !== $('wpnGroupName')) $('wpnGroupName').value = cg.name;
       $('wpnGroupAuto').checked = !!cg.autoFire;
+      if (document.activeElement !== $('wpnGroupPower')) $('wpnGroupPower').value = String(cg.autoPower ?? 50);
       const members = rig.mounts.filter((m) => weaponMountConfigFor(design.weapons, m.key).group === cg.id);
       if (members.length && document.activeElement !== $('wpnGroupElevMin') && document.activeElement !== $('wpnGroupElevMax')) {
         const c0 = weaponMountConfigFor(design.weapons, members[0].key);
