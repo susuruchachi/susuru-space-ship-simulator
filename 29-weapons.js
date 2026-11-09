@@ -33,11 +33,11 @@ if (PRACTICE_MODE && typeof document !== 'undefined') {
 // v89: 演習の敵の艦種・機種。L/W/H: 大きさ [m]、hp: 耐久、guns: 1回に撃つ門数、cal: 口径 [mm]、types: 砲の種類、
 //   reload [s]、range [m]、ikn: 最高速度 [IKn]、rel: 自艦に対して近づく・回る速さ [m/s]、tau: 速さを合わせる時間 [s]、standoff: 近づく距離 [m]
 const ENEMY_CLASSES = {
-  bb: { label: '戦艦', L: 230, W: 34, H: 30, color: 0xc0392b, hp: 900, guns: 6, cal: [356, 460], types: ['ap', 'he'], reload: [22, 30], range: 40000, ikn: [22, 26], rel: 600, tau: 3, standoff: [15000, 25000] },
-  ca: { label: '重巡洋艦', L: 190, W: 22, H: 20, color: 0xe67e22, hp: 450, guns: 4, cal: [203, 254], types: ['ap', 'he', 'rail'], reload: [12, 16], range: 30000, ikn: [26, 31], rel: 800, tau: 2.5, standoff: [10000, 18000] },
-  cl: { label: '軽巡洋艦', L: 160, W: 17, H: 16, color: 0xf1c40f, hp: 260, guns: 4, cal: [140, 155], types: ['he', 'coil', 'pulse'], reload: [7, 10], range: 25000, ikn: [29, 35], rel: 1000, tau: 2, standoff: [7000, 13000] },
-  dd: { label: '駆逐艦', L: 115, W: 11, H: 10, color: 0x1abc9c, hp: 140, guns: 2, cal: [100, 130], types: ['he', 'coil', 'pulse'], reload: [4, 6], range: 16000, ikn: [33, 40], rel: 1300, tau: 1.5, standoff: [4000, 8000] },
-  ac: { label: '対艦攻撃機', L: 18, W: 14, H: 4, color: 0xd35eff, hp: 30, guns: 1, cal: [75, 120], types: ['rail', 'xray'], reload: [3, 5], range: 6000, ikn: [70, 90], rel: 4000, tau: 0.4, standoff: [1000, 3000] },
+  bb: { label: '戦艦', L: 230, W: 34, H: 30, color: 0xc0392b, hp: 900, guns: 6, cal: [356, 460], types: ['ap', 'he'], reload: [22, 30], range: 40000, ikn: [32, 36], rel: 600, tau: 3, standoff: [15000, 25000] },
+  ca: { label: '重巡洋艦', L: 190, W: 22, H: 20, color: 0xe67e22, hp: 450, guns: 4, cal: [203, 254], types: ['ap', 'he', 'rail'], reload: [12, 16], range: 30000, ikn: [35, 40], rel: 800, tau: 2.5, standoff: [10000, 18000] },
+  cl: { label: '軽巡洋艦', L: 160, W: 17, H: 16, color: 0xf1c40f, hp: 260, guns: 4, cal: [140, 155], types: ['he', 'coil', 'pulse'], reload: [7, 10], range: 25000, ikn: [38, 44], rel: 1000, tau: 2, standoff: [7000, 13000] },
+  dd: { label: '駆逐艦', L: 115, W: 11, H: 10, color: 0x1abc9c, hp: 140, guns: 2, cal: [100, 130], types: ['he', 'coil', 'pulse'], reload: [4, 6], range: 16000, ikn: [42, 50], rel: 1300, tau: 1.5, standoff: [4000, 8000] },
+  ac: { label: '対艦攻撃機', L: 18, W: 14, H: 4, color: 0xd35eff, hp: 30, guns: 1, cal: [75, 120], types: ['rail', 'xray'], reload: [3, 5], range: 6000, ikn: [90, 110], rel: 4000, tau: 0.4, standoff: [1000, 3000] },
 };
 // 難易度: 艦種の出やすさ（重み）、敵の火力の倍率、目標の数
 const PRACTICE_DIFFICULTIES = {
@@ -1520,10 +1520,18 @@ const Weapons = {
     if (!P) return;
     const ship = State.ship;
     const sp = new THREE.Vector3(ship.position.x, ship.position.y, ship.position.z);
-    const sv = new THREE.Vector3(ship.velocity.x, ship.velocity.y, ship.velocity.z);
+    // 敵が合わせる速度: 自動操艦が動かしているあいだは巡航の速度（自動操艦の近づく・離れる分は合わせない）
+    const sv = this._cruiseV ? this._cruiseV.clone() : new THREE.Vector3(ship.velocity.x, ship.velocity.y, ship.velocity.z);
     for (const t of P.targets) {
       if (!t.alive) continue;
-      // 動き: 自艦へ近づき、決まった距離まで来たら自艦のまわりを回る。自艦が動けば最高速度（15〜30 IKn。攻撃機はもっと速い）まで追う
+      // v89: 先に動かしてから（自艦はこのフレームでもう動いているので、同じ時刻どうしで）、次に向かう向きを決める。
+      //   以前は動かす前の位置から、もう動いた自艦へ向かう向きを決めていたため、自艦が速い（25 IKn で1フレーム約650 km）と
+      //   敵がいつも1フレーム分先へ行き過ぎ、数百 km 前に居座っていた
+      if (!t.rv) t.rv = new THREE.Vector3(); // 出たばかりの敵は自艦の速度に合わせて動き出す
+      t.vel.copy(sv).add(t.rv);
+      if (t.vel.length() > t.maxSpeed) { t.vel.setLength(t.maxSpeed); t.rv.copy(t.vel).sub(sv); }
+      t.pos.addScaledVector(t.vel, dt);
+      // 動き: 自艦へ近づき、決まった距離まで来たら自艦のまわりを回る。自艦が動けば最高速度まで追う
       const R = sp.clone().sub(t.pos);
       const dist = R.length();
       const rh = R.clone().divideScalar(Math.max(1, dist));
@@ -1541,11 +1549,7 @@ const Weapons = {
       // v89: 自艦の速さの変化にはすぐ合わせ（最高速度まで）、自艦に対する動き（近づく・回る）だけを tau でなめらかに変える。
       //   以前は速度全体を tau（1.5〜3秒）で合わせていたため、加速の大きい艦（Hood など）が数 IKn まで加速すると、
       //   合わせ終わるまでに数千 km 置いていかれていた
-      if (!t.rv) t.rv = t.vel.clone().sub(sv);
       t.rv.lerp(desired, 1 - Math.exp(-dt / t.tau));
-      t.vel.copy(sv).add(t.rv);
-      if (t.vel.length() > t.maxSpeed) { t.vel.setLength(t.maxSpeed); t.rv.copy(t.vel).sub(sv); }
-      t.pos.addScaledVector(t.vel, dt);
       // 進む向き（自艦に対する速度の向き）へ艦首を向ける
       const vr = t.rv;
       if (vr.lengthSq() > 1) t.mesh.lookAt(t.pos.clone().add(vr));
@@ -1555,7 +1559,8 @@ const Weapons = {
       t.reloadLeft -= dt;
       if (t.reloadLeft <= 0 && t.distShip <= t.weapon.range && P.shipHP > 0) {
         t.reloadLeft = t.weapon.reload * (0.85 + Math.random() * 0.3);
-        for (let g = 0; g < t.weapon.guns; g++) this._enemyFire(t, sp, sv);
+        const svReal = new THREE.Vector3(ship.velocity.x, ship.velocity.y, ship.velocity.z); // 偏差は自艦の本当の速度で
+        for (let g = 0; g < t.weapon.guns; g++) this._enemyFire(t, sp, svReal);
       }
     }
   },
@@ -1611,6 +1616,10 @@ const Weapons = {
     return clamp(mainRange * 0.45, 3000, 15000);
   },
   maneuverInput(ship, input, dt) {
+    const userMove = Math.abs(input.thrustForward) >= 0.02 || Math.abs(input.thrustStrafeX) >= 0.05 || Math.abs(input.thrustStrafeY) >= 0.05;
+    // 巡航の速度: 自動操艦が艦を動かしているあいだは、自動操艦に入ったときの速度（巡航）を保ち、その上に敵へ近づく・離れる分だけを足す。
+    // 敵はこの巡航の速度に合わせて動くので、自動操艦の近づく・離れるが間合いに効く（レバーを使っている・切のときは今の速度）
+    if (!this.autoManeuver || userMove || !this._practiceOn()) { this._cruiseV = null; this._mvOut = null; }
     if (!this.autoManeuver || !this._practiceOn() || !this.rig || !ship.mesh) return input;
     if (typeof Navigation !== 'undefined' && (Navigation.isWarping() || Navigation.approach || Navigation.departure)) return input;
     const P = this.practice;
@@ -1651,16 +1660,29 @@ const Weapons = {
       out.attitudeHold = true;
     }
     // 動かす: まとまりまでの距離を、主砲の射程の 45%（3〜15 km）に保つ（スロットルレバーを使っていなければ）
-    if (Math.abs(input.thrustForward) < 0.02 && Math.abs(input.thrustStrafeX) < 0.05 && Math.abs(input.thrustStrafeY) < 0.05) {
+    if (!userMove) {
+      const sv = new THREE.Vector3(ship.velocity.x, ship.velocity.y, ship.velocity.z);
+      if (!this._cruiseV) this._cruiseV = sv.clone();
       const want = this._maneuverDistance();
       // 接近・離すは速く（3 km/s まで）。離すときは、足の遅い大型艦からは離れられるが、速い攻撃機は追いついてくる
       const vmax = this.maneuverMode === 'keep' ? 150 : 3000;
       const vdes = clamp((dist - want) * (this.maneuverMode === 'keep' ? 0.05 : 0.1), -vmax, vmax);
-      const dv = D.clone().multiplyScalar(vdes).sub(new THREE.Vector3(ship.velocity.x, ship.velocity.y, ship.velocity.z));
+      const dv = this._cruiseV.clone().addScaledVector(D, vdes).sub(sv);
       const dvL = dv.applyQuaternion(new THREE.Quaternion(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w).invert());
-      out.thrustForward = clamp(-dvL.z / 30, -1, 1);
-      out.thrustStrafeX = clamp(dvL.x / 30, -1, 1);
-      out.thrustStrafeY = clamp(dvL.y / 30, -1, 1);
+      // v89: 推力は「速度の差 ÷（出せる加速度 × 2秒）」の比例で、小さな差（3%未満）は噴かない。出力もなめらかに変える。
+      //   以前は速度の差 ÷ 30 m/s で決めていたため、加速の大きい艦（Hood など）では毎フレーム行き過ぎ、前進と逆噴射を細かく繰り返していた
+      let aMax = typeof ThrusterSolver !== 'undefined' && ThrusterSolver._estimateMaxLinearDecel ? ThrusterSolver._estimateMaxLinearDecel(ship) : 10;
+      if (ship.maxAccel > 0) aMax = Math.min(aMax, ship.maxAccel);
+      const T = 2.0, dead = 0.03;
+      const cmd = (v) => { const r = clamp(v / (Math.max(1e-3, aMax) * T), -1, 1); return Math.abs(r) < dead ? 0 : r; };
+      const tgt = { f: cmd(-dvL.z), x: cmd(dvL.x), y: cmd(dvL.y) };
+      const prev = this._mvOut || { f: 0, x: 0, y: 0 };
+      const g = 1 - Math.exp(-dt / 0.25);
+      this._mvOut = { f: prev.f + (tgt.f - prev.f) * g, x: prev.x + (tgt.x - prev.x) * g, y: prev.y + (tgt.y - prev.y) * g };
+      const z = (v) => (Math.abs(v) < dead * 0.5 ? 0 : v);
+      out.thrustForward = z(this._mvOut.f);
+      out.thrustStrafeX = z(this._mvOut.x);
+      out.thrustStrafeY = z(this._mvOut.y);
     }
     return out;
   },
@@ -1774,6 +1796,15 @@ const Weapons = {
       t.pos.copy(np); t.vel.set(v.x, v.y, v.z);
       if (t.rv) { const r = Astro.mat3MulVec(newF.rotT, Astro.mat3MulVec(oldF.rot, t.rv)); t.rv.set(r.x, r.y, r.z); }
       t.mesh.position.copy(np);
+    }
+    // 巡航の速度も新しいフレームへ（艦の位置で）
+    if (this._cruiseV) {
+      const sp = State.ship.position;
+      const pOld = nav.universeToLocal(nav.localToUniverse({ x: sp.x, y: sp.y, z: sp.z }, newF), oldF);
+      const vu = Astro.mat3MulVec(oldF.rot, this._cruiseV);
+      const vo = nav._framePointVelocity(oldF, pOld), vn = nav._framePointVelocity(newF, sp);
+      const v = Astro.mat3MulVec(newF.rotT, { x: vu.x + vo.x - vn.x, y: vu.y + vo.y - vn.y, z: vu.z + vo.z - vn.z });
+      this._cruiseV.set(v.x, v.y, v.z);
     }
     const seen = new Set();
     for (const t of P.targets) if (!seen.has(t.center)) { seen.add(t.center); t.center.copy(conv(t.center)); }
