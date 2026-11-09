@@ -24,6 +24,15 @@
 //   - 「撃て」で、狙いが合っていて装填の済んだ砲を撃つ（見た目だけ。当たり判定はまだ無い）
 // =============================================================
 
+// v89: 砲の状態の色（画面の番号・照準マーク・装填の棒・小さな図の線）
+const WEAPON_STATE_COLORS = {
+  ready: 0x3dff6e,   // 撃てる
+  moving: 0xffd84a,  // 旋回中
+  reload: 0xff4a3a,  // 装填中
+  blocked: 0xf2f4f6, // 指向できたが射線が船体・ほかの砲に当たる（白）
+  near: 0x8a9099,    // 指向不可だが近くまで寄せている（グレー）
+  none: 0x24272c,    // 指向不可（ほぼ黒）
+};
 const WEAPON_KINDS = { kinetic: '実弾砲', laser: 'レーザー砲' };
 const WEAPON_TYPES = {
   kinetic: [
@@ -606,12 +615,16 @@ const Weapons = {
       }
       const canFire = (i) => m.reloadLeft[i] <= 0 && !m.blocked[i];
       // 状態: ready 撃てる（緑）/ moving 旋回中（黄）/ reload 装填中（赤）/ gray 射線が船体に当たる・近くまで寄せただけ / none 向けられない
+      // v89: none 指向不可（ほぼ黒）/ near 指向不可だが寄せている（グレー）/ blocked 指向できたが射線が当たる（白）
       if (m.mode === 'none') m.state = 'none';
-      else if (m.mode === 'near') m.state = 'gray';
+      else if (m.mode === 'near') m.state = 'near';
       else if (!settled) m.state = 'moving';
-      else if (m.blocked.every((x) => x)) m.state = 'gray';
+      else if (m.blocked.every((x) => x)) m.state = 'blocked';
       else if (m.barrels.some((b, i) => canFire(i))) m.state = 'ready';
       else m.state = 'reload';
+      // 砲身ごとの状態（装填の棒・小さな図の線の色）
+      m.barrelStates = m.barrels.map((b, i) => (m.state === 'none' || m.state === 'near' || m.state === 'moving' ? m.state
+        : m.blocked[i] ? 'blocked' : m.reloadLeft[i] > 0 ? 'reload' : 'ready'));
       if (m.onTarget) aimed++;
       if (m.state === 'ready') ready++;
     }
@@ -766,19 +779,20 @@ const Weapons = {
     // 砲身の線
     const a = s.lines.geometry.attributes.position;
     const ca = s.lines.geometry.attributes.color;
-    const colorOf = { ready: 0x3dff6e, moving: 0xffd84a, reload: 0xff4a3a, gray: 0x9aa1aa, none: 0x5c626b };
+    const colorOf = WEAPON_STATE_COLORS;
     const lc = new THREE.Color();
     const p = new THREE.Vector3(), q = new THREE.Quaternion(), d = new THREE.Vector3();
     const len = s.size * 0.32;
     let k = 0;
     for (const m of this.rig.mounts) {
-      for (const b of m.barrels) {
+      for (const [bi, b] of m.barrels.entries()) {
         b.node.getWorldPosition(p);
         b.node.getWorldQuaternion(q);
         d.set(0, 1, 0).applyQuaternion(q);
         p.x -= ship.position.x; p.y -= ship.position.y; p.z -= ship.position.z;
         // 線の色は、その砲の状態の色（狙っていなければ薄い黄色）
-        lc.setHex(this.aim.active ? (colorOf[m.state] || 0xfff0a0) : 0xfff0a0);
+        const bst = m.barrelStates ? m.barrelStates[bi] : m.state;
+        lc.setHex(this.aim.active ? (colorOf[bst] || 0xfff0a0) : 0xfff0a0);
         ca.setXYZ(k, lc.r, lc.g, lc.b); ca.setXYZ(k + 1, lc.r, lc.g, lc.b);
         a.setXYZ(k++, p.x, p.y, p.z);
         a.setXYZ(k++, p.x + d.x * len, p.y + d.y * len, p.z + d.z * len);
@@ -1218,14 +1232,14 @@ const Weapons = {
         m._lastState = st;
         m._chip.className = `wpn-chip st-${st}`;
         if (m._mark) m._mark.className = `wpn-gunmark st-${st}`;
-        // 向けられない砲の棒は濃い灰色の地に白い線
-        for (const bb of m._bars || []) bb.bar.classList.toggle('off', st === 'none');
       }
-      // 装填の割合（装填時間に対して、どこまで済んだか）
+      // 砲身ごとの装填の棒: 砲身の状態の色で、装填の済んだ割合だけ下から伸びる
       const rt = weaponReload(m.cfg);
       for (const bb of m._bars || []) {
         const k = Math.round(clamp(1 - m.reloadLeft[bb.i] / rt, 0, 1) * 100);
         if (k !== bb.last) { bb.last = k; bb.fill.style.height = `${k}%`; }
+        const bst = this.aim.active && m.barrelStates ? m.barrelStates[bb.i] : 'none';
+        if (bst !== bb.lastSt) { bb.lastSt = bst; bb.bar.className = `wpn-bar st-${bst}`; }
       }
     }
   },
