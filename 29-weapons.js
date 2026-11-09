@@ -676,7 +676,7 @@ const Weapons = {
     if (!this.rig || !ship || !ship.mesh) return;
     ship.mesh.updateMatrixWorld(true);
     this._time = (this._time || 0) + dt;
-    // v89: 演習の目標を動かし、照準の視点に写っている目標へ照準を合わせる（自動照準）
+    // v89: 演習の目標を動かし、見ている方向の半球にある目標へ照準を合わせる（自動照準）
     this._updateTargets(dt);
     this._updateLock();
     const dl = this.aimDirLocal();
@@ -1444,16 +1444,15 @@ const Weapons = {
     const dl = this.aimDirLocal();
     if (!dl) return;
     const D = new THREE.Vector3(dl.x, dl.y, dl.z);
-    const cone = toRadW(this._aimFov * 0.45); // 画面に写っている（中央からこの角度まで）
+    const cone = Math.PI / 2; // v89: 見ている方向の半球全体（中央から 90° まで）
     const angOf = (t) => Math.acos(clamp(t.pos.clone().sub(o).normalize().dot(D), -1, 1));
     if (this.lock && !this.lock.alive) this.lock = null;
-    // v89: 照準は「照準を合わせる」ボタンで合わせる（lockNearest）。ここでは合わせた目標を追い続けるだけ
     this._visibleTarget = null;
-    if (this.view) {
+    {
       let best = null, bestA = cone;
       for (const t of this.practice.targets) { if (!t.alive) continue; const a = angOf(t); if (a < bestA) { bestA = a; best = t; } }
       this._visibleTarget = best;
-      // v89: 視界に目標があれば自動で照準を合わせる（自分で照準を動かした直後の1.5秒は合わせない）
+      // v89: 見ている方向の半球に目標があれば自動で照準を合わせる（自分で照準を動かした直後の1.5秒は合わせない）
       if (!this.lock && best && !(this._noAutoLockUntil > this._time)) this.lock = best;
     }
     // 照準（狙う向き・画面の中央）を目標に合わせ続ける（照準の視点から戻っても）
@@ -1462,7 +1461,7 @@ const Weapons = {
       this.aim.dirU = this._toUniverse({ x: d.x, y: d.y, z: d.z });
     }
   },
-  // 「照準を合わせる」: 画面に写っている目標のうち、中央にいちばん近いものに照準を合わせる
+  // 見ている方向の半球の目標のうち、中央にいちばん近いものに照準を合わせる（テスト・ほかから呼ぶ用）
   lockNearest() {
     if (!this._visibleTarget) { this._updateLock(); }
     const t = this._visibleTarget;
@@ -1809,7 +1808,6 @@ const Weapons = {
       <button type="button" class="wpn-btn wpn-practice">演習</button>
       <div class="wpn-hp"><div class="wpn-hp-fill"></div><span class="wpn-hp-text"></span></div>
       <button type="button" class="wpn-btn wpn-maneuver">自動操艦</button>
-      <button type="button" class="wpn-btn wpn-lock">照準を合わせる</button>
       <button type="button" class="wpn-btn wpn-salvo">一斉射撃</button>
       <button type="button" class="wpn-btn wpn-fire">撃て</button>
       <button type="button" class="wpn-btn wpn-view">照準</button>
@@ -1854,14 +1852,11 @@ const Weapons = {
       this._flashStatus(this.autoManeuver ? '自動操艦: 目標の多い方へ、撃てる砲の多い向きに回します' : '自動操艦を切りました');
       this._syncUi();
     });
-    box.querySelector('.wpn-lock').addEventListener('click', () => {
-      this._flashStatus(this.lockNearest() ? '照準を目標に合わせました' : '画面に目標がありません');
-    });
     box.querySelector('.wpn-salvo').addEventListener('click', () => {
       const n = this.salvo();
       this._flashStatus(n ? (this.lock ? `一斉射撃: ${n}基が照準の目標へ` : `一斉射撃 ${n}門`) : '撃てる砲がありません');
     });
-    this._ui = { box, tmarks, hp: box.querySelector('.wpn-hp'), hpFill: box.querySelector('.wpn-hp-fill'), hpText: box.querySelector('.wpn-hp-text'), maneuverBtn: box.querySelector('.wpn-maneuver'), lockBtn: box.querySelector('.wpn-lock'), practice: box.querySelector('.wpn-practice'), salvoBtn: box.querySelector('.wpn-salvo'), groups: box.querySelector('.wpn-groups'), reticle, marks, chips, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
+    this._ui = { box, tmarks, hp: box.querySelector('.wpn-hp'), hpFill: box.querySelector('.wpn-hp-fill'), hpText: box.querySelector('.wpn-hp-text'), maneuverBtn: box.querySelector('.wpn-maneuver'), practice: box.querySelector('.wpn-practice'), salvoBtn: box.querySelector('.wpn-salvo'), groups: box.querySelector('.wpn-groups'), reticle, marks, chips, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
     this._syncUi();
   },
   // 砲塔ごとの小さな照準マーク（照準の視点）と、下の番号（装填・指向の状態）
@@ -2032,7 +2027,6 @@ const Weapons = {
     u.view.classList.toggle('active', this.view);
     u.stop.style.display = this.aim.active ? '' : 'none';
     if (u.salvoBtn) u.salvoBtn.style.display = this.aim.active ? '' : 'none';
-    if (u.lockBtn) u.lockBtn.style.display = this.view && this.practice ? '' : 'none';
     if (u.maneuverBtn) { u.maneuverBtn.style.display = this.practice ? '' : 'none'; u.maneuverBtn.classList.toggle('active', !!this.autoManeuver); }
     if (u.hp) u.hp.style.display = this.practice ? '' : 'none';
     if (u.practice) { u.practice.textContent = this.practice ? '演習をやめる' : '演習'; u.practice.classList.toggle('active', !!this.practice); }
@@ -2060,7 +2054,6 @@ const Weapons = {
     if (this._statusOverride && performance.now() < this._statusOverride.until) text = this._statusOverride.text;
     if (u.status.textContent !== text) u.status.textContent = text;
     u.fire.disabled = !(s.ready > 0);
-    if (u.lockBtn) u.lockBtn.disabled = !this._visibleTarget;
     for (const m of this.rig.mounts) {
       const st = this.aim.active ? m.state : 'none';
       if (m._chip && m._lastState !== st) {
