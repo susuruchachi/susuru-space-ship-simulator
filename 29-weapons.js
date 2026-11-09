@@ -1026,6 +1026,7 @@ const Weapons = {
   },
   _rotateAim(yaw, pitch) {
     this.lock = null; // 自分で照準を動かしたら、合わせていた目標から外す
+    this._noAutoLockUntil = (this._time || 0) + 1.5; // 少しのあいだ自動で合わせない（動かしている途中で引き戻されないように）
     const ship = State.ship;
     const dl = this.aimDirLocal();
     if (!ship || !dl) return;
@@ -1145,7 +1146,16 @@ const Weapons = {
     flash.frustumCulled = false;
     this._fx.add(flash);
     this._effects.push({ kind: 'flash', obj: flash, rel: { x: t.pos.x - ship.position.x, y: t.pos.y - ship.position.y, z: t.pos.z - ship.position.z }, t: 0, life: 0.6, mats: [fmat], boom: true });
-    if (this.lock === t) this.lock = null;
+    if (this.lock === t) {
+      // v89: 合わせていた目標を壊したら、近くに残っている目標（同じまとまりを先に）へ照準を合わせ直す
+      let best = null, bestD = Infinity;
+      for (const o of this.practice.targets) {
+        if (!o.alive) continue;
+        const d = o.pos.distanceTo(t.pos) * (o.group === t.group ? 1 : 3);
+        if (d < bestD && d < 15000) { bestD = d; best = o; }
+      }
+      this.lock = best;
+    }
     if (this.practice.alive === 0) this._flashStatus(`演習完了: 目標 ${this.practice.total}個を全部撃ちました`);
   },
   // 基準のフレームが変わったとき（16-navigation.js switchFrame）: 目標の位置・速度を新しいフレームへ写す
@@ -1188,6 +1198,8 @@ const Weapons = {
       let best = null, bestA = cone;
       for (const t of this.practice.targets) { if (!t.alive) continue; const a = angOf(t); if (a < bestA) { bestA = a; best = t; } }
       this._visibleTarget = best;
+      // v89: 視界に目標があれば自動で照準を合わせる（自分で照準を動かした直後の1.5秒は合わせない）
+      if (!this.lock && best && !(this._noAutoLockUntil > this._time)) this.lock = best;
     }
     // 照準（狙う向き・画面の中央）を目標に合わせ続ける（照準の視点から戻っても）
     if (this.lock) {
@@ -1328,6 +1340,8 @@ const Weapons = {
   // minCharge: レーザーの撃てる充電の割合（省略時は LASER_MIN_CHARGE）。実弾砲は装填が済んでいること
   _canFireBarrel(m, i, minCharge) {
     if (!m.onTarget || (m.blocked && m.blocked[i]) || m.rangeOk === false) return false;
+    // v89: 演習中は、照準が合っていても撃つ目標が無ければ撃たない
+    if (this._practiceOn() && !(m.target && m.target.alive)) return false;
     if (m.cfg.kind === 'laser') return this._charge(m, i) >= Math.max(this.LASER_MIN_CHARGE, (minCharge ?? 0) - 1e-9);
     return m.reloadLeft[i] <= 0;
   },
