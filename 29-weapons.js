@@ -915,17 +915,18 @@ const Weapons = {
   NEAR_MAX_DEG: 30, // ぴったり向けられない砲を寄せるのは、狙う向きからこの角度まで
   zoomBy(factor) {
     // 追尾中のピンチは、追尾の拡大の度合いを変える（追尾をやめれば元の倍率に戻る）
-    if (this.tracking) this._trackAdj = clamp((this._trackAdj || 1) * factor, 0.2, 10);
+    if (this.tracking && !this._viewMount) this._trackAdj = clamp((this._trackAdj || 1) * factor, 0.2, 10);
     else this._aimFov = clamp(this._aimFov * factor, this.AIM_FOV_MIN, this.AIM_FOV_MAX);
   },
   // v89: 照準で目標を追尾しているあいだ（照準が目標に合っている）は、目標が画面の高さの約 1/6 に見えるまで拡大する。
   //   パンで目標へ回している途中・追尾していないときは、ふだんの倍率へなめらかに戻す
   TRACK_FILL: 1 / 6,
-  _viewFov(eye, own) {
+  _viewFov(eye, own, noZoom) {
     const t = own || (this.lock && this.lock.alive && this._practiceOn() ? this.lock : null);
     this.tracking = !!(t && (own || !this.lockPanning));
     let want = this._aimFov;
-    if (this.tracking) {
+    // v89: 砲塔の視点では追尾しても拡大しない（ふつうの倍率のまま）
+    if (this.tracking && !noZoom) {
       const d = Math.max(1, t.pos.distanceTo(new THREE.Vector3(eye.x, eye.y, eye.z)));
       const ang = (2 * Math.atan((t.size || 50) / d) * 180) / Math.PI; // 目標の見かけの大きさ [deg]
       want = clamp((ang / this.TRACK_FILL) * (this._trackAdj || 1), this.AIM_FOV_MIN, Math.min(this.AIM_FOV_MAX, this._aimFov));
@@ -1017,6 +1018,7 @@ const Weapons = {
   //   距離の目盛り付きの薄い円。球の半径は自艦のいちばん長い射程（きりのよい値）。
   //   球の中の敵の艦隊（まとまり。ひとつだけ離れている攻撃機・駆逐艦は除く）を点で、球の外の艦隊はその方向を線で示す
   RADAR_MAX_R: 3000e3,
+  RADAR_MIN_R: 2000, // 拡大しても球の半径はこれより小さくしない [m]
   _niceStep(v) { const e = Math.pow(10, Math.floor(Math.log10(v))); const f = v / e; return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * e; },
   _buildInsetRadar(scene, rig, size) {
     // v89: 球の半径は自艦のいちばん長い射程（ただし 3,000 km まで）
@@ -1065,7 +1067,7 @@ const Weapons = {
     const far = new THREE.LineSegments(fgeo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.9, depthTest: false, depthWrite: false }));
     far.frustumCulled = false; far.renderOrder = 6;
     scene.add(far);
-    return { g, sphere, ring, dots, far, R, step, Rs, MAX, mats: [sphere.material, ring.material, dots.material, far.material], geos: [sphere.geometry, rgeo, dgeo, fgeo] };
+    return { g, sphere, ring, dots, far, R, step, n, Rs, MAX, Reff: R, Rcur: R, mats: [sphere.material, ring.material, dots.material, far.material], geos: [sphere.geometry, rgeo, dgeo, fgeo] };
   },
   // 演習の敵を艦隊（まとまり）に分ける: 互いに LINK m 以内でつながっているものを1つの艦隊に。
   //   ひとつだけ離れている攻撃機・駆逐艦は艦隊として数えない
@@ -1105,20 +1107,36 @@ const Weapons = {
     const c = ship.gravityDrive && ship.boundaryHeight ? rotateVecByQuat({ x: 0, y: ship.boundaryHeight, z: 0 }, ship.quaternion) : { x: 0, y: 0, z: 0 };
     r.g.position.set(c.x, c.y, c.z);
     r.g.quaternion.set(q.x, q.y, q.z, q.w);
-    const k = r.Rs / r.R;
+    // v89: 球の中の艦隊が中心のごく近くに固まっていて見分けにくいときは、球の半径を縮めて拡大する
+    //   （いちばん遠い艦隊が球の 7 割ほどに来る、きりのよい半径。目盛りの数は同じ。なめらかに変える）
+    const fleets = this._fleets();
+    let maxNear = 0;
+    for (const f of fleets) {
+      const d = Math.hypot(f.center.x - ship.position.x - c.x, f.center.y - ship.position.y - c.y, f.center.z - ship.position.z - c.z);
+      if (d <= r.R) maxNear = Math.max(maxNear, d);
+    }
+    let Reff = r.R;
+    if (maxNear > 0 && maxNear < r.R * 0.35) Reff = Math.min(r.R, Math.max(this.RADAR_MIN_R, this._niceStep((maxNear / 0.7) / r.n) * r.n));
+    // 少しの出入りで行ったり来たりしないように: 広げるのはすぐ、縮めるのは今の半径の 0.6 倍より内側に収まったときだけ
+    if (Reff < r.Reff && maxNear > r.Reff * 0.6 * 0.7) Reff = r.Reff;
+    r.Reff = Reff;
+    const dt = Math.min(this._dt || 0.016, 0.1);
+    r.Rcur = Math.exp(Math.log(r.Rcur) + (Math.log(Reff) - Math.log(r.Rcur)) * (1 - Math.exp(-dt / 0.4)));
+    const Rm = r.Rcur;
+    const k = r.Rs / Rm;
     const dp = r.dots.geometry.attributes.position, dc = r.dots.geometry.attributes.color;
     const fp = r.far.geometry.attributes.position, fc = r.far.geometry.attributes.color;
     const col = new THREE.Color();
     let nd = 0, nf = 0;
-    for (const f of this._fleets()) {
+    for (const f of fleets) {
       col.setHex(ENEMY_CLASSES[f.cls].color);
       const v = new THREE.Vector3(f.center.x - ship.position.x - c.x, f.center.y - ship.position.y - c.y, f.center.z - ship.position.z - c.z);
       const d = v.length();
-      if (d <= r.R && nd < r.MAX) {
+      if (d <= Rm && nd < r.MAX) {
         dp.setXYZ(nd, c.x + v.x * k, c.y + v.y * k, c.z + v.z * k);
         dc.setXYZ(nd, col.r, col.g, col.b);
         nd++;
-      } else if (d > r.R && nf < r.MAX) {
+      } else if (d > Rm && nf < r.MAX) {
         v.divideScalar(d);
         fp.setXYZ(nf * 2, c.x + v.x * r.Rs * 1.02, c.y + v.y * r.Rs * 1.02, c.z + v.z * r.Rs * 1.02);
         fp.setXYZ(nf * 2 + 1, c.x + v.x * r.Rs * 1.3, c.y + v.y * r.Rs * 1.3, c.z + v.z * r.Rs * 1.3);
@@ -1254,7 +1272,7 @@ const Weapons = {
     if (sc) {
       const fmt = (m) => (m >= 1000 ? `${+(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`);
       sc.style.display = radarOn ? '' : 'none';
-      if (radarOn) sc.textContent = `球 ${fmt(s.radar.R)}・目盛り ${fmt(s.radar.step)}・艦隊 ${s.radar.counts.near}／外 ${s.radar.counts.far}`;
+      if (radarOn) sc.textContent = `${s.radar.Reff < s.radar.R ? '拡大 ' : ''}球 ${fmt(s.radar.Reff)}・目盛り ${fmt(s.radar.Reff / s.radar.n)}・艦隊 ${s.radar.counts.near}／外 ${s.radar.counts.far}`;
     }
     s.camera.aspect = w / h;
     // 演習中は少し上から見下ろす（水平面の目盛りの円が線にならないように）
@@ -1338,7 +1356,7 @@ const Weapons = {
     cam.position.set(p.x, p.y, p.z);
     cam.up.set(up.x, up.y, up.z);
     cam.lookAt(p.x + look.x, p.y + look.y, p.z + look.z);
-    const fov = this._viewFov(p, lookT);
+    const fov = this._viewFov(p, lookT, !!vm);
     if (Math.abs(cam.fov - fov) > 1e-6) { cam.fov = fov; cam.updateProjectionMatrix(); }
     const el = this._ui && this._ui.reticle;
     if (el) { el.style.left = '50%'; el.style.top = '50%'; el.classList.toggle('tracking', !!this.tracking); }
