@@ -66,6 +66,23 @@
     if (s >= 120) return `${(s / 60).toFixed(1)} 分`;
     return `${s.toFixed(s < 10 ? 1 : 0)} 秒`;
   }
+  // v89: 速さの単位（最高速度・内空航行の最高船速で選べる。保存する値は m/s・IKn のまま）
+  const SPEED_UNITS = {
+    ms: { label: 'm/s', m: 1 },
+    ikn: { label: 'IKn', m: SHIP_IKN },
+    c: { label: '光速', m: 299792458 },
+  };
+  function speedUnitsOf(d) {
+    const u = (d && d.speedUnits) || {};
+    return { maxSpeed: SPEED_UNITS[u.maxSpeed] ? u.maxSpeed : 'ms', interspace: SPEED_UNITS[u.interspace] ? u.interspace : 'ikn' };
+  }
+  // 単位を変えた値を入力欄へ（有効桁 6 桁、指数表記にしない）
+  function speedInputValue(v) {
+    if (!Number.isFinite(v) || v <= 0) return '';
+    const t = Number(v.toPrecision(6));
+    return t >= 1e-6 ? String(t) : t.toFixed(12).replace(/0+$/, '');
+  }
+
   // 入力欄に入れる数値（そこそこの有効桁で、指数表記にしない）
   function inputValue(v) {
     if (!Number.isFinite(v)) return '';
@@ -786,7 +803,11 @@
     $('dimsLine').textContent = `全長 ${fmtLen(d.z)} × 全幅 ${fmtLen(d.x)} × 全高 ${fmtLen(d.y)}`;
 
     if (document.activeElement !== $('massInput')) $('massInput').value = inputValue(design.mass / 1000);
-    if (document.activeElement !== $('maxSpeedInput')) $('maxSpeedInput').value = design.maxSpeed > 0 ? inputValue(design.maxSpeed) : '';
+    {
+      const su = speedUnitsOf(design);
+      $('maxSpeedUnit').value = su.maxSpeed;
+      if (document.activeElement !== $('maxSpeedInput')) $('maxSpeedInput').value = design.maxSpeed > 0 ? speedInputValue(design.maxSpeed / SPEED_UNITS[su.maxSpeed].m) : '';
+    }
     if (document.activeElement !== $('maxAccelInput')) $('maxAccelInput').value = design.maxAccel > 0 ? inputValue(design.maxAccel) : '';
     if (document.activeElement !== $('maxAngInput')) $('maxAngInput').value = inputValue(design.maxAngularSpeed * 180 / Math.PI);
     if (document.activeElement !== $('inertiaInput')) $('inertiaInput').value = inputValue(design.inertiaFactor);
@@ -1069,9 +1090,11 @@
     const top = design.hull.dims.y / 2;
     const isp = shipDesignInterspace(design);
     if (isp) {
-      $('isMaxIknInput').placeholder = `自動（${isp.defaults.maxIKn}）`;
+      const su = speedUnitsOf(design);
+      $('isMaxIknUnit').value = su.interspace;
+      $('isMaxIknInput').placeholder = `自動（${speedInputValue((isp.defaults.maxIKn * SHIP_IKN) / SPEED_UNITS[su.interspace].m)}）`;
       $('isMaxCompInput').placeholder = `自動（${isp.defaults.maxCompression.toLocaleString('ja-JP')}）`;
-      if (document.activeElement !== $('isMaxIknInput')) $('isMaxIknInput').value = design.interspace.maxIKn > 0 ? inputValue(design.interspace.maxIKn) : '';
+      if (document.activeElement !== $('isMaxIknInput')) $('isMaxIknInput').value = design.interspace.maxIKn > 0 ? speedInputValue((design.interspace.maxIKn * SHIP_IKN) / SPEED_UNITS[su.interspace].m) : '';
       if (document.activeElement !== $('isMaxCompInput')) $('isMaxCompInput').value = design.interspace.maxCompression >= 1 ? String(design.interspace.maxCompression) : '';
       const vEff = isp.maxSpeed * isp.maxCompression;
       const c = 299792458;
@@ -1087,7 +1110,8 @@
   // v86: 内空航法の性能
   $('isMaxIknInput').addEventListener('change', () => {
     const v = Number($('isMaxIknInput').value);
-    design.interspace.maxIKn = $('isMaxIknInput').value === '' || !(v > 0) ? null : v;
+    // 選んでいる単位の値 → IKn
+    design.interspace.maxIKn = $('isMaxIknInput').value === '' || !(v > 0) ? null : (v * SPEED_UNITS[speedUnitsOf(design).interspace].m) / SHIP_IKN;
     onPhysicsEdit();
   });
   $('isMaxCompInput').addEventListener('change', () => {
@@ -1129,9 +1153,19 @@
   // v85: 空欄 = 無制限（最高速度）・制限なし（最大加速度）
   $('maxSpeedInput').addEventListener('change', () => {
     const v = Number($('maxSpeedInput').value);
-    design.maxSpeed = $('maxSpeedInput').value === '' || !(v > 0) ? null : Math.max(1, v);
+    // 選んでいる単位の値 → m/s
+    design.maxSpeed = $('maxSpeedInput').value === '' || !(v > 0) ? null : Math.max(1, v * SPEED_UNITS[speedUnitsOf(design).maxSpeed].m);
     onPhysicsEdit();
   });
+  // v89: 速さの単位を選ぶ（値はそのまま、表示だけ換算する。選んだ単位は設計に覚えておく）
+  for (const [id, key, order] of [['maxSpeedUnit', 'maxSpeed', ['ms', 'ikn', 'c']], ['isMaxIknUnit', 'interspace', ['ikn', 'ms', 'c']]]) {
+    for (const k of order) $(id).appendChild(new Option(SPEED_UNITS[k].label, k));
+    $(id).addEventListener('change', () => {
+      design.speedUnits = { ...speedUnitsOf(design), [key]: $(id).value };
+      markDirty();
+      syncUi();
+    });
+  }
   $('maxAccelInput').addEventListener('change', () => {
     const v = Number($('maxAccelInput').value);
     design.maxAccel = $('maxAccelInput').value === '' || !(v > 0) ? null : v;
