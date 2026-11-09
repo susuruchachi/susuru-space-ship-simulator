@@ -505,6 +505,7 @@
   .wpn-editor .axis-row { grid-template-columns: 36px 1fr 48px; }
   .pod-chip.grp-chip { border-color: rgba(255,210,120,0.55); background: rgba(255,210,120,0.08); color: #ffe6b0; }
   .pod-chip.grp-chip.selected { background: rgba(255,210,120,0.35); color: #fff; }
+  .pod-chip.grp-chip.sub { font-size: 10px; }
   .pod-chip.grp-chip.auto::after { content: ' ●自動'; color: #7dff9a; }
   .pod-editor.wpn-editor { background: rgba(255,120,90,0.05); border-color: rgba(255,120,90,0.22); }
   .wpn-range { display: flex; align-items: center; gap: 4px; color: #9fb3c8; }
@@ -1031,6 +1032,10 @@
           <label for="wpnGroupName">グループ名</label>
           <input type="text" id="wpnGroupName" class="text-input" maxlength="20">
         </div>
+        <div class="field-row">
+          <label for="wpnGroupParent">親のグループ</label>
+          <select id="wpnGroupParent" class="text-input"></select>
+        </div>
         <div class="field-row wpn-range-row">
           <label>砲身の仰角</label>
           <span class="wpn-range"><input type="number" id="wpnGroupElevMin" class="num-input" min="-90" max="90" step="any"> 〜 <input type="number" id="wpnGroupElevMax" class="num-input" min="-90" max="90" step="any"></span>
@@ -1039,15 +1044,19 @@
         <div class="btn-row">
           <button type="button" id="wpnGroupElevBtn">この仰角をグループ全部にそろえる</button>
         </div>
-        <label class="check-row"><input type="checkbox" id="wpnGroupAuto"> 自動射撃（ゲームを始めたときに入れておく）</label>
-        <div class="field-row">
-          <label for="wpnGroupPower">自動射撃の出力</label>
-          <input type="number" id="wpnGroupPower" class="num-input" min="1" max="100" step="1">
-          <span class="unit">%</span>
+        <div id="wpnGroupAutoRow">
+          <label class="check-row"><input type="checkbox" id="wpnGroupAuto"> 自動射撃（ゲームを始めたときに入れておく）</label>
+          <div class="field-row">
+            <label for="wpnGroupPower">自動射撃の出力</label>
+            <input type="number" id="wpnGroupPower" class="num-input" min="1" max="100" step="1">
+            <span class="unit">%</span>
+          </div>
         </div>
+        <p class="hint" id="wpnGroupSubNote" style="display:none;">このグループは、ほかのグループの中のグループです。ゲームのボタンと自動射撃は、最上位のグループでまとめて切り替えます。</p>
         <p class="hint">レーザー砲は充電の途中でも撃てます（充電の割合だけ光線が細くなります）。ゲームのグループのボタンで、自動射撃を「切 → 最大 → この出力」と切り替えられます。「最大」は満タンになるたびに、「この出力」は充電がこの割合になるたびに撃ちます（実弾砲は装填が済むたび）。</p>
         <div class="btn-row">
           <button type="button" id="wpnGroupAddBtn">＋ 新しいグループ</button>
+          <button type="button" id="wpnGroupAddChildBtn">＋ この中にグループ</button>
           <button type="button" id="wpnGroupDelBtn" class="danger">このグループを消す</button>
         </div>
       </div>

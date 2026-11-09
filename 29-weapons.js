@@ -32,6 +32,7 @@ const WEAPON_STATE_COLORS = {
   blocked: 0xf2f4f6, // 指向できたが射線が船体・ほかの砲に当たる（白）
   near: 0x8a9099,    // 指向不可だが近くまで寄せている（グレー）
   none: 0x24272c,    // 指向不可（ほぼ黒）
+  indep: 0xff9a2e,   // 独立して別の目標を撃っている（橙）
 };
 const WEAPON_KINDS = { kinetic: '実弾砲', laser: 'レーザー砲' };
 const WEAPON_TYPES = {
@@ -151,8 +152,35 @@ function normalizeShipWeapons(w) {
     id: String(g.id), name: String(g.name || 'グループ').slice(0, 20), autoFire: !!g.autoFire,
     // v89: 自動射撃の出力（レーザー。充電がこの割合になったら撃つ）[%]
     autoPower: Number(g.autoPower) >= 1 ? Math.min(100, Math.round(Number(g.autoPower))) : 50,
+    // v89: 親のグループ（グループの中のグループ。null なら最上位）
+    parent: typeof g.parent === 'string' && g.parent && g.parent !== String(g.id) ? g.parent : null,
   }));
   return { mounts, directors, groups };
+}
+
+// v89: グループの入れ子。最上位のグループ（親をたどった先。輪になっていても止まる）
+function weaponTopGroupId(weapons, id) {
+  const byId = new Map((weapons.groups || []).map((g) => [g.id, g]));
+  let g = byId.get(id);
+  for (let i = 0; g && g.parent && byId.has(g.parent) && i < 16; i++) g = byId.get(g.parent);
+  return g ? g.id : id;
+}
+// id とその中のグループ全部の id
+function weaponGroupAndDescendants(weapons, id) {
+  const out = new Set([id]);
+  for (let changed = true, n = 0; changed && n < 16; n++) {
+    changed = false;
+    for (const g of weapons.groups || []) if (g.parent && out.has(g.parent) && !out.has(g.id)) { out.add(g.id); changed = true; }
+  }
+  return out;
+}
+// 表示用の名前（「主砲 › 前部」）
+function weaponGroupPath(weapons, id) {
+  const byId = new Map((weapons.groups || []).map((g) => [g.id, g]));
+  const names = [];
+  let g = byId.get(id);
+  for (let i = 0; g && i < 16; i++) { names.unshift(g.name); g = g.parent ? byId.get(g.parent) : null; }
+  return names.join(' › ');
 }
 
 // v89: 名前から最初のグループ分け（「1番主砲」→主砲、「14cm第1副砲」→副砲）
@@ -522,11 +550,14 @@ const Weapons = {
     if (this._occ) for (const m of rig.mounts) for (const b of m.barrels) b.length = this._occ.barrelLen.get(b.node) || null;
     try { this._buildInset(modelRoot, rig); } catch (e) { console.warn('照準の小さな艦の図の準備に失敗しました', e); this._inset = null; }
     // 自動射撃: mode 'off' 切 / 'max' 最大（満タンで撃つ）/ 'set' 設定した出力（レーザーがその割合まで充電できたら撃つ）
-    this.groups = this.cfg.groups.map((g) => {
-      const mounts = rig.mounts.filter((m) => m.groupId === g.id);
+    // v89: ゲームのボタンは最上位のグループだけ（中のグループの砲は、最上位のグループの自動射撃に従う）
+    for (const m of rig.mounts) m.topGroupId = weaponTopGroupId(this.cfg, m.groupId);
+    this.groups = this.cfg.groups.filter((g) => !g.parent || weaponTopGroupId(this.cfg, g.id) === g.id).map((g) => {
+      const mounts = rig.mounts.filter((m) => m.topGroupId === g.id);
       return { id: g.id, name: g.name, mode: g.autoFire ? 'max' : 'off', power: g.autoPower, mounts, hasLaser: mounts.some((m) => m.cfg.kind === 'laser') };
     }).filter((g) => g.mounts.length);
     this._groupById = new Map(this.groups.map((g) => [g.id, g]));
+    for (const m of rig.mounts) m.groupId = m.topGroupId;
     this._mainCaliber = Math.max(...rig.mounts.map((m) => m.cfg.caliber), 0);
     this._buildMountUi();
     this._buildGroupUi();
@@ -657,12 +688,14 @@ const Weapons = {
       else if (m.mode === 'near') m.state = 'near';
       else if (!settled) m.state = 'moving';
       else if (m.blocked.every((x) => x)) m.state = 'blocked';
+      else if (m.target && m.target !== this.lock) m.state = 'indep'; // v89: 独立して別の目標を撃っている（橙）
       else if (m.barrels.some((b, i) => canFire(i))) m.state = 'ready';
       else m.state = 'reload';
       // 砲身ごとの状態（装填の棒・小さな図の線の色）
       // v89: 自動射撃を「N%」にしているレーザーは、充電が N% になったら撃てる（緑）とする
       const fullCh = this._fullCharge(m);
       m.barrelStates = m.barrels.map((b, i) => (m.state === 'none' || m.state === 'near' || m.state === 'moving' ? m.state
+        : m.state === 'indep' ? (m.blocked[i] ? 'blocked' : 'indep')
         : m.blocked[i] ? 'blocked' : (m.cfg.kind === 'laser' ? this._charge(m, i) < fullCh - 1e-9 : m.reloadLeft[i] > 0) ? 'reload' : 'ready'));
       if (m.onTarget) aimed++;
       if (m.barrels.some((b, i) => this._canFireBarrel(m, i))) ready++;
@@ -939,6 +972,7 @@ const Weapons = {
     window.addEventListener('mouseup', () => end('mouse'));
   },
   _rotateAim(yaw, pitch) {
+    this.lock = null; // 自分で照準を動かしたら、合わせていた目標から外す
     const ship = State.ship;
     const dl = this.aimDirLocal();
     if (!ship || !dl) return;
@@ -1094,17 +1128,28 @@ const Weapons = {
     const D = new THREE.Vector3(dl.x, dl.y, dl.z);
     const cone = toRadW(this._aimFov * 0.45); // 画面に写っている（中央からこの角度まで）
     const angOf = (t) => Math.acos(clamp(t.pos.clone().sub(o).normalize().dot(D), -1, 1));
-    if (this.lock && (!this.lock.alive || (this.view && angOf(this.lock) > cone * 1.2))) this.lock = null;
-    if (!this.lock && this.view) {
+    if (this.lock && !this.lock.alive) this.lock = null;
+    // v89: 照準は「照準を合わせる」ボタンで合わせる（lockNearest）。ここでは合わせた目標を追い続けるだけ
+    this._visibleTarget = null;
+    if (this.view) {
       let best = null, bestA = cone;
       for (const t of this.practice.targets) { if (!t.alive) continue; const a = angOf(t); if (a < bestA) { bestA = a; best = t; } }
-      this.lock = best;
+      this._visibleTarget = best;
     }
     // 照準（狙う向き・画面の中央）を目標に合わせ続ける（照準の視点から戻っても）
     if (this.lock) {
       const d = this.lock.pos.clone().sub(o).normalize();
       this.aim.dirU = this._toUniverse({ x: d.x, y: d.y, z: d.z });
     }
+  },
+  // 「照準を合わせる」: 画面に写っている目標のうち、中央にいちばん近いものに照準を合わせる
+  lockNearest() {
+    if (!this._visibleTarget) { this._updateLock(); }
+    const t = this._visibleTarget;
+    if (!t) return false;
+    this.lock = t;
+    this._updateLock();
+    return true;
   },
   _groupMode(m) { const g = this._groupById && this._groupById.get(m.groupId); return g ? g.mode : 'off'; },
   // 偏差: 砲から目標を、その砲の弾が当たる向き（目標が動く分を先取り）。レーザーはまっすぐ
@@ -1425,6 +1470,7 @@ const Weapons = {
       <div class="wpn-status"></div>
       <div class="wpn-groups"></div>
       <button type="button" class="wpn-btn wpn-practice">演習</button>
+      <button type="button" class="wpn-btn wpn-lock">照準を合わせる</button>
       <button type="button" class="wpn-btn wpn-salvo">一斉射撃</button>
       <button type="button" class="wpn-btn wpn-fire">撃て</button>
       <button type="button" class="wpn-btn wpn-view">照準</button>
@@ -1463,11 +1509,14 @@ const Weapons = {
     box.querySelector('.wpn-practice').addEventListener('click', () => {
       if (this.practice) { this.stopPractice(); this._flashStatus('演習をやめました'); } else this.startPractice();
     });
+    box.querySelector('.wpn-lock').addEventListener('click', () => {
+      this._flashStatus(this.lockNearest() ? '照準を目標に合わせました' : '画面に目標がありません');
+    });
     box.querySelector('.wpn-salvo').addEventListener('click', () => {
       const n = this.salvo();
       this._flashStatus(n ? (this.lock ? `一斉射撃: ${n}基が照準の目標へ` : `一斉射撃 ${n}門`) : '撃てる砲がありません');
     });
-    this._ui = { box, tmarks, practice: box.querySelector('.wpn-practice'), salvoBtn: box.querySelector('.wpn-salvo'), groups: box.querySelector('.wpn-groups'), reticle, marks, chips, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
+    this._ui = { box, tmarks, lockBtn: box.querySelector('.wpn-lock'), practice: box.querySelector('.wpn-practice'), salvoBtn: box.querySelector('.wpn-salvo'), groups: box.querySelector('.wpn-groups'), reticle, marks, chips, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
     this._syncUi();
   },
   // 砲塔ごとの小さな照準マーク（照準の視点）と、下の番号（装填・指向の状態）
@@ -1542,6 +1591,19 @@ const Weapons = {
     const u = this._ui;
     if (!u || !this.practice) return;
     u.tmarks.innerHTML = '';
+    // v89: 目標のまとまりごとの橙の枠と、画面の外なら端の矢印（自動航行の目的地と同じ見た目）
+    this.practice.clusters = [];
+    for (let gi = 0; gi < this.PRACTICE_GROUPS; gi++) {
+      const frame = document.createElement('div');
+      frame.className = 'space-target-marker wpn-cluster';
+      frame.innerHTML = '<div class="stm-corner tl"></div><div class="stm-corner tr"></div><div class="stm-corner bl"></div><div class="stm-corner br"></div><div class="stm-text"></div>';
+      const arrow = document.createElement('div');
+      arrow.className = 'space-target-arrow wpn-cluster-arrow';
+      arrow.textContent = '➤';
+      u.tmarks.appendChild(frame);
+      u.tmarks.appendChild(arrow);
+      this.practice.clusters.push({ gi, frame, text: frame.querySelector('.stm-text'), arrow, name: `目標群${'ABCDEFGH'[gi]}` });
+    }
     for (const t of this.practice.targets) {
       const el = document.createElement('div');
       el.className = `wpn-tmark${t.moving ? ' moving' : ''}`;
@@ -1553,6 +1615,38 @@ const Weapons = {
     if (!this.practice) return;
     const v = new THREE.Vector3();
     const W = window.innerWidth, H = window.innerHeight;
+    // まとまりの枠: 生き残っている目標を囲む（画面の外なら、まとまりの中心の向きに端の矢印）
+    const camQ = cam.quaternion.clone().invert();
+    for (const c of this.practice.clusters || []) {
+      const alive = this.practice.targets.filter((t) => t.group === c.gi && t.alive);
+      if (!alive.length) { c.frame.style.display = 'none'; c.arrow.style.display = 'none'; continue; }
+      const center = alive.reduce((a, t) => a.add(t.pos), new THREE.Vector3()).multiplyScalar(1 / alive.length);
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, inView = 0;
+      for (const t of alive) {
+        v.copy(t.pos).project(cam);
+        if (v.z > 1 || Math.abs(v.x) > 1 || Math.abs(v.y) > 1) continue;
+        inView++;
+        const sx = ((v.x + 1) / 2) * W, sy = ((1 - v.y) / 2) * H;
+        x0 = Math.min(x0, sx); x1 = Math.max(x1, sx); y0 = Math.min(y0, sy); y1 = Math.max(y1, sy);
+      }
+      const dist = center.distanceTo(cam.position);
+      if (inView) {
+        const pad = 14;
+        c.frame.style.display = 'block';
+        c.frame.style.width = `${Math.max(26, x1 - x0 + pad * 2)}px`;
+        c.frame.style.height = `${Math.max(26, y1 - y0 + pad * 2)}px`;
+        c.frame.style.transform = `translate(${Math.round(Math.min(x0 - pad, (x0 + x1) / 2 - 13))}px, ${Math.round(Math.min(y0 - pad, (y0 + y1) / 2 - 13))}px)`;
+        c.text.textContent = `${c.name} 残り${alive.length} ${dist >= 1000 ? (dist / 1000).toFixed(1) + ' km' : Math.round(dist) + ' m'}`;
+        c.arrow.style.display = 'none';
+      } else {
+        c.frame.style.display = 'none';
+        const rel = center.clone().sub(cam.position).applyQuaternion(camQ); // カメラから見た向き（-Z が前）
+        const ang = Math.atan2(-rel.y, rel.x);
+        const r = Math.min(W, H) * 0.42;
+        c.arrow.style.display = 'block';
+        c.arrow.style.transform = `translate(${Math.round(W / 2 + Math.cos(ang) * r - 10)}px, ${Math.round(H / 2 + Math.sin(ang) * r - 10)}px) rotate(${ang}rad)`;
+      }
+    }
     for (const t of this.practice.targets) {
       const el = t.el;
       if (!el) continue;
@@ -1593,6 +1687,7 @@ const Weapons = {
     u.view.classList.toggle('active', this.view);
     u.stop.style.display = this.aim.active ? '' : 'none';
     if (u.salvoBtn) u.salvoBtn.style.display = this.aim.active ? '' : 'none';
+    if (u.lockBtn) u.lockBtn.style.display = this.view && this.practice ? '' : 'none';
     if (u.practice) { u.practice.textContent = this.practice ? '演習をやめる' : '演習'; u.practice.classList.toggle('active', !!this.practice); }
     if (u.tmarks) u.tmarks.style.display = has && this.view && this.practice ? '' : 'none';
     u.fire.style.display = this.aim.active ? '' : 'none';
@@ -1612,6 +1707,7 @@ const Weapons = {
     if (this._statusOverride && performance.now() < this._statusOverride.until) text = this._statusOverride.text;
     if (u.status.textContent !== text) u.status.textContent = text;
     u.fire.disabled = !(s.ready > 0);
+    if (u.lockBtn) u.lockBtn.disabled = !this._visibleTarget;
     for (const m of this.rig.mounts) {
       const st = this.aim.active ? m.state : 'none';
       if (m._chip && m._lastState !== st) {
@@ -1704,10 +1800,11 @@ const WeaponDesigner = {
       this._opts.onChange();
       this.refresh();
     });
-    $('wpnGroupAddBtn').addEventListener('click', () => {
+    const addGroup = (asChild) => {
       const d = this._opts.getDesign();
       const n = d.weapons.groups.reduce((mx, g) => Math.max(mx, Number(/^g(\d+)$/.exec(g.id)?.[1] || 0)), 0) + 1;
-      const g = { id: `g${n}`, name: `グループ${n}`, autoFire: false };
+      const parent = asChild ? this._selGroup : null;
+      const g = { id: `g${n}`, name: `グループ${n}`, autoFire: false, autoPower: 50, parent };
       d.weapons.groups.push(g);
       this._selGroup = g.id;
       // 選んでいる砲塔があれば、新しいグループへ移す
@@ -1715,16 +1812,21 @@ const WeaponDesigner = {
       if (part && part.kind === 'mount') { const c = weaponMountConfigFor(d.weapons, part.key); c.group = g.id; d.weapons.mounts[part.key] = c; }
       this._opts.onChange();
       this.refresh();
-    });
+    };
+    $('wpnGroupAddBtn').addEventListener('click', () => addGroup(false));
+    $('wpnGroupAddChildBtn').addEventListener('click', () => addGroup(true));
+    // v89: 親のグループ（既存のグループを、ほかのグループの中へ入れられる）
+    $('wpnGroupParent').addEventListener('change', () => this._editGroup((g) => { g.parent = $('wpnGroupParent').value || null; }));
     $('wpnGroupDelBtn').addEventListener('click', () => {
       const d = this._opts.getDesign();
       const g = this._currentGroup();
       if (!g || d.weapons.groups.length <= 1) return;
-      if (!confirm(`グループ「${g.name}」を消しますか？（中の砲塔は、名前から決まるグループへ移ります）`)) return;
+      if (!confirm(`グループ「${g.name}」を消しますか？（中の砲塔・グループは、${g.parent ? '親のグループ' : '名前から決まるグループ'}へ移ります）`)) return;
       d.weapons.groups = d.weapons.groups.filter((x) => x.id !== g.id);
+      for (const x of d.weapons.groups) if (x.parent === g.id) x.parent = g.parent || null;
       for (const m of this._rig.mounts) {
         const c = weaponMountConfigFor(d.weapons, m.key);
-        if (c.group === g.id) { c.group = null; d.weapons.mounts[m.key] = c; }
+        if (c.group === g.id) { c.group = g.parent || null; d.weapons.mounts[m.key] = c; }
       }
       this._selGroup = null;
       this._opts.onChange();
@@ -1799,9 +1901,24 @@ const WeaponDesigner = {
     const d = this._opts.getDesign();
     return (d.weapons.groups || []).find((g) => g.id === this._selGroup) || null;
   },
+  // グループ id の砲塔（中のグループの砲塔も含む）
   _groupMounts(id) {
     const d = this._opts.getDesign();
-    return this._rig.mounts.filter((m) => weaponMountConfigFor(d.weapons, m.key).group === id);
+    const ids = weaponGroupAndDescendants(d.weapons, id);
+    return this._rig.mounts.filter((m) => ids.has(weaponMountConfigFor(d.weapons, m.key).group));
+  },
+  // 表示の順（親の次にその中のグループ）と深さ
+  _groupTree(groups) {
+    const out = [];
+    const ids = new Set(groups.map((g) => g.id));
+    const visit = (g, depth) => {
+      if (out.some((x) => x.g === g) || depth > 8) return;
+      out.push({ g, depth });
+      for (const c of groups) if (c.parent === g.id) visit(c, depth + 1);
+    };
+    for (const g of groups) if (!g.parent || !ids.has(g.parent)) visit(g, 0);
+    for (const g of groups) if (!out.some((x) => x.g === g)) out.push({ g, depth: 0 }); // 輪になっていたら最上位として出す
+    return out;
   },
   _editGroup(fn) {
     const g = this._currentGroup();
@@ -1862,15 +1979,17 @@ const WeaponDesigner = {
     if (!groups.some((g) => g.id === this._selGroup)) this._selGroup = groups.length ? groups[0].id : null;
     const gl = $('wpnGroupList');
     gl.innerHTML = '';
-    for (const g of groups) {
+    const tree = this._groupTree(groups);
+    for (const { g, depth } of tree) {
       const b = document.createElement('button');
       b.type = 'button';
-      const n = rig.mounts.filter((m) => weaponMountConfigFor(design.weapons, m.key).group === g.id).length;
-      b.className = `pod-chip grp-chip${g.id === this._selGroup ? ' selected' : ''}${g.autoFire ? ' auto' : ''}`;
-      b.textContent = `${g.name}（${n}基）`;
+      const n = this._groupMounts(g.id).length;
+      b.className = `pod-chip grp-chip${g.id === this._selGroup ? ' selected' : ''}${!g.parent && g.autoFire ? ' auto' : ''}${depth ? ' sub' : ''}`;
+      b.style.marginLeft = depth ? `${depth * 14}px` : '';
+      b.textContent = `${depth ? '└ ' : ''}${g.name}（${n}基）`;
       b.addEventListener('click', () => {
         this._selGroup = g.id;
-        const first = rig.mounts.find((m) => weaponMountConfigFor(design.weapons, m.key).group === g.id);
+        const first = this._groupMounts(g.id)[0];
         if (first) this._select('mount', first.key);
         else { this._sel = null; this._groupLocked = true; this.refresh(); }
       });
@@ -1882,7 +2001,18 @@ const WeaponDesigner = {
       if (document.activeElement !== $('wpnGroupName')) $('wpnGroupName').value = cg.name;
       $('wpnGroupAuto').checked = !!cg.autoFire;
       if (document.activeElement !== $('wpnGroupPower')) $('wpnGroupPower').value = String(cg.autoPower ?? 50);
-      const members = rig.mounts.filter((m) => weaponMountConfigFor(design.weapons, m.key).group === cg.id);
+      const members = this._groupMounts(cg.id);
+      // 親のグループの選択肢（自分と自分の中のグループは選べない）
+      const own = weaponGroupAndDescendants(design.weapons, cg.id);
+      const ps = $('wpnGroupParent');
+      ps.innerHTML = '';
+      ps.appendChild(new Option('なし（最上位）', ''));
+      for (const { g, depth } of tree) if (!own.has(g.id)) ps.appendChild(new Option(`${'　'.repeat(depth)}${g.name}`, g.id));
+      ps.value = cg.parent || '';
+      // 自動射撃は最上位のグループで決める
+      const top = !cg.parent;
+      $('wpnGroupAutoRow').style.display = top ? '' : 'none';
+      $('wpnGroupSubNote').style.display = top ? 'none' : '';
       if (members.length && document.activeElement !== $('wpnGroupElevMin') && document.activeElement !== $('wpnGroupElevMax')) {
         const c0 = weaponMountConfigFor(design.weapons, members[0].key);
         $('wpnGroupElevMin').value = String(c0.elevMin);
@@ -1892,7 +2022,7 @@ const WeaponDesigner = {
     }
     const gs = $('wpnGroupSel');
     gs.innerHTML = '';
-    for (const g of groups) gs.appendChild(new Option(g.name, g.id));
+    for (const { g } of tree) gs.appendChild(new Option(weaponGroupPath(design.weapons, g.id), g.id));
     // v89: 砲塔・射撃レーダーはプルダウンで選ぶ（数が多いので）。グループごとに見出し（optgroup）で分ける
     const sel = $('wpnPartSel');
     sel.innerHTML = '';
@@ -1901,9 +2031,9 @@ const WeaponDesigner = {
       this._sel = { kind: 'mount', key: first.key };
     }
     if (locked && !this._sel) sel.appendChild(new Option('（このグループに砲塔はありません）', ''));
-    for (const g of groups) {
+    for (const { g } of tree) {
       const og = document.createElement('optgroup');
-      og.label = g.name;
+      og.label = weaponGroupPath(design.weapons, g.id);
       for (const m of rig.mounts) {
         const c = weaponMountConfigFor(design.weapons, m.key);
         if (c.group !== g.id) continue;
