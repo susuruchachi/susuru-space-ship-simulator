@@ -1843,6 +1843,14 @@ const Weapons = {
     }
     this._renderDamageUi(true);
   },
+  // v89: 修理の速さ: 修理班（同時に修理できる数ぶん）を、修理中の箇所に割り振る。修理中の箇所が少ないほど
+  //   1か所に多くの人員を回せるので速い（20か所なら 1倍、10か所 1.25倍、5か所 1.75倍、2か所以下 4倍まで）
+  REPAIR_SPEED_MAX: 4,
+  _repairSpeed(n) {
+    if (n === undefined) n = this._dmg ? this._dmg.parts.filter((x) => x.repair).length : 0;
+    const crews = this.REPAIR_MAX / Math.max(1, n);
+    return Math.min(this.REPAIR_SPEED_MAX, 1 + (crews - 1) * 0.25);
+  },
   _repairTime(pt) { return this.REPAIR_MIN_S + (this.REPAIR_MAX_S - this.REPAIR_MIN_S) * clamp(1 - pt.hp / pt.max, 0, 1); },
   startRepair(key, quiet) {
     const D = this._dmg;
@@ -1978,11 +1986,12 @@ const Weapons = {
     // 自動修理: 空きがあれば、傷みのひどいところから始める（0.5秒ごと）
     D.autoT = (D.autoT || 0) - dt;
     if (this.autoRepair && D.autoT <= 0) { D.autoT = 0.5; if (this.repairAll(true)) this._renderDamageUi(); }
-    // 修理
+    // 修理（修理中の箇所が少ないほど速い）
     let done = false;
+    const speed = this._repairSpeed();
     for (const pt of D.parts) {
       if (!pt.repair) continue;
-      pt.repair.t += dt;
+      pt.repair.t += dt * speed;
       if (pt.repair.t >= pt.repair.total) { pt.hp = pt.max; pt.repair = null; done = true; this._flashStatus(`${pt.label}の応急修理が終わりました`); }
     }
     // 機関本体: 最高速度が落ちる
@@ -2051,7 +2060,8 @@ const Weapons = {
       rp.style.width = pt.repair ? `${((pt.repair.t / pt.repair.total) * 100).toFixed(0)}%` : '0%';
       const btn = row.querySelector('.dm-btn');
       btn.disabled = !!pt.repair;
-      btn.textContent = pt.repair ? `修理中 ${Math.ceil(pt.repair.total - pt.repair.t)}秒` : `修理（${Math.round(this._repairTime(pt))}秒）`;
+      const spd = this._repairSpeed(), nRepNow = D.parts.filter((x) => x.repair).length;
+      btn.textContent = pt.repair ? `修理中 あと${Math.ceil((pt.repair.total - pt.repair.t) / spd)}秒` : `修理（${Math.round(this._repairTime(pt) / this._repairSpeed(nRepNow + 1))}秒）`;
       let note = `${effOf[pt.kind] || ''} ${Math.floor(e * 100)}%`;
       if (pt.kind === 'turret') note += e < this.TURRET_NOFIRE ? '・射撃不能' : e < this.TURRET_JAM ? '・旋回／俯仰停止' : '';
       if (pt.repair && pt.repair.resets) note += `・被弾で修理やり直し ${pt.repair.resets}回`;
@@ -2061,7 +2071,7 @@ const Weapons = {
     const ab = el._head.querySelector('.dm-auto');
     ab.textContent = this.autoRepair ? '自動修理: 入' : '自動修理: 切';
     ab.classList.toggle('on', this.autoRepair);
-    el._head.querySelector('.dm-sum').textContent = hurt.length ? `損傷 ${hurt.length}か所・修理中 ${nRep}/${this.REPAIR_MAX}` : '損傷なし';
+    el._head.querySelector('.dm-sum').textContent = hurt.length ? `損傷 ${hurt.length}か所・修理中 ${nRep}/${this.REPAIR_MAX}${nRep ? `（人員を割いて ×${this._repairSpeed().toFixed(2).replace(/\.?0+$/, '')}）` : ''}` : '損傷なし';
   },
 
   // ---------------------------------------------------------
