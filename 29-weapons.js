@@ -915,7 +915,8 @@ const Weapons = {
   NEAR_MAX_DEG: 30, // ぴったり向けられない砲を寄せるのは、狙う向きからこの角度まで
   zoomBy(factor) {
     // 追尾中のピンチは、追尾の拡大の度合いを変える（追尾をやめれば元の倍率に戻る）
-    if (this.tracking && !this._viewMount) this._trackAdj = clamp((this._trackAdj || 1) * factor, 0.2, 10);
+    if (this._viewMount && this.view) return; // 砲塔の視点は 1倍のまま
+    if (this.tracking) this._trackAdj = clamp((this._trackAdj || 1) * factor, 0.2, 10);
     else this._aimFov = clamp(this._aimFov * factor, this.AIM_FOV_MIN, this.AIM_FOV_MAX);
   },
   // v89: 照準で目標を追尾しているあいだ（照準が目標に合っている）は、目標が画面の高さの約 1/6 に見えるまで拡大する。
@@ -1345,25 +1346,29 @@ const Weapons = {
       p = { x: ship.position.x + up.x * size * 0.12, y: ship.position.y + up.y * size * 0.12, z: ship.position.z + up.z * size * 0.12 };
     }
     // v89: 砲塔の視点で、その砲が独立して別の目標を狙っていれば、全体の照準は変えずに、その砲の目標の方を見る
+    // v89: 砲塔の視点は、照準の先ではなく、その砲がいま向いている向き（1番目の砲身の向き）を見る。拡大はしない（1倍）
     let look = dl, lookT = null;
-    if (vm && vm.target && vm.target.alive && vm.target !== this.lock && this._practiceOn()) {
-      lookT = vm.target;
-      const d = vm.target.pos.clone().sub(new THREE.Vector3(p.x, p.y, p.z)).normalize();
+    if (vm) {
+      const q = new THREE.Quaternion();
+      vm.barrels[0].node.getWorldQuaternion(q);
+      const d = new THREE.Vector3(0, 1, 0).applyQuaternion(q).normalize();
       look = { x: d.x, y: d.y, z: d.z };
+      if (vm.target && vm.target.alive && vm.target !== this.lock && this._practiceOn()) lookT = vm.target;
     }
     this._lookDir = look;
     this._lookIndep = lookT;
     cam.position.set(p.x, p.y, p.z);
     cam.up.set(up.x, up.y, up.z);
     cam.lookAt(p.x + look.x, p.y + look.y, p.z + look.z);
-    const fov = this._viewFov(p, lookT, !!vm);
+    const fov = vm ? this._savedFov : this._viewFov(p, lookT);
+    if (vm) { this.tracking = false; this._dispFov = null; }
     if (Math.abs(cam.fov - fov) > 1e-6) { cam.fov = fov; cam.updateProjectionMatrix(); }
     const el = this._ui && this._ui.reticle;
     if (el) { el.style.left = '50%'; el.style.top = '50%'; el.classList.toggle('tracking', !!this.tracking); }
     this._placeGunMarks(cam);
     this._placeTargetMarks(cam);
     if (this._ui && this._ui.zoom) {
-      const t = `${this._lookIndep ? `${this._viewMount.num}番が独立して${this._lookIndep.label}を追尾 ` : this.tracking ? '追尾中 ' : ''}測距儀 ×${(this._savedFov / this._dispFov).toFixed(1)}`;
+      const t = vm ? `${vm.num}番の砲の向き（×1.0）${this._lookIndep ? `・独立して${this._lookIndep.label}を狙っています` : ''}` : `${this.tracking ? '追尾中 ' : ''}測距儀 ×${(this._savedFov / this._dispFov).toFixed(1)}`;
       if (this._ui.zoom.textContent !== t) this._ui.zoom.textContent = t;
     }
     return true;
@@ -1378,7 +1383,7 @@ const Weapons = {
       const dx = x - d.x, dy = y - d.y;
       d.x = x; d.y = y;
       // 指の下の景色が指についてくる速さ（視野角に合わせる。拡大しているほどゆっくり）
-      const k = (((this._dispFov || this._aimFov) * Math.PI) / 180) / Math.max(1, window.innerHeight);
+      const k = (((this._viewMount && this._savedFov ? this._savedFov : this._dispFov || this._aimFov) * Math.PI) / 180) / Math.max(1, window.innerHeight);
       this._rotateAim(-dx * k, -dy * k);
     };
     const end = (id) => { if (this._drag && this._drag.id === id) this._drag = null; };
