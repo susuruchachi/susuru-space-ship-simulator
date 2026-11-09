@@ -1285,6 +1285,12 @@ const WeaponDesigner = {
     bindNum('wpnElevMax', 'elevMax', false);
     bindNum('wpnTraverse', 'traverseRate', true);
     $('wpnColor').addEventListener('input', () => this._edit((m) => { m.color = $('wpnColor').value; }));
+    // v89: 砲塔・射撃レーダーのプルダウン
+    $('wpnPartSel').addEventListener('change', () => {
+      const v = $('wpnPartSel').value;
+      const i = v.indexOf(':');
+      if (i > 0) this._select(v.slice(0, i), v.slice(i + 1));
+    });
     // v89: グループ
     $('wpnGroupSel').addEventListener('change', () => this._edit((m) => { m.group = $('wpnGroupSel').value; }));
     $('wpnGroupName').addEventListener('change', () => this._editGroup((g) => { g.name = $('wpnGroupName').value.trim().slice(0, 20) || g.name; }));
@@ -1491,33 +1497,32 @@ const WeaponDesigner = {
     const gs = $('wpnGroupSel');
     gs.innerHTML = '';
     for (const g of groups) gs.appendChild(new Option(g.name, g.id));
-    const list = $('wpnList');
-    list.innerHTML = '';
+    // v89: 砲塔・射撃レーダーはプルダウンで選ぶ（数が多いので）。グループごとに見出し（optgroup）で分ける
+    const sel = $('wpnPartSel');
+    sel.innerHTML = '';
     if (!this._sel && rig.mounts.length && !locked) {
       const first = rig.mounts.find((m) => weaponMountConfigFor(design.weapons, m.key).group === this._selGroup) || rig.mounts[0];
       this._sel = { kind: 'mount', key: first.key };
     }
-    for (const m of rig.mounts) {
-      const c = weaponMountConfigFor(design.weapons, m.key);
-      if (c.group !== this._selGroup) continue; // 選んでいるグループの砲塔だけ
-      const b = document.createElement('button');
-      b.type = 'button';
-      const on = this._sel && this._sel.kind === 'mount' && this._sel.key === m.key;
-      b.className = `pod-chip wpn-chip${on ? ' selected' : ''}`;
-      b.textContent = `${m.key}・${weaponTypeInfo(c.kind, c.type).label} ${c.caliber}mm×${m.barrels.length}`;
-      if (c.kind === 'laser') b.style.borderColor = c.color;
-      b.addEventListener('click', () => this._select('mount', m.key));
-      list.appendChild(b);
+    if (locked && !this._sel) sel.appendChild(new Option('（このグループに砲塔はありません）', ''));
+    for (const g of groups) {
+      const og = document.createElement('optgroup');
+      og.label = g.name;
+      for (const m of rig.mounts) {
+        const c = weaponMountConfigFor(design.weapons, m.key);
+        if (c.group !== g.id) continue;
+        og.appendChild(new Option(`${m.key}・${weaponTypeInfo(c.kind, c.type).label} ${c.caliber}mm×${m.barrels.length}`, `mount:${m.key}`));
+      }
+      if (og.children.length) sel.appendChild(og);
     }
-    for (const d of rig.directors) {
-      const b = document.createElement('button');
-      b.type = 'button';
-      const on = this._sel && this._sel.kind === 'director' && this._sel.key === d.key;
-      b.className = `pod-chip dir-chip${on ? ' selected' : ''}`;
-      b.textContent = d.key;
-      b.addEventListener('click', () => this._select('director', d.key));
-      list.appendChild(b);
+    if (rig.directors.length) {
+      const og = document.createElement('optgroup');
+      og.label = '射撃レーダー・測距儀';
+      for (const d of rig.directors) og.appendChild(new Option(d.key, `director:${d.key}`));
+      sel.appendChild(og);
     }
+    sel.value = this._sel ? `${this._sel.kind}:${this._sel.key}` : '';
+    sel.disabled = !(rig.mounts.length + rig.directors.length);
     const part = this._findSel();
     $('wpnEditor').style.display = part && part.kind === 'mount' ? '' : 'none';
     $('dirEditor').style.display = part && part.kind === 'director' ? '' : 'none';
