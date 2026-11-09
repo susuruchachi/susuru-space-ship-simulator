@@ -668,7 +668,6 @@ const Weapons = {
     this.aim.active = false;
     this._viewMount = null;
     this.lock = null;
-    this._salvo = null;
     this.setView(false);
     this._syncUi();
   },
@@ -699,6 +698,7 @@ const Weapons = {
     if (!this.rig || !ship || !ship.mesh) return;
     ship.mesh.updateMatrixWorld(true);
     this._time = (this._time || 0) + dt;
+    this._dt = dt;
     // v89: 演習の目標を動かし、見ている方向の半球にある目標へ照準を合わせる（自動照準）
     this._updateTargets(dt);
     this._updateLock();
@@ -783,16 +783,6 @@ const Weapons = {
           });
         }
       }
-    }
-    // v89: 一斉射撃（ボタン）: 照準の目標へ向け直した砲が、撃てるようになったら1回ずつ撃つ
-    if (this._salvo) {
-      for (const m of [...this._salvo.mounts]) {
-        if (this.lock && m.target !== this.lock) continue;
-        let fired = false;
-        m.barrels.forEach((b, i) => { if (this._canFireBarrel(m, i)) { this._shoot(m, b, i); fired = true; } });
-        if (fired) { this._salvo.mounts.delete(m); m._nextPick = 0; } // 撃ったら、また自分で目標を選ぶ
-      }
-      if (!this._salvo.mounts.size || this._time > this._salvo.until) this._salvo = null;
     }
     for (const d of this.rig.directors) {
       const c = d.cfg;
@@ -1487,11 +1477,26 @@ const Weapons = {
       if (!this.lock && best && !(this._noAutoLockUntil > this._time)) this.lock = best;
     }
     // 照準（狙う向き・画面の中央）を目標に合わせ続ける（照準の視点から戻っても）
+    // v89: 目標が変わっても一気に切り替えず、カメラをパンするように滑らかに回して合わせる
+    //   離れているほど速く（最大 約120°/s）、近づくと減速して止まる。合ったあとは目標の動きに付いていく
     if (this.lock) {
       const d = this.lock.pos.clone().sub(o).normalize();
-      this.aim.dirU = this._toUniverse({ x: d.x, y: d.y, z: d.z });
-    }
+      const ang = Math.acos(clamp(d.dot(D), -1, 1));
+      let nd = d;
+      const dt = Math.min(this._dt || 0, 0.1);
+      if (ang > 1e-4 && dt > 0) {
+        const step = Math.min(ang, Math.max(ang * (1 - Math.exp(-dt / this.PAN_TAU)), this.PAN_MIN_RATE * dt), this.PAN_MAX_RATE * dt);
+        let axis = new THREE.Vector3().crossVectors(D, d);
+        if (axis.lengthSq() < 1e-12) { axis = new THREE.Vector3().crossVectors(D, Math.abs(D.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0)); }
+        nd = D.clone().applyAxisAngle(axis.normalize(), step).normalize();
+      }
+      this.lockPanning = ang > 0.01;
+      this.aim.dirU = this._toUniverse({ x: nd.x, y: nd.y, z: nd.z });
+    } else this.lockPanning = false;
   },
+  PAN_TAU: 0.3, // 照準のパンの滑らかさ [s]
+  PAN_MIN_RATE: 0.08, // [rad/s] 最後まで止まらずに合わせ切るための最低の速さ
+  PAN_MAX_RATE: 2.1, // [rad/s] 約120°/s
   // 見ている方向の半球の目標のうち、中央にいちばん近いものに照準を合わせる（テスト・ほかから呼ぶ用）
   lockNearest() {
     if (!this._visibleTarget) { this._updateLock(); }
@@ -1565,14 +1570,21 @@ const Weapons = {
     for (const t of list) if (this._canEngage(m, t)) return t;
     return null;
   },
+  // v89: 艦種の大きさ。大口径砲は大型艦（戦艦・重巡洋艦）を、小口径砲は中型〜小型（軽巡洋艦・駆逐艦・攻撃機）を優先して撃つ
+  _isLargeTarget(t) { return t.cls === 'bb' || t.cls === 'ca'; },
+  // 大口径砲: 主砲（いちばん大きな口径）の 7割以上、かつ 200 mm 以上。それ以外は小口径砲
+  _isLargeGun(m) { return m.cfg.caliber >= Math.max(200, this._mainCaliber * 0.7) - 1e-6; },
   // 砲の目標を決める
-  //   手動の砲・一斉射撃中の砲: 照準の目標
-  //   自動射撃の砲: 副砲（主砲より小さな口径）は、照準の目標より自艦にずっと近い目標があればそちらを。
-  //   照準の目標を撃てればそれを、撃てなければ（向けられない・射程の外）撃てるいちばん近い目標を独立して撃つ
+  //   全門指向（ボタン）がオン: すべての砲が照準の目標へ
+  //   手動の砲: 照準の目標
+  //   自動射撃の砲:
+  //     小口径砲 … 自分の射程の中に目標が入ってきたら、照準とは別に自分でそれを撃つ（中型〜小型を優先、近い順）
+  //     そうでなければ、照準の目標が自分の得意な大きさで撃てればそれを。
+  //     撃てなければ、得意な大きさの撃てる目標（近い順）、照準の目標、ほかの撃てる目標の順
   _chooseTarget(m) {
     const main = this.lock && this.lock.alive ? this.lock : null;
     const auto = this._groupMode(m) !== 'off';
-    if (main && ((this._salvo && this._salvo.mounts.has(m)) || !auto)) return main;
+    if (main && (this.focusAll || !auto)) return main;
     if (!auto) return main;
     // 向けたが射線が船体・ほかの砲に当たって撃てなかった目標は、この砲ではしばらく（3秒）選ばない
     if (m.target && m.state === 'blocked') {
@@ -1581,13 +1593,19 @@ const Weapons = {
       m._nextPick = 0;
     }
     const ok = (t) => !(m._badT && m._badT.get(t) > this._time);
+    const large = this._isLargeGun(m);
+    const pref = (t) => (large ? this._isLargeTarget(t) : !this._isLargeTarget(t));
     const mainOk = main && ok(main) && this._canEngage(m, main);
     if (!m._nextPick || this._time >= m._nextPick) {
       m._nextPick = this._time + 0.4 + Math.random() * 0.2;
-      m._near = m.cfg.caliber < this._mainCaliber - 1e-6 ? this._nearestEngageable(m, (t) => ok(t) && (!main || t.distShip < main.distShip * 0.6)) : null;
-      m._indep = mainOk ? null : this._nearestEngageable(m, ok);
+      const range = weaponRange(m.cfg);
+      // 小口径砲の自衛: 射程の中に入ってきた目標
+      m._near = large ? null : (this._nearestEngageable(m, (t) => ok(t) && pref(t) && t.distShip <= range) || this._nearestEngageable(m, (t) => ok(t) && t.distShip <= range));
+      m._indep = mainOk && pref(main) ? null : (this._nearestEngageable(m, (t) => ok(t) && pref(t)) || (mainOk ? null : this._nearestEngageable(m, ok)));
     }
     if (m._near && m._near.alive && ok(m._near)) return m._near;
+    if (mainOk && pref(main)) return main;
+    if (m._indep && m._indep.alive && ok(m._indep) && pref(m._indep)) return m._indep;
     if (mainOk) return main;
     if (m._indep && m._indep.alive && ok(m._indep)) return m._indep;
     return main;
@@ -1603,14 +1621,11 @@ const Weapons = {
     m.rangeOk = L.dist <= weaponRange(m.cfg);
     return L.dir;
   },
-  // 一斉射撃（ボタン）: 独立して別の目標を撃っていた砲も、照準の目標を撃てるなら向け直して撃つ
-  salvo() {
-    if (!this.rig) return 0;
-    if (!this.lock) return this.fire();
-    const mounts = this.rig.mounts.filter((m) => this._canEngage(m, this.lock));
-    this._salvo = { mounts: new Set(mounts), until: this._time + 20 };
-    for (const m of mounts) { m._indep = null; m._near = null; m._nextPick = this._time + 20; }
-    return mounts.length;
+  // v89: 全門指向（ボタン）: オンのあいだ、独立して別の目標を撃っていた砲も含めて、すべての砲を照準の目標へ向ける
+  setFocusAll(on) {
+    this.focusAll = !!on;
+    if (this.rig) for (const m of this.rig.mounts) { m._indep = null; m._near = null; m._nextPick = 0; }
+    this._syncUi();
   },
 
   // v89: レーザーは充電の途中でも撃てる（充電の割合 = 1 − 残り時間 / 充電時間。光線の太さがその割合になる）
@@ -1840,7 +1855,7 @@ const Weapons = {
       <button type="button" class="wpn-btn wpn-practice">演習</button>
       <div class="wpn-hp"><div class="wpn-hp-fill"></div><span class="wpn-hp-text"></span></div>
       <button type="button" class="wpn-btn wpn-maneuver">自動操艦</button>
-      <button type="button" class="wpn-btn wpn-salvo">一斉射撃</button>
+      <button type="button" class="wpn-btn wpn-focus" title="オン: すべての砲を照準の目標へ向ける／オフ: 自動射撃の砲は艦種や距離で自分の目標を選ぶ">全門指向</button>
       <button type="button" class="wpn-btn wpn-fire">撃て</button>
       <button type="button" class="wpn-btn wpn-view">照準</button>
       <button type="button" class="wpn-btn wpn-stop">照準やめ</button>`;
@@ -1894,11 +1909,11 @@ const Weapons = {
       this._flashStatus(this.autoManeuver ? '自動操艦: 目標の多い方へ、撃てる砲の多い向きに回します' : '自動操艦を切りました');
       this._syncUi();
     });
-    box.querySelector('.wpn-salvo').addEventListener('click', () => {
-      const n = this.salvo();
-      this._flashStatus(n ? (this.lock ? `一斉射撃: ${n}基が照準の目標へ` : `一斉射撃 ${n}門`) : '撃てる砲がありません');
+    box.querySelector('.wpn-focus').addEventListener('click', () => {
+      this.setFocusAll(!this.focusAll);
+      this._flashStatus(this.focusAll ? '全門指向: すべての砲を照準の目標へ向けます' : '全門指向を切りました（自動射撃の砲は自分で目標を選びます）');
     });
-    this._ui = { box, tmarks, dsel, hp: box.querySelector('.wpn-hp'), hpFill: box.querySelector('.wpn-hp-fill'), hpText: box.querySelector('.wpn-hp-text'), maneuverBtn: box.querySelector('.wpn-maneuver'), practice: box.querySelector('.wpn-practice'), salvoBtn: box.querySelector('.wpn-salvo'), groups: box.querySelector('.wpn-groups'), reticle, marks, chips, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
+    this._ui = { box, tmarks, dsel, hp: box.querySelector('.wpn-hp'), hpFill: box.querySelector('.wpn-hp-fill'), hpText: box.querySelector('.wpn-hp-text'), maneuverBtn: box.querySelector('.wpn-maneuver'), practice: box.querySelector('.wpn-practice'), focusBtn: box.querySelector('.wpn-focus'), groups: box.querySelector('.wpn-groups'), reticle, marks, chips, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
     this._syncUi();
   },
   // 砲塔ごとの小さな照準マーク（照準の視点）と、下の番号（装填・指向の状態）
@@ -2068,7 +2083,7 @@ const Weapons = {
     u.box.style.display = has ? '' : 'none';
     u.view.classList.toggle('active', this.view);
     u.stop.style.display = this.aim.active ? '' : 'none';
-    if (u.salvoBtn) u.salvoBtn.style.display = this.aim.active ? '' : 'none';
+    if (u.focusBtn) { u.focusBtn.style.display = this.aim.active ? '' : 'none'; u.focusBtn.classList.toggle('active', !!this.focusAll); }
     if (u.maneuverBtn) { u.maneuverBtn.style.display = this.practice ? '' : 'none'; u.maneuverBtn.classList.toggle('active', !!this.autoManeuver); }
     if (u.hp) u.hp.style.display = this.practice ? '' : 'none';
     // v89: 演習は演習モード（index.html?mode=practice）だけ
