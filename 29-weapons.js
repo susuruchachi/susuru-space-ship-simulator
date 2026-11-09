@@ -24,6 +24,29 @@
 //   - 「撃て」で、狙いが合っていて装填の済んだ砲を撃つ（見た目だけ。当たり判定はまだ無い）
 // =============================================================
 
+// v89: 演習モード（index.html?mode=practice）: 通常のプレイとは別のモード。世界は同じで、自動航行・ワープ・星図が無い
+const PRACTICE_MODE = typeof location !== 'undefined' && new URLSearchParams(location.search).get('mode') === 'practice';
+if (PRACTICE_MODE && typeof document !== 'undefined') {
+  const mark = () => { if (!document.body) return; document.body.classList.add('mode-practice'); const b = document.createElement('div'); b.className = 'practice-badge'; b.textContent = '🎯 演習モード'; b.title = '敵と撃ち合うモード。砲を設定した船で「演習開始」を押すと敵が出る（星図・自動航行はなし）'; document.body.appendChild(b); };
+  if (document.body) mark(); else document.addEventListener('DOMContentLoaded', mark);
+}
+// v89: 演習の敵の艦種・機種。L/W/H: 大きさ [m]、hp: 耐久、guns: 1回に撃つ門数、cal: 口径 [mm]、types: 砲の種類、
+//   reload [s]、range [m]、ikn: 最高速度 [IKn]、rel: 自艦に対して近づく・回る速さ [m/s]、tau: 速さを合わせる時間 [s]、standoff: 近づく距離 [m]
+const ENEMY_CLASSES = {
+  bb: { label: '戦艦', L: 230, W: 34, H: 30, color: 0xc0392b, hp: 900, guns: 6, cal: [356, 460], types: ['ap', 'he'], reload: [22, 30], range: 40000, ikn: [15, 18], rel: 250, tau: 3, standoff: [15000, 25000] },
+  ca: { label: '重巡洋艦', L: 190, W: 22, H: 20, color: 0xe67e22, hp: 450, guns: 4, cal: [203, 254], types: ['ap', 'he', 'rail'], reload: [12, 16], range: 30000, ikn: [18, 22], rel: 350, tau: 2.5, standoff: [10000, 18000] },
+  cl: { label: '軽巡洋艦', L: 160, W: 17, H: 16, color: 0xf1c40f, hp: 260, guns: 4, cal: [140, 155], types: ['he', 'coil', 'pulse'], reload: [7, 10], range: 25000, ikn: [20, 25], rel: 450, tau: 2, standoff: [7000, 13000] },
+  dd: { label: '駆逐艦', L: 115, W: 11, H: 10, color: 0x1abc9c, hp: 140, guns: 2, cal: [100, 130], types: ['he', 'coil', 'pulse'], reload: [4, 6], range: 16000, ikn: [24, 30], rel: 600, tau: 1.5, standoff: [4000, 8000] },
+  ac: { label: '対艦攻撃機', L: 18, W: 14, H: 4, color: 0xd35eff, hp: 30, guns: 1, cal: [75, 120], types: ['rail', 'xray'], reload: [3, 5], range: 6000, ikn: [45, 60], rel: 2500, tau: 0.4, standoff: [1000, 3000] },
+};
+// 難易度: 艦種の出やすさ（重み）、敵の火力の倍率、目標の数
+const PRACTICE_DIFFICULTIES = {
+  easy: { label: 'やさしい', weights: { bb: 0, ca: 1, cl: 3, dd: 5, ac: 3 }, dmg: 0.6, count: 30 },
+  normal: { label: 'ふつう', weights: { bb: 1, ca: 2, cl: 3, dd: 4, ac: 3 }, dmg: 1.0, count: 45 },
+  hard: { label: 'むずかしい', weights: { bb: 3, ca: 4, cl: 3, dd: 3, ac: 4 }, dmg: 1.5, count: 45 },
+  extreme: { label: '激戦', weights: { bb: 6, ca: 5, cl: 3, dd: 2, ac: 5 }, dmg: 2.2, count: 60 },
+};
+
 // v89: 砲の状態の色（画面の番号・照準マーク・装填の棒・小さな図の線）
 const WEAPON_STATE_COLORS = {
   ready: 0x3dff6e,   // 撃てる
@@ -1122,6 +1145,8 @@ const Weapons = {
   startPractice(nextWave) {
     const wave = nextWave && this.practice ? this.practice.wave + 1 : 1;
     const keepHP = nextWave && this.practice;
+    const diffKey = PRACTICE_DIFFICULTIES[this.difficulty] ? this.difficulty : 'normal';
+    const diff = PRACTICE_DIFFICULTIES[diffKey];
     this.stopPractice(true);
     const ship = State.ship;
     if (!ship || !this._scene) return;
@@ -1136,50 +1161,53 @@ const Weapons = {
     const q = new THREE.Quaternion(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w);
     const targets = [];
     const pick = (a) => a[Math.floor(Math.random() * a.length)];
+    const rnd = ([a, b]) => a + Math.random() * (b - a);
+    // 難易度の重みで艦種を選ぶ
+    const wsum = Object.values(diff.weights).reduce((a, b) => a + b, 0);
+    const pickClass = () => { let r = Math.random() * wsum; for (const [k, w] of Object.entries(diff.weights)) { if ((r -= w) <= 0) return k; } return 'dd'; };
+    const perGroup = Math.round(diff.count / this.PRACTICE_GROUPS);
     for (let gi = 0; gi < this.PRACTICE_GROUPS; gi++) {
       const [yaw, el] = dirs[gi % dirs.length];
       const d = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(1, 0, 0), toRadW(el)).applyAxisAngle(new THREE.Vector3(0, 1, 0), toRadW(yaw)).applyQuaternion(q);
       const center = new THREE.Vector3(ship.position.x, ship.position.y, ship.position.z).addScaledVector(d, dists[gi]);
-      const spread = 1500;
-      for (let k = 0; k < this.PRACTICE_PER_GROUP; k++) {
-        const moving = k % 2 === 1; // 速い目標（水色）と遅い目標（橙）
-        const size = 20 + Math.random() * 20;
-        const off = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(spread * 2);
+      for (let k = 0; k < perGroup; k++) {
+        const cls = pickClass();
+        const C = ENEMY_CLASSES[cls];
+        const off = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(cls === 'ac' ? 2000 : 3000);
         const pos = center.clone().add(off);
-        const mat = new THREE.MeshStandardMaterial({ color: moving ? 0x5fd8ff : 0xff9a3a, emissive: moving ? 0x104a66 : 0x7a3a10, roughness: 0.6 });
+        const mat = new THREE.MeshStandardMaterial({ color: C.color, emissive: new THREE.Color(C.color).multiplyScalar(0.35), roughness: 0.6 });
         const mesh = new THREE.Mesh(geo, mat);
-        mesh.scale.setScalar(size);
+        mesh.scale.set(C.W, C.H, C.L); // 長さは Z（進む向き）
         mesh.position.copy(pos);
-        mesh.rotation.set(Math.random() * 3, Math.random() * 3, 0);
         group.add(mesh);
-        // 目標の砲（ランダム）: 実弾（徹甲弾・榴弾・レールガン・コイルガン）かレーザー、口径 40〜155 mm
-        const kind = Math.random() < 0.3 ? 'laser' : 'kinetic';
-        const wtype = kind === 'laser' ? pick(['pulse', 'cw', 'xray']) : pick(['ap', 'he', 'rail', 'coil']);
-        const cal = Math.round(40 + Math.random() * 115);
-        const info = weaponTypeInfo(kind, wtype);
+        const type = pick(C.types);
+        const kind = ['pulse', 'cw', 'xray'].includes(type) ? 'laser' : 'kinetic';
+        const info = weaponTypeInfo(kind, type);
         const weapon = {
-          kind, type: wtype, caliber: cal, speed: info.speed || 0,
-          reload: 4 + Math.random() * 8,
-          range: kind === 'laser' ? 15000 : Math.min(40000, info.speed * 25),
+          kind, type, caliber: Math.round(rnd(C.cal)), speed: info.speed || 0, guns: C.guns,
+          reload: rnd(C.reload), range: C.range, dmgMul: diff.dmg,
           color: pick(['#ff3a2a', '#3aff6a', '#c050ff', '#ffe23a']),
         };
-        const hp = 60 + size * 2;
         targets.push({
-          pos, vel: new THREE.Vector3(), size, moving, alive: true, mesh, mat, center, group: gi, distShip: 0,
-          hp, hpMax: hp, weapon, reloadLeft: 2 + Math.random() * weapon.reload,
-          speed: moving ? 100 + Math.random() * 100 : 25 + Math.random() * 30,
-          standoff: 1500 + Math.random() * 2500, orbitSign: Math.random() < 0.5 ? 1 : -1,
+          cls, label: C.label, pos, vel: new THREE.Vector3(State.ship.velocity.x, State.ship.velocity.y, State.ship.velocity.z).clampLength(0, C.ikn[1] * SHIP_IKN), size: Math.max(C.W, C.H, C.L) * 0.45, moving: cls === 'ac' || cls === 'dd',
+          alive: true, mesh, mat, center, group: gi, distShip: 0,
+          hp: C.hp, hpMax: C.hp, weapon, reloadLeft: 2 + Math.random() * weapon.reload,
+          maxSpeed: rnd(C.ikn) * SHIP_IKN, rel: C.rel * (0.8 + Math.random() * 0.4), tau: C.tau,
+          standoff: rnd(C.standoff), orbitSign: Math.random() < 0.5 ? 1 : -1,
         });
       }
     }
     const shipSize = (CameraSystem._shipScale || 1) * 8;
     const hpMax = keepHP ? keepHP.shipHPMax : Math.max(200, 40 * shipSize);
     this.practice = {
-      targets, group, geo, mats: targets.map((t) => t.mat), alive: targets.length, total: targets.length, wave,
+      targets, group, geo, mats: targets.map((t) => t.mat), alive: targets.length, total: targets.length, wave, difficulty: diffKey,
       shipHPMax: hpMax, shipHP: keepHP ? keepHP.shipHP : hpMax,
     };
     this._buildTargetMarkers();
-    this._flashStatus(wave > 1 ? `第${wave}波（目標 ${targets.length}個）` : `演習を始めました（目標 ${targets.length}個。目標も撃ってきます）`);
+    const count = {};
+    for (const t of targets) count[t.label] = (count[t.label] || 0) + 1;
+    const comp = Object.entries(count).map(([k, v]) => `${k}${v}`).join('・');
+    this._flashStatus(`${wave > 1 ? `第${wave}波` : `演習開始（${diff.label}）`}: ${comp}`);
     this._syncUi();
   },
   stopPractice(keepUi) {
@@ -1201,32 +1229,35 @@ const Weapons = {
     const ship = State.ship;
     const sp = new THREE.Vector3(ship.position.x, ship.position.y, ship.position.z);
     const sv = new THREE.Vector3(ship.velocity.x, ship.velocity.y, ship.velocity.z);
-    const k = 1 - Math.exp(-dt / 2);
     for (const t of P.targets) {
       if (!t.alive) continue;
-      // 動き: 自艦へ近づき、決まった距離まで来たら自艦のまわりを回る
+      // 動き: 自艦へ近づき、決まった距離まで来たら自艦のまわりを回る。自艦が動けば最高速度（15〜30 IKn。攻撃機はもっと速い）まで追う
       const R = sp.clone().sub(t.pos);
       const dist = R.length();
       const rh = R.clone().divideScalar(Math.max(1, dist));
       let desired;
-      if (dist > t.standoff * 1.15) desired = rh.clone().multiplyScalar(t.speed);
+      // 遠いほど速く詰める（自艦が高速で動いて離されても、最高速度の範囲で追いつく）
+      if (dist > t.standoff * 1.15) desired = rh.clone().multiplyScalar(Math.max(t.rel * (dist > t.standoff * 3 ? 3 : 1), (dist - t.standoff) / 8));
       else {
         let tang = new THREE.Vector3().crossVectors(rh, new THREE.Vector3(0, 1, 0));
         if (tang.lengthSq() < 1e-6) tang.set(1, 0, 0);
-        tang.normalize().multiplyScalar(t.orbitSign * t.speed * 0.7);
-        desired = tang.addScaledVector(rh, (dist - t.standoff) * 0.05);
+        tang.normalize().multiplyScalar(t.orbitSign * t.rel * 0.7);
+        desired = tang.addScaledVector(rh, clamp((dist - t.standoff) * 0.05, -t.rel, t.rel));
       }
-      desired.add(sv); // 自艦が動いていてもついてくる
-      t.vel.lerp(desired, k);
+      desired.add(sv);
+      t.vel.lerp(desired, 1 - Math.exp(-dt / t.tau));
+      if (t.vel.length() > t.maxSpeed) t.vel.setLength(t.maxSpeed);
       t.pos.addScaledVector(t.vel, dt);
-      t.mesh.rotation.x += dt * (t.moving ? 0.6 : 0.2); t.mesh.rotation.y += dt * 0.4;
+      // 進む向き（自艦に対する速度の向き）へ艦首を向ける
+      const vr = t.vel.clone().sub(sv);
+      if (vr.lengthSq() > 1) t.mesh.lookAt(t.pos.clone().add(vr));
       t.mesh.position.copy(t.pos);
       t.distShip = t.pos.distanceTo(sp);
       // 攻撃: 射程に入ったら、装填ができ次第、自艦へ（偏差をつけ、少しばらつかせて）撃つ
       t.reloadLeft -= dt;
       if (t.reloadLeft <= 0 && t.distShip <= t.weapon.range && P.shipHP > 0) {
-        t.reloadLeft = t.weapon.reload * (0.8 + Math.random() * 0.4);
-        this._enemyFire(t, sp, sv);
+        t.reloadLeft = t.weapon.reload * (0.85 + Math.random() * 0.3);
+        for (let g = 0; g < t.weapon.guns; g++) this._enemyFire(t, sp, sv);
       }
     }
   },
@@ -1246,7 +1277,7 @@ const Weapons = {
     const perp = new THREE.Vector3().crossVectors(dir, Math.abs(dir.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0)).normalize();
     dir.applyAxisAngle(perp, (Math.random() - 0.5) * 2 * spread).applyAxisAngle(dir.clone(), Math.random() * Math.PI * 2).normalize();
     const ship = State.ship;
-    const dmg = weaponDamage(w.type, w.caliber);
+    const dmg = weaponDamage(w.type, w.caliber) * (w.dmgMul || 1);
     if (w.kind === 'laser') {
       // 光線: 船体に当たればその場で
       const end = t.pos.clone().addScaledVector(dir, w.range);
@@ -1805,6 +1836,7 @@ const Weapons = {
     box.innerHTML = `
       <div class="wpn-status"></div>
       <div class="wpn-groups"></div>
+      <select class="wpn-difficulty" title="演習の難易度"></select>
       <button type="button" class="wpn-btn wpn-practice">演習</button>
       <div class="wpn-hp"><div class="wpn-hp-fill"></div><span class="wpn-hp-text"></span></div>
       <button type="button" class="wpn-btn wpn-maneuver">自動操艦</button>
@@ -1843,6 +1875,16 @@ const Weapons = {
     const tmarks = document.createElement('div');
     tmarks.className = 'wpn-tmarks';
     document.body.appendChild(tmarks);
+    // v89: 難易度（演習モードだけ。選んだものを覚えておく）
+    const dsel = box.querySelector('.wpn-difficulty');
+    for (const [k, d] of Object.entries(PRACTICE_DIFFICULTIES)) dsel.appendChild(new Option(`難易度: ${d.label}`, k));
+    try { this.difficulty = localStorage.getItem('spaceSimPracticeDifficulty') || 'normal'; } catch (e) { this.difficulty = 'normal'; }
+    if (!PRACTICE_DIFFICULTIES[this.difficulty]) this.difficulty = 'normal';
+    dsel.value = this.difficulty;
+    dsel.addEventListener('change', () => {
+      this.difficulty = dsel.value;
+      try { localStorage.setItem('spaceSimPracticeDifficulty', this.difficulty); } catch (e) { /* ignore */ }
+    });
     box.querySelector('.wpn-practice').addEventListener('click', () => {
       if (this.practice) { this.stopPractice(); this._flashStatus('演習をやめました'); } else this.startPractice();
     });
@@ -1856,7 +1898,7 @@ const Weapons = {
       const n = this.salvo();
       this._flashStatus(n ? (this.lock ? `一斉射撃: ${n}基が照準の目標へ` : `一斉射撃 ${n}門`) : '撃てる砲がありません');
     });
-    this._ui = { box, tmarks, hp: box.querySelector('.wpn-hp'), hpFill: box.querySelector('.wpn-hp-fill'), hpText: box.querySelector('.wpn-hp-text'), maneuverBtn: box.querySelector('.wpn-maneuver'), practice: box.querySelector('.wpn-practice'), salvoBtn: box.querySelector('.wpn-salvo'), groups: box.querySelector('.wpn-groups'), reticle, marks, chips, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
+    this._ui = { box, tmarks, dsel, hp: box.querySelector('.wpn-hp'), hpFill: box.querySelector('.wpn-hp-fill'), hpText: box.querySelector('.wpn-hp-text'), maneuverBtn: box.querySelector('.wpn-maneuver'), practice: box.querySelector('.wpn-practice'), salvoBtn: box.querySelector('.wpn-salvo'), groups: box.querySelector('.wpn-groups'), reticle, marks, chips, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
     this._syncUi();
   },
   // 砲塔ごとの小さな照準マーク（照準の視点）と、下の番号（装填・指向の状態）
@@ -2029,7 +2071,9 @@ const Weapons = {
     if (u.salvoBtn) u.salvoBtn.style.display = this.aim.active ? '' : 'none';
     if (u.maneuverBtn) { u.maneuverBtn.style.display = this.practice ? '' : 'none'; u.maneuverBtn.classList.toggle('active', !!this.autoManeuver); }
     if (u.hp) u.hp.style.display = this.practice ? '' : 'none';
-    if (u.practice) { u.practice.textContent = this.practice ? '演習をやめる' : '演習'; u.practice.classList.toggle('active', !!this.practice); }
+    // v89: 演習は演習モード（index.html?mode=practice）だけ
+    if (u.practice) { u.practice.style.display = PRACTICE_MODE ? '' : 'none'; u.practice.textContent = this.practice ? '演習をやめる' : '演習開始'; u.practice.classList.toggle('active', !!this.practice); }
+    if (u.dsel) u.dsel.style.display = PRACTICE_MODE && !this.practice ? '' : 'none';
     if (u.tmarks) u.tmarks.style.display = has && this.view && this.practice ? '' : 'none';
     u.fire.style.display = this.aim.active ? '' : 'none';
     u.reticle.style.display = has && this.view ? '' : 'none';
@@ -2046,7 +2090,7 @@ const Weapons = {
     let text = this.aim.active ? `指向 ${s.aimed}/${s.total}基・発射可 ${s.ready}基` : `砲塔 ${s.total}基`;
     if (this.practice) {
       const P = this.practice;
-      text += `・第${P.wave}波 残り ${P.alive}/${P.total}`;
+      text += `・${PRACTICE_DIFFICULTIES[P.difficulty] ? PRACTICE_DIFFICULTIES[P.difficulty].label : ''} 第${P.wave}波 残り ${P.alive}/${P.total}`;
       const f = clamp(P.shipHP / P.shipHPMax, 0, 1);
       if (u.hpFill) { u.hpFill.style.width = `${(f * 100).toFixed(1)}%`; u.hpFill.style.background = f > 0.5 ? '#3dff6e' : f > 0.25 ? '#ffd84a' : '#ff4a3a'; }
       if (u.hpText) u.hpText.textContent = `耐久 ${Math.ceil(f * 100)}%`;

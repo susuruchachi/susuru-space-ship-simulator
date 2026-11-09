@@ -282,6 +282,9 @@ const HUD = {
     wrap.innerHTML = `
       <button class="side-menu-tab" title="メニュー">☰</button>
       <div class="side-menu-panel">
+        <div class="side-menu-section-title">モード</div>
+        <a class="hud-settings-link side-menu-mode-link"></a>
+
         <div class="side-menu-section-title">表示</div>
         <div class="side-menu-display"></div>
         <div class="side-menu-section-title side-menu-debug-title">デバッグ情報</div>
@@ -291,7 +294,7 @@ const HUD = {
         <button class="hud-damping-toggle">自動制動(回転): OFF</button>
         <button class="hud-retro-damping-toggle">自動制動(逆噴射): OFF</button>
 
-        <div class="side-menu-section-title">目的地</div>
+        <div class="side-menu-section-title side-menu-destination">目的地</div>
         <div class="docking-coord-row">
           <label>X</label><input type="number" class="docking-coord-x" step="any">
         </div>
@@ -331,6 +334,13 @@ const HUD = {
     this._bindDampingToggle(wrap);
     this._bindRetroDampingToggle(wrap);
     this._bindDockingControls(wrap);
+    // v89: 演習モード（?mode=practice）と通常のプレイの切り替え
+    const modeLink = wrap.querySelector('.side-menu-mode-link');
+    const practice = new URLSearchParams(location.search).get('mode') === 'practice';
+    const url = new URL(location.href);
+    if (practice) url.searchParams.delete('mode'); else url.searchParams.set('mode', 'practice');
+    modeLink.href = url.pathname + url.search;
+    modeLink.textContent = practice ? '🚀 通常のプレイへ' : '🎯 演習モードへ（敵と撃ち合う）';
     return wrap;
   },
 

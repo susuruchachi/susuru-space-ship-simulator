@@ -209,6 +209,8 @@ const SpaceHud = {
   _bindKeys() {
     window.addEventListener('keydown', (e) => {
       if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
+      // v89: 演習モードでは、ワープ・自動航行・周回姿勢・星図のキーを使わない
+      if (typeof PRACTICE_MODE !== 'undefined' && PRACTICE_MODE && ['KeyJ', 'KeyG', 'KeyO', 'KeyM'].includes(e.code)) return;
       if (e.code === 'KeyJ') this.toggleWarp();
       else if (e.code === 'KeyG') this.toggleAutopilot();
       else if (e.code === 'KeyO') Navigation.toggleOrbitAttitude();
