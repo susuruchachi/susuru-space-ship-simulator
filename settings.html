@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
 <!-- v86: Webアプリ（PWA） -->
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#03070f">
@@ -186,6 +186,9 @@
   .sync-help ol { padding-left: 20px; }
   .sync-help a { color: #9fd8ff; }
   .sync-divider { border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 14px 0 0; }
+
+  /* v89: iPad・iPhone でホーム画面から開いたとき、上の時計・電池のバーに隠れないように */
+  body { padding-top: env(safe-area-inset-top, 0px); padding-left: env(safe-area-inset-left, 0px); padding-right: env(safe-area-inset-right, 0px); box-sizing: border-box; }
 </style>
 </head>
 <body>

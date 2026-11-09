@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
 <!-- v86: Webアプリ（PWA） -->
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#03070f">
@@ -1004,6 +1004,29 @@
   }
   @media (max-height: 500px) {
     .side-menu-panel { max-height: calc(100vh - 60px) !important; }
+  }
+
+  /* v89: iPad・iPhone でホーム画面から開くと（black-translucent）、画面のいちばん上の時計・電池のバーの下まで描かれ、
+     上のメニューが隠れていた。画面の端の安全な余白（env(safe-area-inset-*)。Android・パソコン・ブラウザでは 0）だけずらす */
+  :root {
+    --sat: env(safe-area-inset-top, 0px);
+    --sal: env(safe-area-inset-left, 0px);
+    --sar: env(safe-area-inset-right, 0px);
+    --sab: env(safe-area-inset-bottom, 0px);
+  }
+  .hud-side-menu, #hud-root > .hud-side-menu { top: calc(8px + var(--sat)) !important; left: calc(8px + var(--sal)); }
+  .side-menu-panel { max-height: calc(100vh - 180px - var(--sat)) !important; }
+  .space-nav-panel, .space-nav-panel.is-compact { top: calc(8px + var(--sat)) !important; }
+  .hud-camera-controls { top: calc(8px + var(--sat)) !important; right: calc(8px + var(--sar)) !important; }
+  .star-map-header { top: calc(8px + var(--sat)); left: calc(8px + var(--sal)); right: calc(8px + var(--sar)); }
+  .wpn-hint { top: calc(152px + var(--sat)); }
+  .wpn-chips { bottom: calc(26px + var(--sab)); }
+  @media (max-width: 700px) and (min-height: 501px) {
+    .space-nav-panel, .space-nav-panel.is-compact { top: calc(6px + var(--sat)) !important; left: calc(48px + var(--sal)) !important; }
+    .hud-camera-controls { top: calc(84px + var(--sat)) !important; }
+  }
+  @media (max-height: 500px) {
+    .side-menu-panel { max-height: calc(100vh - 60px - var(--sat) - var(--sab)) !important; }
   }
 </style>
 </head>
