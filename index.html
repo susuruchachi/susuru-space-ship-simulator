@@ -331,7 +331,12 @@
   .wpn-practice.active { background: rgba(255,170,60,0.3); border-color: rgba(255,200,120,0.8); color: #fff; }
   .wpn-salvo { background: rgba(255,60,40,0.22); }
   body.clean-view .wpn-tmarks { display: none !important; }
-  .wpn-inset { position: fixed; border: 1px solid rgba(255,240,160,0.45); border-radius: 4px; pointer-events: none; box-sizing: border-box; }
+  .wpn-inset { position: fixed; border: 1px solid rgba(255,240,160,0.45); border-radius: 4px; pointer-events: auto; box-sizing: border-box; cursor: move; touch-action: none; }
+  /* v89: 右下の角をドラッグして大きさを変える */
+  .wpn-inset-resize { position: absolute; right: -1px; bottom: -1px; width: 22px; height: 22px; cursor: nwse-resize;
+    background: linear-gradient(135deg, transparent 50%, rgba(255,240,160,0.75) 50%); border-bottom-right-radius: 4px; }
+  /* v89: 目標のまとまりの文字は枠の上に */
+  .wpn-cluster .stm-text { top: auto; bottom: 100%; margin-top: 0; margin-bottom: 4px; }
   .wpn-inset::after { content: '射撃方向 →奥'; position: absolute; left: 4px; top: 2px; font-size: 9px; color: rgba(255,240,160,0.7); }
   /* v89: 砲塔ごとの照準マークと、下の番号（緑=撃てる・黄=旋回中・赤=装填中・灰=射線が当たる／寄せただけ・白灰=向けられない） */
   .wpn-gunmarks { position: fixed; inset: 0; pointer-events: none; }

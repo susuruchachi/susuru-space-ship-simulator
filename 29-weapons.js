@@ -824,8 +824,52 @@ const Weapons = {
     this._inset = { scene, ship, inst, lines, camera, size };
     const frame = document.createElement('div');
     frame.className = 'wpn-inset';
+    frame.innerHTML = '<div class="wpn-inset-resize" title="ドラッグで大きさを変える"></div>';
     document.body.appendChild(frame);
     this._inset.frame = frame;
+    this._bindInsetDrag(frame);
+  },
+  // v89: 小さな図は、ドラッグで動かし、右下の角で大きさを変えられる（最後の状態をこの端末に保存。ダブルタップで元の場所へ）
+  INSET_LAYOUT_KEY: 'spaceSimWeaponInset',
+  _insetLayout() {
+    if (this._insetLayoutCache !== undefined) return this._insetLayoutCache;
+    let v = null;
+    try { v = JSON.parse(localStorage.getItem(this.INSET_LAYOUT_KEY) || 'null'); } catch (e) { v = null; }
+    this._insetLayoutCache = v && Number.isFinite(v.x) && Number.isFinite(v.bottom) && v.w > 0 && v.h > 0 ? v : null;
+    return this._insetLayoutCache;
+  },
+  _saveInsetLayout(v) {
+    this._insetLayoutCache = v;
+    try { if (v) localStorage.setItem(this.INSET_LAYOUT_KEY, JSON.stringify(v)); else localStorage.removeItem(this.INSET_LAYOUT_KEY); } catch (e) { /* ignore */ }
+  },
+  _bindInsetDrag(frame) {
+    let drag = null, lastTap = 0;
+    const start = (x, y, id, target) => {
+      const b = this._inset && this._inset.box;
+      if (!b) return;
+      const now = performance.now();
+      if (now - lastTap < 350) { this._saveInsetLayout(null); lastTap = 0; drag = null; this._flashStatus('姿勢の図を元の場所に戻しました'); return; }
+      lastTap = now;
+      drag = { id, x, y, b: { ...b }, resize: target.classList.contains('wpn-inset-resize') };
+    };
+    const move = (x, y, id) => {
+      if (!drag || drag.id !== id) return;
+      const dx = x - drag.x, dy = y - drag.y;
+      const b = drag.b;
+      // 大きさを変えるとき: 右下の角を動かす（左上は動かさない）
+      const v = drag.resize
+        ? { x: b.x, w: b.w + dx, h: b.h + dy, bottom: b.bottom - dy }
+        : { x: b.x + dx, w: b.w, h: b.h, bottom: b.bottom - dy };
+      if (drag.resize) { v.w = Math.max(120, v.w); v.h = Math.max(80, v.h); v.bottom = b.bottom + b.h - v.h; }
+      this._saveInsetLayout(v);
+    };
+    const end = (id) => { if (drag && drag.id === id) drag = null; };
+    frame.addEventListener('touchstart', (e) => { e.preventDefault(); e.stopPropagation(); const t = e.changedTouches[0]; start(t.clientX, t.clientY, t.identifier, e.target); }, { passive: false });
+    frame.addEventListener('touchmove', (e) => { e.preventDefault(); for (const t of e.changedTouches) move(t.clientX, t.clientY, t.identifier); }, { passive: false });
+    frame.addEventListener('touchend', (e) => { for (const t of e.changedTouches) end(t.identifier); });
+    frame.addEventListener('mousedown', (e) => { e.stopPropagation(); start(e.clientX, e.clientY, 'mouse', e.target); });
+    window.addEventListener('mousemove', (e) => move(e.clientX, e.clientY, 'mouse'));
+    window.addEventListener('mouseup', () => end('mouse'));
   },
   _disposeInset() {
     const s = this._inset;
@@ -844,13 +888,22 @@ const Weapons = {
     const ship = State.ship;
     const dl = this.aimDirLocal();
     if (!ship || !dl) return;
-    // 置き場所: 装填の棒（番号）の上
+    // 置き場所: 動かした・大きさを変えたならその場所（画面に収まるように）、そうでなければ装填の棒（番号）の上
     const small = window.innerWidth <= 700 || window.innerHeight <= 500;
-    const w = small ? 170 : 230, h = small ? 104 : 140;
-    const cr = this._ui.chips.getBoundingClientRect();
-    const cx = cr.width > 0 ? cr.left + cr.width / 2 : window.innerWidth / 2;
-    const bottom = cr.height > 0 ? window.innerHeight - cr.top + 6 : 90;
-    const x = Math.round(cx - w / 2);
+    let w = small ? 170 : 230, h = small ? 104 : 140, x, bottom;
+    const L = this._insetLayout();
+    if (L) {
+      w = Math.round(clamp(L.w, 120, window.innerWidth * 0.9));
+      h = Math.round(clamp(L.h, 80, window.innerHeight * 0.8));
+      x = Math.round(clamp(L.x, 0, window.innerWidth - w));
+      bottom = Math.round(clamp(L.bottom, 0, window.innerHeight - h));
+    } else {
+      const cr = this._ui.chips.getBoundingClientRect();
+      const cx = cr.width > 0 ? cr.left + cr.width / 2 : window.innerWidth / 2;
+      bottom = cr.height > 0 ? window.innerHeight - cr.top + 6 : 90;
+      x = Math.round(cx - w / 2);
+    }
+    s.box = { x, bottom, w, h };
     s.frame.style.left = `${x}px`; s.frame.style.bottom = `${bottom}px`;
     s.frame.style.width = `${w}px`; s.frame.style.height = `${h}px`;
     // 艦の概形: モデルの座標 → 艦の位置を原点にしたゲームの座標
@@ -1980,20 +2033,26 @@ const WeaponDesigner = {
     const gl = $('wpnGroupList');
     gl.innerHTML = '';
     const tree = this._groupTree(groups);
+    // 最上位のグループごとに1行（その中のグループは同じ行に続ける）
+    let row = null;
     for (const { g, depth } of tree) {
+      if (depth === 0 || !row) {
+        row = document.createElement('div');
+        row.className = 'grp-row';
+        gl.appendChild(row);
+      }
       const b = document.createElement('button');
       b.type = 'button';
       const n = this._groupMounts(g.id).length;
       b.className = `pod-chip grp-chip${g.id === this._selGroup ? ' selected' : ''}${!g.parent && g.autoFire ? ' auto' : ''}${depth ? ' sub' : ''}`;
-      b.style.marginLeft = depth ? `${depth * 14}px` : '';
-      b.textContent = `${depth ? '└ ' : ''}${g.name}（${n}基）`;
+      b.textContent = `${depth ? '└'.padStart(depth, '　') + ' ' : ''}${g.name}（${n}基）`;
       b.addEventListener('click', () => {
         this._selGroup = g.id;
         const first = this._groupMounts(g.id)[0];
         if (first) this._select('mount', first.key);
         else { this._sel = null; this._groupLocked = true; this.refresh(); }
       });
-      gl.appendChild(b);
+      row.appendChild(b);
     }
     const cg = groups.find((g) => g.id === this._selGroup);
     $('wpnGroupEditor').style.display = cg ? '' : 'none';
