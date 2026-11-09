@@ -72,6 +72,24 @@ function weaponAutoReload(c) {
   return Math.round((3 + cal * 0.065) * k * 10) / 10;
 }
 function weaponReload(c) { return c.reload > 0 ? c.reload : weaponAutoReload(c); }
+// v89: 射程の単位（設定画面で選ぶ）
+const WEAPON_RANGE_UNITS = {
+  km: { label: 'km', m: 1e3 },
+  au: { label: '天文単位', m: 1.495978707e11 },
+  ld: { label: '光日', m: 299792458 * 86400 },
+};
+// 射程の目安 [m]: 実弾は初速 × 30 秒、レーザーは 2,000 km
+function weaponAutoRange(c) {
+  if (c.kind === 'laser') return 2e6;
+  return weaponTypeInfo('kinetic', c.type).speed * 30;
+}
+function weaponRange(c) { return c.range > 0 ? c.range : weaponAutoRange(c); }
+function formatWeaponRange(m, unit) {
+  const u = WEAPON_RANGE_UNITS[unit] || WEAPON_RANGE_UNITS.km;
+  const v = m / u.m;
+  const t = v >= 100 ? Math.round(v).toLocaleString('ja-JP') : v >= 1 ? v.toFixed(1) : v.toPrecision(2);
+  return `${t} ${u.label}`;
+}
 // 旋回・俯仰の速さの目安 [°/s]（空欄のとき）: 大きい砲ほどゆっくり
 function weaponAutoTraverseRate(c) { return Math.round(clamp(40 - (c.caliber || 0) * 0.06, 5, 45)); }
 function weaponTraverseRate(c) { return c.traverseRate > 0 ? c.traverseRate : weaponAutoTraverseRate(c); }
@@ -95,6 +113,9 @@ function normalizeWeaponMount(c) {
     traverseRate: Number(c.traverseRate) > 0 ? Number(c.traverseRate) : null,
     elevRate: Number(c.elevRate) > 0 ? Number(c.elevRate) : null,
     group: typeof c.group === 'string' && c.group ? c.group : null, // v89: グループの id
+    // v89: 射程 [m]（null なら砲の種類から目安）と、表示の単位
+    range: Number(c.range) > 0 ? Number(c.range) : null,
+    rangeUnit: WEAPON_RANGE_UNITS[c.rangeUnit] ? c.rangeUnit : 'km',
   };
   if (out.yawMax < out.yawMin) [out.yawMin, out.yawMax] = [out.yawMax, out.yawMin];
   if (out.elevMax < out.elevMin) [out.elevMin, out.elevMax] = [out.elevMax, out.elevMin];
@@ -505,11 +526,14 @@ const Weapons = {
       const mounts = rig.mounts.filter((m) => m.groupId === g.id);
       return { id: g.id, name: g.name, mode: g.autoFire ? 'max' : 'off', power: g.autoPower, mounts, hasLaser: mounts.some((m) => m.cfg.kind === 'laser') };
     }).filter((g) => g.mounts.length);
+    this._groupById = new Map(this.groups.map((g) => [g.id, g]));
+    this._mainCaliber = Math.max(...rig.mounts.map((m) => m.cfg.caliber), 0);
     this._buildMountUi();
     this._buildGroupUi();
     this._syncUi();
   },
   detach() {
+    this.stopPractice();
     this._disposeInset();
     if (this.rig) WeaponRig.restoreAll(this.rig);
     this.rig = null;
@@ -542,6 +566,8 @@ const Weapons = {
   stopAim() {
     this.aim.active = false;
     this._viewMount = null;
+    this.lock = null;
+    this._salvo = null;
     this.setView(false);
     this._syncUi();
   },
@@ -571,6 +597,10 @@ const Weapons = {
     const ship = State.ship;
     if (!this.rig || !ship || !ship.mesh) return;
     ship.mesh.updateMatrixWorld(true);
+    this._time = (this._time || 0) + dt;
+    // v89: 演習の目標を動かし、照準の視点に写っている目標へ照準を合わせる（自動照準）
+    this._updateTargets(dt);
+    this._updateLock();
     const dl = this.aimDirLocal();
     const D = dl ? new THREE.Vector3(dl.x, dl.y, dl.z) : null;
     let ready = 0, aimed = 0;
@@ -578,8 +608,10 @@ const Weapons = {
       const c = m.cfg;
       let ty = 0, te = 0;
       m.mode = 'none'; // 'exact' ぴったり向けられる / 'near' 範囲の端まで寄せる / 'none' 元の向き
-      if (D) {
-        const a = WeaponRig.aimAngles(m, D);
+      // v89: 砲ごとの狙う向き（演習の目標があれば、その砲の弾の速さで偏差をつけた向き）
+      const Dm = this._mountAimDir(m, D);
+      if (Dm) {
+        const a = WeaponRig.aimAngles(m, Dm);
         const yMin = toRadW(c.yawMin), yMax = toRadW(c.yawMax), eMin = toRadW(c.elevMin), eMax = toRadW(c.elevMax);
         if (a.yaw >= yMin - 1e-6 && a.yaw <= yMax + 1e-6 && a.elev >= eMin - 1e-6 && a.elev <= eMax + 1e-6) {
           ty = a.yaw; te = a.elev; m.mode = 'exact';
@@ -648,6 +680,16 @@ const Weapons = {
           });
         }
       }
+    }
+    // v89: 一斉射撃（ボタン）: 照準の目標へ向け直した砲が、撃てるようになったら1回ずつ撃つ
+    if (this._salvo) {
+      for (const m of [...this._salvo.mounts]) {
+        if (this.lock && m.target !== this.lock) continue;
+        let fired = false;
+        m.barrels.forEach((b, i) => { if (this._canFireBarrel(m, i)) { this._shoot(m, b, i); fired = true; } });
+        if (fired) { this._salvo.mounts.delete(m); m._nextPick = 0; } // 撃ったら、また自分で目標を選ぶ
+      }
+      if (!this._salvo.mounts.size || this._time > this._salvo.until) this._salvo = null;
     }
     for (const d of this.rig.directors) {
       const c = d.cfg;
@@ -868,6 +910,7 @@ const Weapons = {
     const el = this._ui && this._ui.reticle;
     if (el) { el.style.left = '50%'; el.style.top = '50%'; }
     this._placeGunMarks(cam);
+    this._placeTargetMarks(cam);
     if (this._ui && this._ui.zoom) {
       const t = `測距儀 ×${(this._savedFov / this._aimFov).toFixed(1)}`;
       if (this._ui.zoom.textContent !== t) this._ui.zoom.textContent = t;
@@ -922,6 +965,259 @@ const Weapons = {
     }
     return list;
   },
+  // ---------------------------------------------------------
+  // v89: 演習モード（射撃の目標）・自動照準・偏差射撃・独立した目標
+  // ---------------------------------------------------------
+  PRACTICE_GROUPS: 3,
+  PRACTICE_PER_GROUP: 15,
+  practice: null,
+  lock: null,
+  _practiceOn() { return !!(this.practice && this.practice.alive > 0); },
+  // 演習を始める: 艦のまわりの3方向に、15個ずつの目標のまとまり（止まっている目標と動く目標）を置く
+  startPractice() {
+    this.stopPractice();
+    const ship = State.ship;
+    if (!ship || !this._scene) return;
+    const group = new THREE.Group();
+    group.frustumCulled = false;
+    this._scene.add(group);
+    const geo = new THREE.BoxGeometry(1, 1, 1);
+    const matStill = new THREE.MeshStandardMaterial({ color: 0xff9a3a, emissive: 0x7a3a10, roughness: 0.6 });
+    const matMove = new THREE.MeshStandardMaterial({ color: 0x5fd8ff, emissive: 0x104a66, roughness: 0.6 });
+    // まとまりの距離は、主砲の射程に合わせる（射程の 25%・50%・80%。3〜30 km）
+    const mainRange = this.rig && this.rig.mounts.length ? Math.max(...this.rig.mounts.map((m) => weaponRange(m.cfg))) : 30000;
+    const dists = [0.25, 0.5, 0.8].map((k) => clamp(mainRange * k, 3000, 30000));
+    const dirs = [[35, 5], [-70, 0], [150, 10]]; // [艦首からの左右の角度, 上下の角度] [°]
+    const q = new THREE.Quaternion(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w);
+    const targets = [];
+    for (let gi = 0; gi < this.PRACTICE_GROUPS; gi++) {
+      const [yaw, el] = dirs[gi % dirs.length];
+      const d = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(1, 0, 0), toRadW(el)).applyAxisAngle(new THREE.Vector3(0, 1, 0), toRadW(yaw)).applyQuaternion(q);
+      const center = new THREE.Vector3(ship.position.x, ship.position.y, ship.position.z).addScaledVector(d, dists[gi]);
+      const spread = 1500;
+      for (let k = 0; k < this.PRACTICE_PER_GROUP; k++) {
+        const moving = k % 2 === 1;
+        const size = 20 + Math.random() * 20;
+        const off = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(spread * 2);
+        const pos = center.clone().add(off);
+        const vel = moving ? new THREE.Vector3(Math.random() - 0.5, (Math.random() - 0.5) * 0.4, Math.random() - 0.5).normalize().multiplyScalar(40 + Math.random() * 120) : new THREE.Vector3();
+        const mesh = new THREE.Mesh(geo, moving ? matMove : matStill);
+        mesh.scale.setScalar(size);
+        mesh.position.copy(pos);
+        mesh.rotation.set(Math.random() * 3, Math.random() * 3, 0);
+        group.add(mesh);
+        targets.push({ pos, vel, size, moving, alive: true, mesh, center, group: gi, distShip: 0 });
+      }
+    }
+    this.practice = { targets, group, geo, mats: [matStill, matMove], alive: targets.length, total: targets.length };
+    this._buildTargetMarkers();
+    this._flashStatus(`演習を始めました（目標 ${targets.length}個）`);
+    this._syncUi();
+  },
+  stopPractice() {
+    const P = this.practice;
+    if (!P) return;
+    this._scene.remove(P.group);
+    P.geo.dispose();
+    for (const m of P.mats) m.dispose();
+    this.practice = null;
+    this.lock = null;
+    if (this._ui && this._ui.tmarks) this._ui.tmarks.innerHTML = '';
+    if (this.rig) for (const m of this.rig.mounts) { m.target = null; m._indep = null; m._near = null; }
+    this._syncUi();
+  },
+  _updateTargets(dt) {
+    const P = this.practice;
+    if (!P) return;
+    const ship = State.ship;
+    const sp = new THREE.Vector3(ship.position.x, ship.position.y, ship.position.z);
+    for (const t of P.targets) {
+      if (!t.alive) continue;
+      if (t.moving) {
+        t.pos.addScaledVector(t.vel, dt);
+        // まとまりの中心から 2.5 km より離れたら戻ってくる
+        const r = t.pos.clone().sub(t.center);
+        if (r.length() > 2500 && r.dot(t.vel) > 0) t.vel.reflect(r.normalize());
+        t.mesh.rotation.x += dt * 0.6; t.mesh.rotation.y += dt * 0.4;
+      }
+      t.mesh.position.copy(t.pos);
+      t.distShip = t.pos.distanceTo(sp);
+    }
+  },
+  _destroyTarget(t) {
+    if (!t.alive) return;
+    t.alive = false;
+    this.practice.alive--;
+    this.practice.group.remove(t.mesh);
+    // 小さな爆発（明るい点が広がって消える）
+    const ship = State.ship;
+    const fmat = new THREE.PointsMaterial({ map: this._dotTexture(), color: 0xffd090, size: 46, sizeAttenuation: false, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+    const fgeo = new THREE.BufferGeometry();
+    fgeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([t.pos.x, t.pos.y, t.pos.z]), 3));
+    const flash = new THREE.Points(fgeo, fmat);
+    flash.frustumCulled = false;
+    this._fx.add(flash);
+    this._effects.push({ kind: 'flash', obj: flash, rel: { x: t.pos.x - ship.position.x, y: t.pos.y - ship.position.y, z: t.pos.z - ship.position.z }, t: 0, life: 0.6, mats: [fmat], boom: true });
+    if (this.lock === t) this.lock = null;
+    if (this.practice.alive === 0) this._flashStatus(`演習完了: 目標 ${this.practice.total}個を全部撃ちました`);
+  },
+  // 基準のフレームが変わったとき（16-navigation.js switchFrame）: 目標の位置・速度を新しいフレームへ写す
+  onFrameSwitch(oldF, newF, nav) {
+    const P = this.practice;
+    if (!P) return;
+    const conv = (p) => { const u = nav.localToUniverse({ x: p.x, y: p.y, z: p.z }, oldF); const l = nav.universeToLocal(u, newF); return new THREE.Vector3(l.x, l.y, l.z); };
+    for (const t of P.targets) {
+      const np = conv(t.pos);
+      const vu = Astro.mat3MulVec(oldF.rot, t.vel);
+      const vo = nav._framePointVelocity(oldF, t.pos), vn = nav._framePointVelocity(newF, np);
+      const v = Astro.mat3MulVec(newF.rotT, { x: vu.x + vo.x - vn.x, y: vu.y + vo.y - vn.y, z: vu.z + vo.z - vn.z });
+      t.pos.copy(np); t.vel.set(v.x, v.y, v.z);
+      t.mesh.position.copy(np);
+    }
+    const seen = new Set();
+    for (const t of P.targets) if (!seen.has(t.center)) { seen.add(t.center); t.center.copy(conv(t.center)); }
+  },
+  // 照準の視点を見ている点（射撃レーダー、無ければ艦の中心）
+  _viewOrigin() {
+    const dir = this.rig && this.rig.directors[0];
+    const v = new THREE.Vector3();
+    if (dir) dir.node.getWorldPosition(v);
+    else { const p = State.ship.position; v.set(p.x, p.y, p.z); }
+    return v;
+  },
+  // 自動照準: 照準の視点に写っている目標のうち、照準（画面の中央）にいちばん近いものに合わせ、その目標を追う
+  _updateLock() {
+    if (!this._practiceOn() || !this.aim.active) { if (!this._practiceOn()) this.lock = null; return; }
+    const o = this._viewOrigin();
+    const dl = this.aimDirLocal();
+    if (!dl) return;
+    const D = new THREE.Vector3(dl.x, dl.y, dl.z);
+    const cone = toRadW(this._aimFov * 0.45); // 画面に写っている（中央からこの角度まで）
+    const angOf = (t) => Math.acos(clamp(t.pos.clone().sub(o).normalize().dot(D), -1, 1));
+    if (this.lock && (!this.lock.alive || (this.view && angOf(this.lock) > cone * 1.2))) this.lock = null;
+    if (!this.lock && this.view) {
+      let best = null, bestA = cone;
+      for (const t of this.practice.targets) { if (!t.alive) continue; const a = angOf(t); if (a < bestA) { bestA = a; best = t; } }
+      this.lock = best;
+    }
+    // 照準（狙う向き・画面の中央）を目標に合わせ続ける（照準の視点から戻っても）
+    if (this.lock) {
+      const d = this.lock.pos.clone().sub(o).normalize();
+      this.aim.dirU = this._toUniverse({ x: d.x, y: d.y, z: d.z });
+    }
+  },
+  _groupMode(m) { const g = this._groupById && this._groupById.get(m.groupId); return g ? g.mode : 'off'; },
+  // 偏差: 砲から目標を、その砲の弾が当たる向き（目標が動く分を先取り）。レーザーはまっすぐ
+  _lead(m, t) {
+    const ship = State.ship;
+    const P = new THREE.Vector3();
+    m.turret.getWorldPosition(P);
+    const R = t.pos.clone().sub(P);
+    if (m.cfg.kind === 'laser') return { dir: R.clone().normalize(), dist: R.length() };
+    const s = weaponTypeInfo('kinetic', m.cfg.type).speed;
+    const Vr = t.vel.clone().sub(new THREE.Vector3(ship.velocity.x, ship.velocity.y, ship.velocity.z));
+    const a = Vr.dot(Vr) - s * s, b = 2 * R.dot(Vr), c = R.dot(R);
+    let tt;
+    if (Math.abs(a) < 1e-9) tt = -c / b;
+    else {
+      const disc = b * b - 4 * a * c;
+      if (disc < 0) return { dir: R.clone().normalize(), dist: Infinity };
+      const sq = Math.sqrt(disc);
+      const t1 = (-b - sq) / (2 * a), t2 = (-b + sq) / (2 * a);
+      tt = Math.min(t1 > 0 ? t1 : Infinity, t2 > 0 ? t2 : Infinity);
+    }
+    if (!(tt > 0) || !Number.isFinite(tt)) return { dir: R.clone().normalize(), dist: Infinity };
+    const aimP = R.clone().addScaledVector(Vr, tt);
+    return { dir: aimP.clone().normalize(), dist: aimP.length() };
+  },
+  // 線分 a→b が当たる目標（いちばん手前）
+  _segmentHit(a, b) {
+    const A = new THREE.Vector3(a.x, a.y, a.z), B = new THREE.Vector3(b.x, b.y, b.z);
+    const AB = B.clone().sub(A), L2 = Math.max(1e-9, AB.lengthSq());
+    let best = null, bestU = 2;
+    for (const t of this.practice.targets) {
+      if (!t.alive) continue;
+      const u = clamp(t.pos.clone().sub(A).dot(AB) / L2, 0, 1);
+      const r = t.size * 0.75;
+      if (A.clone().addScaledVector(AB, u).distanceToSquared(t.pos) <= r * r && u < bestU) { bestU = u; best = t; }
+    }
+    return best;
+  },
+  // レーザーの光線（点 p から向き dir、長さ range）が当たる目標（いちばん手前）
+  _laserHit(p, dir, range) {
+    if (!this._practiceOn()) return null;
+    let best = null;
+    for (const t of this.practice.targets) {
+      if (!t.alive) continue;
+      const w = t.pos.clone().sub(p);
+      const along = w.dot(dir);
+      if (along < 0 || along > range) continue;
+      const r = t.size * 0.75;
+      if (w.lengthSq() - along * along <= r * r && (!best || along < best.along)) best = { t, along };
+    }
+    return best;
+  },
+  // この砲がこの目標を撃てるか（射程の中で、旋回範囲・仰角の範囲で向けられる）
+  _canEngage(m, t) {
+    if (!t || !t.alive) return false;
+    const L = this._lead(m, t);
+    if (!(L.dist <= weaponRange(m.cfg))) return false;
+    const a = WeaponRig.aimAngles(m, L.dir), c = m.cfg;
+    return a.yaw >= toRadW(c.yawMin) - 1e-6 && a.yaw <= toRadW(c.yawMax) + 1e-6 && a.elev >= toRadW(c.elevMin) - 1e-6 && a.elev <= toRadW(c.elevMax) + 1e-6;
+  },
+  _nearestEngageable(m, filter) {
+    const list = this.practice.targets.filter((t) => t.alive && (!filter || filter(t))).sort((x, y) => x.distShip - y.distShip);
+    for (const t of list) if (this._canEngage(m, t)) return t;
+    return null;
+  },
+  // 砲の目標を決める
+  //   手動の砲・一斉射撃中の砲: 照準の目標
+  //   自動射撃の砲: 副砲（主砲より小さな口径）は、照準の目標より自艦にずっと近い目標があればそちらを。
+  //   照準の目標を撃てればそれを、撃てなければ（向けられない・射程の外）撃てるいちばん近い目標を独立して撃つ
+  _chooseTarget(m) {
+    const main = this.lock && this.lock.alive ? this.lock : null;
+    const auto = this._groupMode(m) !== 'off';
+    if (main && ((this._salvo && this._salvo.mounts.has(m)) || !auto)) return main;
+    if (!auto) return main;
+    // 向けたが射線が船体・ほかの砲に当たって撃てなかった目標は、この砲ではしばらく（3秒）選ばない
+    if (m.target && m.state === 'blocked') {
+      if (!m._badT) m._badT = new Map();
+      m._badT.set(m.target, this._time + 3);
+      m._nextPick = 0;
+    }
+    const ok = (t) => !(m._badT && m._badT.get(t) > this._time);
+    const mainOk = main && ok(main) && this._canEngage(m, main);
+    if (!m._nextPick || this._time >= m._nextPick) {
+      m._nextPick = this._time + 0.4 + Math.random() * 0.2;
+      m._near = m.cfg.caliber < this._mainCaliber - 1e-6 ? this._nearestEngageable(m, (t) => ok(t) && (!main || t.distShip < main.distShip * 0.6)) : null;
+      m._indep = mainOk ? null : this._nearestEngageable(m, ok);
+    }
+    if (m._near && m._near.alive && ok(m._near)) return m._near;
+    if (mainOk) return main;
+    if (m._indep && m._indep.alive && ok(m._indep)) return m._indep;
+    return main;
+  },
+  // 砲の狙う向き（ゲームの座標の単位ベクトル）。演習の目標が無ければ照準の向きそのまま
+  _mountAimDir(m, D) {
+    m.rangeOk = true;
+    if (!this._practiceOn() || !this.aim.active) { m.target = null; return D; }
+    const t = this._chooseTarget(m);
+    m.target = t;
+    if (!t) return D;
+    const L = this._lead(m, t);
+    m.rangeOk = L.dist <= weaponRange(m.cfg);
+    return L.dir;
+  },
+  // 一斉射撃（ボタン）: 独立して別の目標を撃っていた砲も、照準の目標を撃てるなら向け直して撃つ
+  salvo() {
+    if (!this.rig) return 0;
+    if (!this.lock) return this.fire();
+    const mounts = this.rig.mounts.filter((m) => this._canEngage(m, this.lock));
+    this._salvo = { mounts: new Set(mounts), until: this._time + 20 };
+    for (const m of mounts) { m._indep = null; m._near = null; m._nextPick = this._time + 20; }
+    return mounts.length;
+  },
+
   // v89: レーザーは充電の途中でも撃てる（充電の割合 = 1 − 残り時間 / 充電時間。光線の太さがその割合になる）
   LASER_MIN_CHARGE: 0.05,
   _charge(m, i) { return clamp(1 - m.reloadLeft[i] / weaponReload(m.cfg), 0, 1); },
@@ -933,7 +1229,7 @@ const Weapons = {
   },
   // minCharge: レーザーの撃てる充電の割合（省略時は LASER_MIN_CHARGE）。実弾砲は装填が済んでいること
   _canFireBarrel(m, i, minCharge) {
-    if (!m.onTarget || (m.blocked && m.blocked[i])) return false;
+    if (!m.onTarget || (m.blocked && m.blocked[i]) || m.rangeOk === false) return false;
     if (m.cfg.kind === 'laser') return this._charge(m, i) >= Math.max(this.LASER_MIN_CHARGE, (minCharge ?? 0) - 1e-9);
     return m.reloadLeft[i] <= 0;
   },
@@ -1005,7 +1301,10 @@ const Weapons = {
     if (m.cfg.kind === 'laser') {
       const info = weaponTypeInfo('laser', m.cfg.type);
       const color = new THREE.Color(m.cfg.color);
-      const len = Math.max(size * 60, 20000);
+      // v89: 射程まで届く（演習の目標に当たれば、そこで止まって目標を壊す）
+      let len = Math.min(weaponRange(m.cfg), 5e7);
+      const hit = this._laserHit(pos, dir, weaponRange(m.cfg));
+      if (hit) { len = hit.along; this._destroyTarget(hit.t); }
       const r = Math.max((m.cfg.caliber / 1000) * 1.5, size * 0.0015) * Math.max(0.12, pw); // 充電の途中で撃つと細い
       const geo = new THREE.CylinderGeometry(r, r, len, 8, 1, true);
       geo.translate(0, len / 2, 0);
@@ -1044,7 +1343,8 @@ const Weapons = {
       this._fx.add(flash);
       this._effects.push({ kind: 'flash', obj: flash, rel: { ...rel }, t: 0, life: 0.12, mats: [fmat] });
       // 弾は艦からの相対位置で持つ（艦の位置の付け替え〈原点の移動〉で弾が跳ばないように）
-      this._effects.push({ kind: 'shell', line, pt, rel, v, t: 0, life: Math.min(20, Math.max(size * 80, 30000) / info.speed), mats: [mat, pmat] });
+      // v89: 射程まで飛ぶ（長すぎる射程は見た目のため 300 秒まで）
+      this._effects.push({ kind: 'shell', line, pt, rel, v, t: 0, life: Math.min(300, weaponRange(m.cfg) / info.speed), mats: [mat, pmat], last: null });
     }
   },
   _updateEffects(dt) {
@@ -1052,7 +1352,10 @@ const Weapons = {
     if (!this._effects.length || !ship) return;
     if (typeof Navigation !== 'undefined' && Navigation.isWarping && Navigation.isWarping()) { this._clearEffects(); return; }
     const keep = [];
-    for (const e of this._effects) {
+    // 途中で増える効果（目標の爆発など）は、この下で this._effects に足される
+    const list = this._effects;
+    this._effects = [];
+    for (const e of list) {
       e.t += dt;
       const k = 1 - e.t / e.life;
       if (k <= 0) { this._disposeEffect(e); continue; }
@@ -1067,11 +1370,18 @@ const Weapons = {
         a.setXYZ(0, ship.position.x + e.rel.x, ship.position.y + e.rel.y, ship.position.z + e.rel.z);
         a.needsUpdate = true;
         e.mats[0].opacity = k;
+        if (e.boom) e.mats[0].size = 46 + (1 - k) * 60; // 爆発は広がって消える
       } else {
         e.rel.x += (e.v.x - ship.velocity.x) * dt;
         e.rel.y += (e.v.y - ship.velocity.y) * dt;
         e.rel.z += (e.v.z - ship.velocity.z) * dt;
         const p = { x: ship.position.x + e.rel.x, y: ship.position.y + e.rel.y, z: ship.position.z + e.rel.z };
+        // v89: 演習の目標に当たったか（このフレームに進んだ線分と、目標の球）
+        if (this._practiceOn() && e.last) {
+          const t = this._segmentHit(e.last, p);
+          if (t) { this._destroyTarget(t); this._disposeEffect(e); continue; }
+        }
+        e.last = p;
         const sp = Math.hypot(e.v.x - ship.velocity.x, e.v.y - ship.velocity.y, e.v.z - ship.velocity.z) || 1;
         const tail = Math.min(sp * 0.08, (CameraSystem._shipScale || 1) * 8 * 0.6);
         const a = e.line.geometry.attributes.position;
@@ -1086,7 +1396,7 @@ const Weapons = {
       }
       keep.push(e);
     }
-    this._effects = keep;
+    this._effects = keep.concat(this._effects);
   },
   _disposeEffect(e) {
     const objs = e.kind === 'shell' ? [e.line, e.pt] : [e.obj];
@@ -1110,6 +1420,8 @@ const Weapons = {
     box.innerHTML = `
       <div class="wpn-status"></div>
       <div class="wpn-groups"></div>
+      <button type="button" class="wpn-btn wpn-practice">演習</button>
+      <button type="button" class="wpn-btn wpn-salvo">一斉射撃</button>
       <button type="button" class="wpn-btn wpn-fire">撃て</button>
       <button type="button" class="wpn-btn wpn-view">照準</button>
       <button type="button" class="wpn-btn wpn-stop">照準やめ</button>`;
@@ -1141,7 +1453,17 @@ const Weapons = {
       if (rapid && n) this._flashStatus(`一斉射撃 ${n}門`);
       if (!n) this._flashStatus(this.aim.active ? '撃てる砲がありません（旋回中・装填中・範囲外）' : '先に「照準」で狙ってください');
     });
-    this._ui = { box, groups: box.querySelector('.wpn-groups'), reticle, marks, chips, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
+    const tmarks = document.createElement('div');
+    tmarks.className = 'wpn-tmarks';
+    document.body.appendChild(tmarks);
+    box.querySelector('.wpn-practice').addEventListener('click', () => {
+      if (this.practice) { this.stopPractice(); this._flashStatus('演習をやめました'); } else this.startPractice();
+    });
+    box.querySelector('.wpn-salvo').addEventListener('click', () => {
+      const n = this.salvo();
+      this._flashStatus(n ? (this.lock ? `一斉射撃: ${n}基が照準の目標へ` : `一斉射撃 ${n}門`) : '撃てる砲がありません');
+    });
+    this._ui = { box, tmarks, practice: box.querySelector('.wpn-practice'), salvoBtn: box.querySelector('.wpn-salvo'), groups: box.querySelector('.wpn-groups'), reticle, marks, chips, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
     this._syncUi();
   },
   // 砲塔ごとの小さな照準マーク（照準の視点）と、下の番号（装填・指向の状態）
@@ -1212,6 +1534,33 @@ const Weapons = {
       u.groups.appendChild(b);
     }
   },
+  _buildTargetMarkers() {
+    const u = this._ui;
+    if (!u || !this.practice) return;
+    u.tmarks.innerHTML = '';
+    for (const t of this.practice.targets) {
+      const el = document.createElement('div');
+      el.className = `wpn-tmark${t.moving ? ' moving' : ''}`;
+      u.tmarks.appendChild(el);
+      t.el = el;
+    }
+  },
+  _placeTargetMarks(cam) {
+    if (!this.practice) return;
+    const v = new THREE.Vector3();
+    const W = window.innerWidth, H = window.innerHeight;
+    for (const t of this.practice.targets) {
+      const el = t.el;
+      if (!el) continue;
+      if (!t.alive) { el.style.display = 'none'; continue; }
+      v.copy(t.pos).project(cam);
+      if (v.z > 1 || Math.abs(v.x) > 1.05 || Math.abs(v.y) > 1.05) { el.style.display = 'none'; continue; }
+      el.style.display = '';
+      el.style.left = `${((v.x + 1) / 2) * W}px`;
+      el.style.top = `${((1 - v.y) / 2) * H}px`;
+      el.classList.toggle('locked', t === this.lock);
+    }
+  },
   _placeGunMarks(cam) {
     if (!this.rig) return;
     const q = new THREE.Quaternion(), v = new THREE.Vector3();
@@ -1239,6 +1588,9 @@ const Weapons = {
     u.box.style.display = has ? '' : 'none';
     u.view.classList.toggle('active', this.view);
     u.stop.style.display = this.aim.active ? '' : 'none';
+    if (u.salvoBtn) u.salvoBtn.style.display = this.aim.active ? '' : 'none';
+    if (u.practice) { u.practice.textContent = this.practice ? '演習をやめる' : '演習'; u.practice.classList.toggle('active', !!this.practice); }
+    if (u.tmarks) u.tmarks.style.display = has && this.view && this.practice ? '' : 'none';
     u.fire.style.display = this.aim.active ? '' : 'none';
     u.reticle.style.display = has && this.view ? '' : 'none';
     u.marks.style.display = has && this.view ? '' : 'none';
@@ -1252,6 +1604,7 @@ const Weapons = {
     if (!u || !this.rig) return;
     const s = this._status || { aimed: 0, ready: 0, total: this.rig.mounts.length };
     let text = this.aim.active ? `指向 ${s.aimed}/${s.total}基・発射可 ${s.ready}基` : `砲塔 ${s.total}基`;
+    if (this.practice) text += `・演習 残り ${this.practice.alive}/${this.practice.total}`;
     if (this._statusOverride && performance.now() < this._statusOverride.until) text = this._statusOverride.text;
     if (u.status.textContent !== text) u.status.textContent = text;
     u.fire.disabled = !(s.ready > 0);
@@ -1314,6 +1667,13 @@ const WeaponDesigner = {
     bindNum('wpnElevMin', 'elevMin', false);
     bindNum('wpnElevMax', 'elevMax', false);
     bindNum('wpnTraverse', 'traverseRate', true);
+    // v89: 射程（数値と単位）
+    for (const [k, u] of Object.entries(WEAPON_RANGE_UNITS)) $('wpnRangeUnit').appendChild(new Option(u.label, k));
+    $('wpnRange').addEventListener('change', () => this._edit((m) => {
+      const v = Number($('wpnRange').value);
+      m.range = $('wpnRange').value === '' || !(v > 0) ? null : v * WEAPON_RANGE_UNITS[m.rangeUnit].m;
+    }));
+    $('wpnRangeUnit').addEventListener('change', () => this._edit((m) => { m.rangeUnit = $('wpnRangeUnit').value; }));
     $('wpnColor').addEventListener('input', () => this._edit((m) => { m.color = $('wpnColor').value; }));
     // v89: 砲塔・射撃レーダーのプルダウン
     $('wpnPartSel').addEventListener('change', () => {
@@ -1372,7 +1732,7 @@ const WeaponDesigner = {
       const d = this._opts.getDesign();
       for (const m of this._groupMounts(cur.group)) {
         const c = weaponMountConfigFor(d.weapons, m.key);
-        Object.assign(c, { kind: cur.kind, type: cur.type, caliber: cur.caliber, reload: cur.reload, color: cur.color, traverseRate: cur.traverseRate, elevRate: cur.elevRate });
+        Object.assign(c, { kind: cur.kind, type: cur.type, caliber: cur.caliber, reload: cur.reload, color: cur.color, traverseRate: cur.traverseRate, elevRate: cur.elevRate, range: cur.range, rangeUnit: cur.rangeUnit });
         d.weapons.mounts[m.key] = c;
       }
       this._opts.onChange();
@@ -1384,7 +1744,7 @@ const WeaponDesigner = {
       const d = this._opts.getDesign();
       for (const m of this._rig.mounts) {
         const c = weaponMountConfigFor(d.weapons, m.key);
-        Object.assign(c, { kind: cur.kind, type: cur.type, caliber: cur.caliber, reload: cur.reload, color: cur.color, traverseRate: cur.traverseRate, elevRate: cur.elevRate });
+        Object.assign(c, { kind: cur.kind, type: cur.type, caliber: cur.caliber, reload: cur.reload, color: cur.color, traverseRate: cur.traverseRate, elevRate: cur.elevRate, range: cur.range, rangeUnit: cur.rangeUnit });
         d.weapons.mounts[m.key] = c;
       }
       this._opts.onChange();
@@ -1581,13 +1941,17 @@ const WeaponDesigner = {
       setVal('wpnElevMin', String(c.elevMin));
       setVal('wpnElevMax', String(c.elevMax));
       setVal('wpnTraverse', c.traverseRate > 0 ? String(c.traverseRate) : '');
+      const ru = WEAPON_RANGE_UNITS[c.rangeUnit];
+      $('wpnRangeUnit').value = c.rangeUnit;
+      setVal('wpnRange', c.range > 0 ? String(Number((c.range / ru.m).toPrecision(6))) : '');
+      $('wpnRange').placeholder = `自動（${formatWeaponRange(weaponAutoRange(c), c.rangeUnit)}）`;
       $('wpnTraverse').placeholder = `自動（${weaponAutoTraverseRate(c)}）`;
       $('wpnTestYaw').min = String(c.yawMin); $('wpnTestYaw').max = String(c.yawMax);
       $('wpnTestElev').min = String(c.elevMin); $('wpnTestElev').max = String(c.elevMax);
       const info = weaponTypeInfo(c.kind, c.type);
       $('wpnLine').textContent = c.kind === 'laser'
-        ? `${info.label}・口径 ${c.caliber}mm・充電 ${weaponReload(c)}秒・照射 ${info.beamTime}秒`
-        : `${info.label}・口径 ${c.caliber}mm・装填 ${weaponReload(c)}秒・初速 ${info.speed.toLocaleString('ja-JP')} m/s・旋回 ${weaponTraverseRate(c)}°/s・俯仰 ${weaponElevRate(c)}°/s`;
+        ? `${info.label}・口径 ${c.caliber}mm・充電 ${weaponReload(c)}秒・照射 ${info.beamTime}秒・射程 ${formatWeaponRange(weaponRange(c), c.rangeUnit)}`
+        : `${info.label}・口径 ${c.caliber}mm・装填 ${weaponReload(c)}秒・初速 ${info.speed.toLocaleString('ja-JP')} m/s・射程 ${formatWeaponRange(weaponRange(c), c.rangeUnit)}・旋回 ${weaponTraverseRate(c)}°/s・俯仰 ${weaponElevRate(c)}°/s`;
     } else {
       const c = normalizeWeaponDirector(design.weapons.directors[part.key]);
       $('dirEditorTitle').textContent = part.key;

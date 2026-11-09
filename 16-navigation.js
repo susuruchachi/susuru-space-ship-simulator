@@ -465,6 +465,8 @@ const Navigation = {
         ship.boundaryPoint = { x: bp.x, y: bp.y, z: bp.z };
       }
       this._shiftEngineParticles(old, newFrame);
+      // v89: 演習の目標も新しいフレームへ写す（29-weapons.js）
+      if (typeof Weapons !== 'undefined' && Weapons.onFrameSwitch) Weapons.onFrameSwitch(old, newFrame, this);
     }
     this.frame = newFrame;
     if (!newFrame.isHome && ship) ship.autoDockingEnabled = false;
