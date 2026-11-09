@@ -529,7 +529,16 @@ const WeaponRig = {
       const x = A.x + d.x * u, y = A.y + d.y * u, z = A.z + d.z * u;
       const ci = Math.floor((x - lo.x) / occ.cell), cj = Math.floor((y - lo.y) / occ.cell), cl = Math.floor((z - lo.z) / occ.cell);
       if (ci < 0 || cj < 0 || cl < 0 || ci >= occ.nx || cj >= occ.ny || cl >= occ.nz) continue;
-      if (occ.grid[(cl * occ.ny + cj) * occ.nx + ci] !== 0) return a.clone().lerp(b, u);
+      if (occ.grid[(cl * occ.ny + cj) * occ.nx + ci] !== 0) {
+        // v89: 直前の空いている点との間を細かく探して、船体（格子）の表面ぴったりの点を返す
+        let lo = i > 0 ? t0 + ((t1 - t0) * (i - 1)) / n : u, hi = u;
+        const occAt = (uu) => {
+          const xi = Math.floor((A.x + d.x * uu - occ.min.x) / occ.cell), yi = Math.floor((A.y + d.y * uu - occ.min.y) / occ.cell), zi = Math.floor((A.z + d.z * uu - occ.min.z) / occ.cell);
+          return xi >= 0 && yi >= 0 && zi >= 0 && xi < occ.nx && yi < occ.ny && zi < occ.nz && occ.grid[(zi * occ.ny + yi) * occ.nx + xi] !== 0;
+        };
+        if (i > 0) for (let k = 0; k < 10; k++) { const mid = (lo + hi) / 2; if (occAt(mid)) hi = mid; else lo = mid; }
+        return a.clone().lerp(b, hi);
+      }
     }
     return null;
   },
@@ -794,6 +803,9 @@ const Weapons = {
 
   // ShipController.update の後、毎フレーム
   update(dt) {
+    // v89: 弾の当たり判定（_updateEffects）の前に、艦のモデルの位置をこのフレームに合わせる。
+    //   以前は後で合わせていたため、弾は1フレーム前の位置の船体で判定され、艦が動いていると被弾の跡が船体から離れたところに付いていた
+    if (State.ship && State.ship.mesh) State.ship.mesh.updateMatrixWorld(true);
     this._updateEffects(dt);
     // v89: 演習モードは、太陽系のどこかランダムな場所（演習海域）で始める
     if (PRACTICE_MODE && !this._arena) this._placeArena(dt);
@@ -2058,7 +2070,7 @@ const Weapons = {
     const P = this.practice;
     const ref = P ? P.shipHPMax * 0.01 : 50;
     const r = size * 0.006 * (1 + Math.sqrt(sp.dmg / ref) * 1.6); // ダメージが大きいほど広く
-    const p = sp.local.clone().addScaledVector(sp.out, r * 0.3);
+    const p = sp.local.clone().addScaledVector(sp.out, r * 0.12);
     sp.glow.position.copy(p);
     const h = clamp(sp.heat, 0, 1.5);
     sp.glow.scale.setScalar(r * 2 * (0.6 + 0.4 * Math.min(1, h)));
