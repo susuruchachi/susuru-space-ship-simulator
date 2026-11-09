@@ -521,6 +521,7 @@
 
   /* v89: iPad・iPhone でホーム画面から開いたとき、上の時計・電池のバーに隠れないように */
   .topbar { padding-top: calc(8px + env(safe-area-inset-top, 0px)) !important; }
+  .topbar { padding-left: calc(14px + var(--wcl, 0px)) !important; } /* iPad の窓のボタン（左上）を避ける */
 </style>
 </head>
 <body>

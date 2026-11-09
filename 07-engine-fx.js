@@ -121,6 +121,22 @@ const EngineFx = {
     const fx = ship.fxScale || 1;
     let mainCount = 0;
     for (const t of ship.thrusters) if (t.kind === 'main') mainCount++;
+    // v89: 姿勢スラスター・逆噴射は、粒を飛ばす代わりに、少し赤みのある白の細い噴煙（EnginePlumes.createJet）で描く
+    const sizeFx = Math.pow(fx, 0.85);
+    const rcsW = (fx > 1 ? sizeFx * 0.7 : 1) * this.LEGACY_SIZE_TO_M * 1.1;
+    for (const t of ship.thrusters) {
+      if (t.kind === 'main' || t.kind === 'gyro' || t.kind === 'field' || !EnginePlumes.createJet) continue;
+      const jet = EnginePlumes.createJet();
+      const isRetro = String(t.id).startsWith('retro');
+      const w = isRetro ? (t.nozzleDiameter > 0 ? t.nozzleDiameter * 0.55 : rcsW * 1.6) : rcsW;
+      const len = (isRetro ? 4.5 : 2.6) * fx * (isRetro && t.plumeScale > 0 ? t.plumeScale : 1);
+      const dir = vecNormalize(t.direction);
+      jet.object.position.set(t.position.x, t.position.y, t.position.z);
+      jet.object.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(dir.x, dir.y, dir.z));
+      jet.object.scale.set(w, w, len);
+      this._plumeRoot.add(jet.object);
+      this._plumes.set(t.id, { plume: jet, thruster: t });
+    }
     for (const t of ship.thrusters) {
       if (t.kind !== 'main') continue; // v85: 逆噴射は姿勢スラスターと同じ噴射で描く
       const plume = EnginePlumes.create(t.engineType, { twist: t.twist });

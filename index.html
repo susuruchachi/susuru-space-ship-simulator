@@ -1017,15 +1017,15 @@
     --sar: env(safe-area-inset-right, 0px);
     --sab: env(safe-area-inset-bottom, 0px);
   }
-  .hud-side-menu, #hud-root > .hud-side-menu { top: calc(8px + var(--sat)) !important; left: calc(8px + var(--sal)); }
+  .hud-side-menu, #hud-root > .hud-side-menu { top: calc(8px + var(--sat)) !important; left: calc(8px + var(--sal) + var(--wcl, 0px)); }
   .side-menu-panel { max-height: calc(100vh - 180px - var(--sat)) !important; }
   .space-nav-panel, .space-nav-panel.is-compact { top: calc(8px + var(--sat)) !important; }
   .hud-camera-controls { top: calc(8px + var(--sat)) !important; right: calc(8px + var(--sar)) !important; }
-  .star-map-header { top: calc(8px + var(--sat)); left: calc(8px + var(--sal)); right: calc(8px + var(--sar)); }
+  .star-map-header { top: calc(8px + var(--sat)); left: calc(8px + var(--sal) + var(--wcl, 0px)); right: calc(8px + var(--sar)); }
   .wpn-hint { top: calc(152px + var(--sat)); }
   .wpn-chips { bottom: calc(26px + var(--sab)); }
   @media (max-width: 700px) and (min-height: 501px) {
-    .space-nav-panel, .space-nav-panel.is-compact { top: calc(6px + var(--sat)) !important; left: calc(48px + var(--sal)) !important; }
+    .space-nav-panel, .space-nav-panel.is-compact { top: calc(6px + var(--sat)) !important; left: calc(48px + var(--sal) + var(--wcl, 0px)) !important; }
     .hud-camera-controls { top: calc(84px + var(--sat)) !important; }
   }
   @media (max-height: 500px) {

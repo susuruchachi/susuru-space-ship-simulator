@@ -136,6 +136,31 @@ const EnginePlumes = {
     return geo;
   },
 
+  // v89: 姿勢スラスター・逆噴射の噴煙（少し赤みのある白の細い煙）。返す物: { object, update(ratio, time), dispose() }
+  //   形は「根元の直径 1・長さ 1・噴射の向き +Z」。呼び出し側で位置・向きを決め、
+  //   scale.set(太さ, 太さ, 長さ) で大きさを決める（update が長さを出力に合わせて伸び縮みさせる）
+  createJet() {
+    const geo = this._lathe('jet', (z) => 0.5 * (0.55 + 0.9 * Math.pow(z, 0.8)) * (1 - 0.25 * z), 24);
+    const mat = this._material({ a: 0xffffff, b: 0xffe4dc, c: 0xffa898, fade: 1.1, edge: 0.9, flicker: 0.18 });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 5;
+    const group = new THREE.Group();
+    group.add(mesh);
+    return {
+      object: group,
+      update(ratio, time) {
+        group.visible = ratio > 0.01;
+        if (!group.visible) return;
+        const r = Math.min(1, ratio);
+        mesh.scale.set(0.7 + 0.3 * r, 0.7 + 0.3 * r, 0.35 + 0.65 * r);
+        mat.uniforms.uIntensity.value = 0.35 + 0.45 * r;
+        mat.uniforms.uTime.value = time;
+      },
+      dispose() { mat.dispose(); },
+    };
+  },
+
   // 1つのノズルの炎を作る。返す物: { object, update(ratio, time) }
   //   object は「ノズルの位置・噴射の向き +Z・ノズルの直径 1」の大きさなので、
   //   呼び出し側で位置・向き・拡大率（直径）を決める。
