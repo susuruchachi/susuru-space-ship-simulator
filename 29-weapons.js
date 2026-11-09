@@ -1257,7 +1257,9 @@ const Weapons = {
         p.x -= ship.position.x; p.y -= ship.position.y; p.z -= ship.position.z;
         // 線の色は、その砲の状態の色（狙っていなければ薄い黄色）
         const bst = m.barrelStates ? m.barrelStates[bi] : m.state;
-        lc.setHex(this.aim.active ? (colorOf[bst] || 0xfff0a0) : 0xfff0a0);
+        // v89: 演習中は、目標を決めて追っている砲はその目標の艦種の色、追っていない砲はグレー
+        if (this.practice && this._practiceOn()) lc.setHex(m.target && m.target.alive && ENEMY_CLASSES[m.target.cls] ? ENEMY_CLASSES[m.target.cls].color : 0x7a7f86);
+        else lc.setHex(this.aim.active ? (colorOf[bst] || 0xfff0a0) : 0xfff0a0);
         ca.setXYZ(k, lc.r, lc.g, lc.b); ca.setXYZ(k + 1, lc.r, lc.g, lc.b);
         a.setXYZ(k++, p.x, p.y, p.z);
         a.setXYZ(k++, p.x + d.x * len, p.y + d.y * len, p.z + d.z * len);
