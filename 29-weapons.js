@@ -623,6 +623,7 @@ const Weapons = {
     if (!rig.mounts.length && !rig.directors.length) return;
     this.rig = rig;
     this._modelRoot = modelRoot;
+    this._design = design || null;
     this.cfg = normalizeShipWeapons(design && design.weapons);
     // v89: グループ（設計に無ければ名前から分ける。ゲームの中だけで、設計は書き換えない）
     const gcfg = normalizeShipWeapons(JSON.parse(JSON.stringify(this.cfg)));
@@ -648,7 +649,7 @@ const Weapons = {
       return { id: g.id, name: g.name, mode: g.autoFire ? 'max' : 'off', power: g.autoPower, mounts, hasLaser: mounts.some((m) => m.cfg.kind === 'laser') };
     }).filter((g) => g.mounts.length);
     this._groupById = new Map(this.groups.map((g) => [g.id, g]));
-    for (const m of rig.mounts) m.groupId = m.topGroupId;
+    for (const m of rig.mounts) { m.origGroupId = m.groupId; m.groupId = m.topGroupId; }
     this._mainCaliber = Math.max(...rig.mounts.map((m) => m.cfg.caliber), 0);
     this._buildMountUi();
     this._buildGroupUi();
@@ -797,6 +798,7 @@ const Weapons = {
     // v89: 演習モードは、太陽系のどこかランダムな場所（演習海域）で始める
     if (PRACTICE_MODE && !this._arena) this._placeArena(dt);
     this._updatePracticeInfo(dt);
+    this._updateDamage(dt);
     const ship = State.ship;
     if (!this.rig || !ship || !ship.mesh) return;
     ship.mesh.updateMatrixWorld(true);
@@ -836,7 +838,9 @@ const Weapons = {
       const full = c.yawMax - c.yawMin >= 359.9;
       let dy = ty - m.yaw;
       if (full) dy = Math.atan2(Math.sin(dy), Math.cos(dy));
-      const ry = toRadW(weaponTraverseRate(c)) * dt, re = toRadW(weaponElevRate(c)) * dt;
+      // v89: 砲塔が傷むと旋回・俯仰が遅くなり、ひどいと止まる
+      const tf = this._turretMoveFactor(m);
+      const ry = toRadW(weaponTraverseRate(c)) * dt * tf, re = toRadW(weaponElevRate(c)) * dt * tf;
       let yaw = m.yaw + clamp(dy, -ry, ry);
       if (full) yaw = Math.atan2(Math.sin(yaw), Math.cos(yaw));
       const elev = m.elev + clamp(te - m.elev, -re, re);
@@ -1491,6 +1495,7 @@ const Weapons = {
     }
     const shipSize = (CameraSystem._shipScale || 1) * 8;
     const hpMax = keepHP ? keepHP.shipHPMax : Math.max(200, 40 * shipSize);
+    if (!keepHP) { this._resetDamage(); this._initDamage(hpMax); }
     this.practice = {
       targets, group, geo, mats: targets.map((t) => t.mat), alive: targets.length, total: targets.length, wave, difficulty: diffKey,
       shipHPMax: hpMax, shipHP: keepHP ? keepHP.shipHP : hpMax,
@@ -1513,6 +1518,7 @@ const Weapons = {
     if (!keepUi) { this.autoManeuver = false; this.maneuverMode = 'off'; }
     if (this._ui && this._ui.tmarks) this._ui.tmarks.innerHTML = '';
     if (this.rig) for (const m of this.rig.mounts) { m.target = null; m._indep = null; m._near = null; }
+    if (!keepUi) this._resetDamage();
     if (!keepUi) this._syncUi();
   },
   _updateTargets(dt) {
@@ -1587,7 +1593,7 @@ const Weapons = {
       const hit = WeaponRig.segmentHitsGrid(this._occ, t.pos, end);
       const len = hit ? hit.distanceTo(t.pos) : Math.min(w.range, t.distShip * 1.5);
       this._spawnBeamFx(t.pos, dir, len, Math.max(0.6, w.caliber / 1000 * 3), new THREE.Color(w.color), 0.25, null);
-      if (hit) this._hitShip(hit, dmg);
+      if (hit) this._hitShip(hit, dmg, dir);
     } else {
       const v = t.vel.clone().addScaledVector(dir, w.speed);
       this._spawnShellFx(t.pos, v, 0xff5050, clamp(w.caliber / 60, 2, 5), Math.min(60, w.range / w.speed), { enemy: true, dmg });
@@ -1616,6 +1622,10 @@ const Weapons = {
     return clamp(mainRange * 0.45, 3000, 15000);
   },
   maneuverInput(ship, input, dt) {
+    const out = this._maneuverInputCore(ship, input, dt);
+    return this._damageInput(ship, out, dt);
+  },
+  _maneuverInputCore(ship, input, dt) {
     const userMove = Math.abs(input.thrustForward) >= 0.02 || Math.abs(input.thrustStrafeX) >= 0.05 || Math.abs(input.thrustStrafeY) >= 0.05;
     // 巡航の速度: 自動操艦が艦を動かしているあいだは、自動操艦に入ったときの速度（巡航）を保ち、その上に敵へ近づく・離れる分だけを足す。
     // 敵はこの巡航の速度に合わせて動くので、自動操艦の近づく・離れるが間合いに効く（レバーを使っている・切のときは今の速度）
@@ -1722,16 +1732,379 @@ const Weapons = {
     return best ? { x: best.x, y: best.y, z: best.z, w: best.w } : null;
   },
   // 自艦に当たった
-  _hitShip(point, dmg) {
+  _hitShip(point, dmg, dir) {
     const P = this.practice;
     if (!P || P.shipHP <= 0) return;
+    // v89: 防御装置本体が傷むと、受けるダメージが増える（最大 2倍）
+    dmg *= this._dmgTakenMul();
     P.shipHP = Math.max(0, P.shipHP - dmg);
     this._spark(point, 0xff7050, 26);
+    this._damageParts(point, dmg);
+    this._addHitSpot(point, dmg, dir);
     if (P.shipHP <= 0) {
       this._flashStatus('大破しました（演習を終えます）');
       setTimeout(() => this.stopPractice(), 0);
     }
   },
+  // =========================================================
+  // v89: 部分的な損傷と応急修理（演習中の自艦）
+  //   区画: 設計の重要区画（艦橋・防御装置本体・機関本体・火器統制装置）、射撃レーダー・測距儀、砲塔。
+  //   被弾した点から区画の半径の2倍以内にある区画に、近いほど多くダメージが入る。区画の働き = 残りの耐久の割合。
+  //   応急修理: 重いほど長く（10〜120秒）。修理中にその区画がまた被弾したら、修理の時間は最初から。同時に5か所まで
+  // =========================================================
+  REPAIR_MAX: 5,
+  REPAIR_MIN_S: 10,
+  REPAIR_MAX_S: 120,
+  TURRET_JAM: 0.5, // 砲塔の働きがこれより下だと旋回・俯仰が止まる
+  TURRET_NOFIRE: 0.2, // これより下だと撃てない
+  _resetDamage() {
+    const D = this._dmg;
+    const ship = State.ship;
+    if (ship && ship._dmgBaseMaxSpeed !== undefined) { ship.maxSpeed = ship._dmgBaseMaxSpeed; delete ship._dmgBaseMaxSpeed; }
+    if (D && D.spotGroup && D.spotGroup.parent) D.spotGroup.parent.remove(D.spotGroup);
+    if (D) for (const sp of D.spots) { if (sp.glow) sp.glow.material.dispose(); if (sp.hole) sp.hole.material.dispose(); }
+    if (D) for (const sm of D.smoke) sm.sprite.material.dispose();
+    if (this.rig) for (const m of this.rig.mounts) m._dmgPart = null;
+    this._dmg = null;
+    this._renderDamageUi(true);
+  },
+  _initDamage(hpMax) {
+    const ship = State.ship;
+    const parts = [];
+    const size = (CameraSystem._shipScale || 1) * 8;
+    const design = this._design;
+    if (design && Array.isArray(design.vitals)) {
+      for (const v of normalizeShipVitals(design.vitals)) {
+        const K = SHIP_VITAL_KINDS[v.kind];
+        const same = design.vitals.filter((x) => x.kind === v.kind);
+        parts.push({ key: `v:${v.id}`, kind: v.kind, label: same.length > 1 ? `${K.label}${same.findIndex((x) => x.id === v.id) + 1}` : K.label, pos: { ...v.position }, radius: v.radius > 0 ? v.radius : shipVitalAutoRadius(design), group: v.group || '', max: hpMax * 0.05, hp: hpMax * 0.05 });
+      }
+    }
+    if (this.rig) {
+      for (const d of this.rig.directors) parts.push({ key: `d:${d.key}`, kind: 'director', label: d.key, node: d.node, radius: Math.max(2, size * 0.02), max: hpMax * 0.02, hp: hpMax * 0.02 });
+      for (const m of this.rig.mounts) {
+        const top = this._occ && this._occ.turretTop ? this._occ.turretTop.get(m.turret) : 0;
+        const r = Math.max(top || 0, (m.barrels[0] && m.barrels[0].length ? m.barrels[0].length * 0.5 : 0), m.cfg.caliber / 1000 * 15, 1.5);
+        const pt = { key: `m:${m.key}`, kind: 'turret', label: `${m.num}番（${m.key}）`, node: m.turret, mount: m, radius: r, max: hpMax * (m.cfg.caliber >= 200 ? 0.03 : 0.012), hp: 0 };
+        pt.hp = pt.max;
+        m._dmgPart = pt;
+        parts.push(pt);
+      }
+    }
+    // 被弾の跡（艦のメッシュに付ける。艦と一緒に動く）
+    const spotGroup = new THREE.Group();
+    if (ship && ship.mesh) ship.mesh.add(spotGroup);
+    this._dmg = { parts, spots: [], smoke: [], spotGroup, smokeT: 0, uiT: 0, wobble: { x: 0, y: 0, z: 0 } };
+    this._renderDamageUi(true);
+  },
+  // 区画の世界の位置
+  _partWorld(pt) {
+    const v = new THREE.Vector3();
+    if (pt.node) { pt.node.getWorldPosition(v); return v; }
+    const ship = State.ship;
+    const off = ship && ship.mesh && ship.mesh.userData && ship.mesh.userData.designOffset;
+    v.set(pt.pos.x, pt.pos.y, pt.pos.z);
+    if (off) { off.updateMatrixWorld(true); off.localToWorld(v); }
+    else if (ship && ship.mesh) ship.mesh.localToWorld(v);
+    return v;
+  },
+  _damageParts(point, dmg) {
+    const D = this._dmg;
+    if (!D) return;
+    for (const pt of D.parts) {
+      const c = this._partWorld(pt);
+      const d = c.distanceTo(point);
+      if (d > pt.radius * 2) continue;
+      const k = d <= pt.radius ? 1 : 2 - d / pt.radius;
+      const before = pt.hp;
+      pt.hp = Math.max(0, pt.hp - dmg * k * 0.9);
+      if (pt.hp < before) {
+        // 修理中に被弾したら、修理は最初から
+        if (pt.repair) { pt.repair.t = 0; pt.repair.total = this._repairTime(pt); pt.repair.resets = (pt.repair.resets || 0) + 1; }
+        const e = pt.hp / pt.max;
+        if (before / pt.max >= 0.999 || Math.floor(before / pt.max * 4) !== Math.floor(e * 4)) this._flashStatus(`${pt.label}に被弾（働き ${Math.floor(e * 100)}%）`);
+      }
+    }
+    this._renderDamageUi(true);
+  },
+  _repairTime(pt) { return this.REPAIR_MIN_S + (this.REPAIR_MAX_S - this.REPAIR_MIN_S) * clamp(1 - pt.hp / pt.max, 0, 1); },
+  startRepair(key) {
+    const D = this._dmg;
+    if (!D) return false;
+    const pt = D.parts.find((x) => x.key === key);
+    if (!pt || pt.hp >= pt.max || pt.repair) return false;
+    if (D.parts.filter((x) => x.repair).length >= this.REPAIR_MAX) { this._flashStatus(`同時に修理できるのは${this.REPAIR_MAX}か所までです`); return false; }
+    pt.repair = { t: 0, total: this._repairTime(pt) };
+    this._renderDamageUi(true);
+    return true;
+  },
+  repairAll() {
+    const D = this._dmg;
+    if (!D) return 0;
+    let n = 0;
+    const list = D.parts.filter((x) => x.hp < x.max && !x.repair).sort((a, b) => a.hp / a.max - b.hp / b.max);
+    for (const pt of list) if (this.startRepair(pt.key)) n++;
+    return n;
+  },
+  // 区画の働き（0〜1）。種類ごとにいちばん傷んでいるもの
+  _eff(kind, filter) {
+    const D = this._dmg;
+    if (!D) return 1;
+    let e = 1;
+    for (const pt of D.parts) if (pt.kind === kind && (!filter || filter(pt))) e = Math.min(e, pt.hp / pt.max);
+    return e;
+  },
+  _dmgTakenMul() { return 1 + (1 - this._eff('defense')); },
+  _laserPowerFactor() { return 0.3 + 0.7 * this._eff('engine'); },
+  _turretMoveFactor(m) {
+    const pt = m._dmgPart;
+    if (!pt || !this._dmg) return 1;
+    const e = pt.hp / pt.max;
+    return e < this.TURRET_JAM ? 0 : 0.5 + 0.5 * e;
+  },
+  // 狙いのずれ: 火器統制装置（受け持つグループ）・射撃レーダー／測距儀（距離の見誤り = 仰角の片寄り＋ばらつき）
+  _applyAimError(m, dir) {
+    if (!this._dmg) return;
+    const top = m.topGroupId || m.groupId;
+    const fcs = this._eff('fcs', (pt) => !pt.group || pt.group === top || weaponGroupAndDescendants(this.cfg, pt.group).has(m.origGroupId || m.groupId));
+    const dirE = this._eff('director');
+    const spread = toRadW((1 - fcs) * 1.5 + (1 - dirE) * 0.8);
+    if (spread <= 0) return;
+    const perp = new THREE.Vector3().crossVectors(dir, Math.abs(dir.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0)).normalize();
+    dir.applyAxisAngle(perp, (Math.random() - 0.5) * 2 * spread).applyAxisAngle(dir.clone(), Math.random() * Math.PI * 2);
+    // 距離の見誤り: 艦の上向きへの片寄り（傷んだときに決まる向き・量）
+    if (dirE < 1) {
+      if (!this._dmg.rangeBias || this._dmg.rangeBiasE !== Math.round(dirE * 20)) { this._dmg.rangeBiasE = Math.round(dirE * 20); this._dmg.rangeBias = (Math.random() < 0.5 ? -1 : 1) * (0.3 + Math.random() * 0.7); }
+      const up = rotateVecByQuat({ x: 0, y: 1, z: 0 }, State.ship.quaternion);
+      const side = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(up.x, up.y, up.z));
+      if (side.lengthSq() > 1e-9) dir.applyAxisAngle(side.normalize(), toRadW(this._dmg.rangeBias * (1 - dirE) * 0.6));
+    }
+    dir.normalize();
+  },
+  // 操艦への影響: 艦橋（指揮）→ 操作の効きが弱く・遅れる。機関本体 → 推力が落ちる。重力場機関の機関本体 → 姿勢の制御が落ち、揺れる
+  _damageInput(ship, input, dt) {
+    if (!this._dmg || !this._practiceOn()) return input;
+    const cmd = this._eff('bridge'), eng = this._eff('engine');
+    if (cmd >= 0.999 && eng >= 0.999) return input;
+    const out = { ...input };
+    const lag = (1 - cmd) * 0.9; // 操作が届くまでの遅れ [s]
+    const k = lag > 0.01 ? 1 - Math.exp(-dt / lag) : 1;
+    const prev = this._dmg.inPrev || { ...input };
+    const sm = (key) => (prev[key] || 0) + ((input[key] || 0) - (prev[key] || 0)) * k;
+    const rotK = (0.4 + 0.6 * cmd) * (ship.gravityDrive ? 0.4 + 0.6 * eng : 1);
+    const thrK = (0.4 + 0.6 * cmd) * (0.3 + 0.7 * eng);
+    out.rotatePitch = sm('rotatePitch') * rotK; out.rotateYaw = sm('rotateYaw') * rotK; out.rotateRoll = sm('rotateRoll') * rotK;
+    out.thrustForward = sm('thrustForward') * thrK; out.thrustStrafeX = sm('thrustStrafeX') * thrK; out.thrustStrafeY = sm('thrustStrafeY') * thrK;
+    this._dmg.inPrev = { rotatePitch: sm('rotatePitch'), rotateYaw: sm('rotateYaw'), rotateRoll: sm('rotateRoll'), thrustForward: sm('thrustForward'), thrustStrafeX: sm('thrustStrafeX'), thrustStrafeY: sm('thrustStrafeY') };
+    return out;
+  },
+  _updateDamage(dt) {
+    const D = this._dmg;
+    if (!D) return;
+    const ship = State.ship;
+    // 修理
+    let done = false;
+    for (const pt of D.parts) {
+      if (!pt.repair) continue;
+      pt.repair.t += dt;
+      if (pt.repair.t >= pt.repair.total) { pt.hp = pt.max; pt.repair = null; done = true; this._flashStatus(`${pt.label}の応急修理が終わりました`); }
+    }
+    // 機関本体: 最高速度が落ちる
+    if (ship) {
+      const eng = this._eff('engine');
+      if (eng < 0.999) {
+        if (ship._dmgBaseMaxSpeed === undefined) ship._dmgBaseMaxSpeed = ship.maxSpeed;
+        ship.maxSpeed = ship._dmgBaseMaxSpeed * (0.4 + 0.6 * eng);
+      } else if (ship._dmgBaseMaxSpeed !== undefined) { ship.maxSpeed = ship._dmgBaseMaxSpeed; delete ship._dmgBaseMaxSpeed; }
+      // 重力場機関の機関本体が傷むと、艦がふらつく（ゆっくり変わる揺れを角速度に足す）
+      if (ship.gravityDrive && eng < 0.95 && ship.angularVelocity) {
+        const w = D.wobble, a = (1 - eng) * 0.12;
+        for (const ax of ['x', 'y', 'z']) w[ax] += ((Math.random() - 0.5) * a - w[ax]) * Math.min(1, dt * 0.8);
+        ship.angularVelocity.x += w.x * dt; ship.angularVelocity.y += w.y * dt * 0.5; ship.angularVelocity.z += w.z * dt * 1.5;
+      }
+    }
+    this._updateHitSpots(dt);
+    D.uiT -= dt;
+    if (done || D.uiT <= 0) { D.uiT = 0.5; this._renderDamageUi(); }
+  },
+  // サイドメニューの「損傷と応急修理」。行は区画ごとに作って使い回す（ボタンが押しやすいように）
+  _renderDamageUi(rebuild) {
+    const el = typeof document !== 'undefined' ? document.querySelector('.side-menu-damage') : null;
+    if (!el) return;
+    const D = this._dmg;
+    if (!D) { el.innerHTML = '<div class="dm-none">損傷なし（演習中に被弾すると、ここに出ます）</div>'; el._rows = null; el._head = null; el._list = null; return; }
+    const hurt = D.parts.filter((x) => x.hp < x.max - 1e-6 || x.repair);
+    if (!el._rows || rebuild) {
+      if (!el._head) {
+        el.innerHTML = '';
+        const head = document.createElement('div');
+        head.className = 'dm-head';
+        head.innerHTML = '<span class="dm-sum"></span><button type="button" class="dm-all">まとめて修理</button>';
+        head.querySelector('.dm-all').addEventListener('click', () => { const n = this.repairAll(); if (!n) this._flashStatus('修理を始められる区画がありません'); });
+        el.appendChild(head);
+        const list = document.createElement('div');
+        list.className = 'dm-list';
+        el.appendChild(list);
+        el._head = head; el._list = list;
+      }
+      el._rows = el._rows || new Map();
+    }
+    const list = el._list;
+    if (!list) return;
+    const keep = new Set(hurt.map((x) => x.key));
+    for (const [k, row] of el._rows) if (!keep.has(k)) { row.remove(); el._rows.delete(k); }
+    const effOf = { bridge: '指揮', defense: '防御', engine: '機関', fcs: '射撃統制', director: '測距', turret: '砲塔' };
+    for (const pt of hurt) {
+      let row = el._rows.get(pt.key);
+      if (!row) {
+        row = document.createElement('div');
+        row.className = 'dm-row';
+        row.innerHTML = '<div class="dm-top"><span class="dm-name"></span><button type="button" class="dm-btn">修理</button></div><div class="dm-bar"><div class="dm-fill"></div><div class="dm-rep"></div></div><div class="dm-note"></div>';
+        row.querySelector('.dm-btn').addEventListener('click', () => this.startRepair(pt.key));
+        list.appendChild(row);
+        el._rows.set(pt.key, row);
+      }
+      const e = pt.hp / pt.max;
+      row.querySelector('.dm-name').textContent = `${pt.label}`;
+      const fill = row.querySelector('.dm-fill');
+      fill.style.width = `${(e * 100).toFixed(0)}%`;
+      fill.style.background = e > 0.6 ? '#ffd84a' : e > 0.3 ? '#ff9a3a' : '#ff4a3a';
+      const rp = row.querySelector('.dm-rep');
+      rp.style.width = pt.repair ? `${((pt.repair.t / pt.repair.total) * 100).toFixed(0)}%` : '0%';
+      const btn = row.querySelector('.dm-btn');
+      btn.disabled = !!pt.repair;
+      btn.textContent = pt.repair ? `修理中 ${Math.ceil(pt.repair.total - pt.repair.t)}秒` : `修理（${Math.round(this._repairTime(pt))}秒）`;
+      let note = `${effOf[pt.kind] || ''} ${Math.floor(e * 100)}%`;
+      if (pt.kind === 'turret') note += e < this.TURRET_NOFIRE ? '・射撃不能' : e < this.TURRET_JAM ? '・旋回／俯仰停止' : '';
+      if (pt.repair && pt.repair.resets) note += `・被弾で修理やり直し ${pt.repair.resets}回`;
+      row.querySelector('.dm-note').textContent = note;
+    }
+    const nRep = D.parts.filter((x) => x.repair).length;
+    el._head.querySelector('.dm-sum').textContent = hurt.length ? `損傷 ${hurt.length}か所・修理中 ${nRep}/${this.REPAIR_MAX}` : '損傷なし';
+  },
+
+  // ---------------------------------------------------------
+  // v89: 被弾の跡: 当たったところが赤く焼ける（ダメージが大きいほど広く・明るく、時間とともに冷める）。
+  //   同じところへの被弾がかさんで装甲を破ると、黒い穴があき、煙が出続ける
+  // ---------------------------------------------------------
+  _glowTexture() {
+    if (this._glowTex) return this._glowTex;
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0, 'rgba(255,255,255,1)');
+    grad.addColorStop(0.35, 'rgba(255,255,255,0.65)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 64, 64);
+    this._glowTex = new THREE.CanvasTexture(c);
+    return this._glowTex;
+  },
+  _holeTexture() {
+    if (this._holeTex) return this._holeTex;
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0, 'rgba(0,0,0,1)');
+    grad.addColorStop(0.45, 'rgba(10,6,4,0.95)');
+    grad.addColorStop(0.7, 'rgba(40,20,10,0.6)');
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 64, 64);
+    this._holeTex = new THREE.CanvasTexture(c);
+    return this._holeTex;
+  },
+  _addHitSpot(point, dmg, dir) {
+    const D = this._dmg;
+    const ship = State.ship;
+    if (!D || !ship || !ship.mesh) return;
+    const size = (CameraSystem._shipScale || 1) * 8;
+    const P = this.practice;
+    ship.mesh.updateMatrixWorld(true);
+    const inv = new THREE.Matrix4().copy(ship.mesh.matrixWorld).invert();
+    const local = point.clone().applyMatrix4(inv);
+    // 外向き（弾の来た向き）を艦の座標で。跡を少し外へ浮かせ、煙の出る向きにする
+    let out = dir ? dir.clone().negate().transformDirection(inv) : local.clone().normalize();
+    if (out.lengthSq() < 1e-9) out.set(0, 1, 0);
+    out.normalize();
+    const merge = size * 0.025;
+    let sp = D.spots.find((x) => x.local.distanceTo(local) < merge);
+    if (!sp) {
+      if (D.spots.length >= 80) return;
+      sp = { local, out, dmg: 0, heat: 0 };
+      const mat = new THREE.SpriteMaterial({ map: this._glowTexture(), color: 0xff6020, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+      sp.glow = new THREE.Sprite(mat);
+      sp.glow.renderOrder = 4;
+      D.spotGroup.add(sp.glow);
+      D.spots.push(sp);
+    }
+    sp.dmg += dmg;
+    sp.heat = Math.min(1.5, sp.heat + 0.25 + dmg / Math.max(1, P ? P.shipHPMax * 0.01 : 50));
+    // 装甲を破る: 同じところへのダメージが艦の耐久の 1.2% を超えたら穴
+    if (!sp.hole && P && sp.dmg > P.shipHPMax * 0.012) {
+      const hm = new THREE.SpriteMaterial({ map: this._holeTexture(), color: 0xffffff, transparent: true, depthWrite: false });
+      sp.hole = new THREE.Sprite(hm);
+      sp.hole.renderOrder = 3;
+      D.spotGroup.add(sp.hole);
+      this._flashStatus('装甲を破られました（火災・煙）');
+    }
+    this._placeSpot(sp, size);
+  },
+  _placeSpot(sp, size) {
+    const P = this.practice;
+    const ref = P ? P.shipHPMax * 0.01 : 50;
+    const r = size * 0.006 * (1 + Math.sqrt(sp.dmg / ref) * 1.6); // ダメージが大きいほど広く
+    const p = sp.local.clone().addScaledVector(sp.out, r * 0.3);
+    sp.glow.position.copy(p);
+    const h = clamp(sp.heat, 0, 1.5);
+    sp.glow.scale.setScalar(r * 2 * (0.6 + 0.4 * Math.min(1, h)));
+    // 熱い: 黄白 → 冷める: 暗い赤（冷めきっても、焼けた跡がうっすら残る）
+    const c = sp.glow.material.color;
+    c.setRGB(1.0 * Math.min(1, 0.25 + h), 0.15 + 0.55 * Math.min(1, Math.max(0, h - 0.4)), 0.05 + 0.3 * Math.max(0, h - 0.9));
+    sp.glow.material.opacity = 0.25 + 0.75 * Math.min(1, h);
+    if (sp.hole) { sp.hole.position.copy(sp.local.clone().addScaledVector(sp.out, r * 0.15)); sp.hole.scale.setScalar(r * 1.3); }
+  },
+  _updateHitSpots(dt) {
+    const D = this._dmg;
+    if (!D || !D.spots.length) return;
+    const size = (CameraSystem._shipScale || 1) * 8;
+    for (const sp of D.spots) {
+      // 冷める（大きな傷ほどゆっくり。少し赤みは残る）
+      const floor = Math.min(0.35, 0.08 + sp.dmg / Math.max(1, (this.practice ? this.practice.shipHPMax : 1000) * 0.05));
+      sp.heat = Math.max(floor, sp.heat - dt * 0.05);
+      this._placeSpot(sp, size);
+    }
+    // 煙: 穴から少しずつ出て、外へ流れながら広がって薄くなる（艦と一緒に動く）
+    D.smokeT -= dt;
+    const holes = D.spots.filter((x) => x.hole);
+    if (holes.length && D.smokeT <= 0) {
+      D.smokeT = 0.12;
+      for (const sp of holes) {
+        if (D.smoke.length > 160) break;
+        if (Math.random() > 0.6) continue;
+        const mat = new THREE.SpriteMaterial({ map: this._glowTexture(), color: 0x2a2624, transparent: true, opacity: 0.55, depthWrite: false });
+        const s = new THREE.Sprite(mat);
+        s.position.copy(sp.local);
+        D.spotGroup.add(s);
+        const jit = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(0.5);
+        D.smoke.push({ sprite: s, v: sp.out.clone().add(jit).normalize().multiplyScalar(size * (0.01 + Math.random() * 0.01)), t: 0, life: 3 + Math.random() * 2, r0: size * 0.008 });
+      }
+    }
+    const keep = [];
+    for (const sm of D.smoke) {
+      sm.t += dt;
+      if (sm.t >= sm.life) { D.spotGroup.remove(sm.sprite); sm.sprite.material.dispose(); continue; }
+      const k = sm.t / sm.life;
+      sm.sprite.position.addScaledVector(sm.v, dt);
+      sm.sprite.scale.setScalar(sm.r0 * (1 + k * 4));
+      sm.sprite.material.opacity = 0.55 * (1 - k);
+      keep.push(sm);
+    }
+    D.smoke = keep;
+  },
+
   // 目標に当たった: 耐久を減らし、無くなったら壊れる（当たるたびに赤く焼ける）
   _damageTarget(t, dmg, point) {
     if (!t.alive) return;
@@ -2002,6 +2375,7 @@ const Weapons = {
   // minCharge: レーザーの撃てる充電の割合（省略時は LASER_MIN_CHARGE）。実弾砲は装填が済んでいること
   _canFireBarrel(m, i, minCharge) {
     if (!m.onTarget || (m.blocked && m.blocked[i]) || m.rangeOk === false) return false;
+    if (m._dmgPart && m._dmgPart.hp / m._dmgPart.max < this.TURRET_NOFIRE) return false; // v89: 砲塔が大破していると撃てない
     // v89: 演習中は、照準が合っていても撃つ目標が無ければ撃たない
     if (this._practiceOn() && !(m.target && m.target.alive)) return false;
     if (m.cfg.kind === 'laser') return this._charge(m, i) >= Math.max(this.LASER_MIN_CHARGE, (minCharge ?? 0) - 1e-9);
@@ -2009,7 +2383,8 @@ const Weapons = {
   },
   _shoot(m, b, i) {
     const power = m.cfg.kind === 'laser' ? this._charge(m, i) : 1;
-    m.reloadLeft[i] = weaponReload(m.cfg);
+    // v89: 機関本体が傷むと、レーザーの装填（充電）が遅くなる
+    m.reloadLeft[i] = weaponReload(m.cfg) / (m.cfg.kind === 'laser' ? this._laserPowerFactor() : 1);
     this._spawnShot(State.ship, m, b, power);
   },
   // 一門ずつ: 前に撃った砲身の次から順に探して、撃てる砲身を1つ撃つ
@@ -2070,9 +2445,10 @@ const Weapons = {
   _spawnShot(ship, m, b, power) {
     const pw = power === undefined ? 1 : clamp(power, 0, 1);
     const { pos, dir } = this._barrelMuzzle(m, b);
+    this._applyAimError(m, dir); // v89: 火器統制装置・射撃レーダー・測距儀が傷むと狙いがずれる
     const rel = { x: pos.x - ship.position.x, y: pos.y - ship.position.y, z: pos.z - ship.position.z };
     const size = (CameraSystem._shipScale || 1) * 8;
-    const dmg = weaponDamage(m.cfg.type, m.cfg.caliber, pw);
+    const dmg = weaponDamage(m.cfg.type, m.cfg.caliber, pw) * (m.cfg.kind === 'laser' ? this._laserPowerFactor() : 1);
     if (m.cfg.kind === 'laser') {
       const info = weaponTypeInfo('laser', m.cfg.type);
       // v89: 射程まで届く（演習の目標に当たれば、そこで止まって目標の耐久を減らす）
@@ -2168,7 +2544,7 @@ const Weapons = {
           if (e.enemy) {
             // 目標の弾: 自艦の船体に当たったか
             const hp = WeaponRig.segmentHitsGrid(this._occ, new THREE.Vector3(e.last.x, e.last.y, e.last.z), new THREE.Vector3(p.x, p.y, p.z));
-            if (hp) { this._hitShip(hp, e.dmg); this._disposeEffect(e); continue; }
+            if (hp) { this._hitShip(hp, e.dmg, new THREE.Vector3(p.x - e.last.x, p.y - e.last.y, p.z - e.last.z).normalize()); this._disposeEffect(e); continue; }
           } else if (this._practiceOn()) {
             const t = this._segmentHit(e.last, p);
             if (t) { this._damageTarget(t, e.dmg, new THREE.Vector3(p.x, p.y, p.z)); this._disposeEffect(e); continue; }
@@ -2474,7 +2850,11 @@ const Weapons = {
       text += `・${PRACTICE_DIFFICULTIES[P.difficulty] ? PRACTICE_DIFFICULTIES[P.difficulty].label : ''} 第${P.wave}波 残り ${P.alive}/${P.total}`;
       const f = clamp(P.shipHP / P.shipHPMax, 0, 1);
       if (u.hpFill) { u.hpFill.style.width = `${(f * 100).toFixed(1)}%`; u.hpFill.style.background = f > 0.5 ? '#3dff6e' : f > 0.25 ? '#ffd84a' : '#ff4a3a'; }
-      if (u.hpText) u.hpText.textContent = `耐久 ${Math.ceil(f * 100)}%`;
+      if (u.hpText) {
+        const dmgN = (this._dmg ? this._dmg.parts.filter((x) => x.hp < x.max) : []).length;
+        const rep = this._dmg ? this._dmg.parts.filter((x) => x.repair).length : 0;
+        u.hpText.textContent = `耐久 ${Math.ceil(f * 100)}%${dmgN ? `・損傷 ${dmgN}${rep ? `（修理 ${rep}）` : ''}` : ''}`;
+      }
     }
     if (this._statusOverride && performance.now() < this._statusOverride.until) text = this._statusOverride.text;
     if (u.status.textContent !== text) u.status.textContent = text;

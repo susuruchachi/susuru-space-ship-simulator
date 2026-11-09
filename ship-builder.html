@@ -1151,6 +1151,35 @@
       <p class="hint">モデルの中の部品の名前で見つけます。「砲塔」を名前に含む部品が旋回し（部品のY軸まわり）、その中の「〜砲」で終わる部品（「1番砲」「2番砲」など。部品のY軸が砲身の向き）が仰角を変えます。砲塔の名前は、その親の部品の名前（「1番主砲」など）です。「射撃レーダー」「測距儀」を名前に含む部品は、狙う方向へ旋回します。角度は元の向きを0°として、旋回は左回り（上から見て）が＋、仰角は上が＋です。ゲームでは「照準」を押して画面をドラッグすると、その方向を向けられる砲が全部そちらを向きます。</p>
     </details>
 
+    <details class="adjust-section" id="vitalSection" open>
+      <summary>重要区画（被弾で機能が落ちる場所）</summary>
+      <div class="btn-row">
+        <button type="button" data-add-vital="bridge">＋ 艦橋</button>
+        <button type="button" data-add-vital="defense">＋ 防御装置本体</button>
+        <button type="button" data-add-vital="engine">＋ 機関本体</button>
+        <button type="button" data-add-vital="fcs">＋ 火器統制装置</button>
+      </div>
+      <div class="pod-list" id="vitalList"></div>
+      <div class="pod-editor" id="vitalEditor" style="display:none;">
+        <div class="pod-editor-title" id="vitalEditorTitle"></div>
+        <div class="pos-rows" id="vitalPosRows"></div>
+        <div class="field-row">
+          <label for="vitalRadiusInput">大きさ（半径）</label>
+          <input type="number" id="vitalRadiusInput" class="num-input" min="0" step="any" placeholder="自動">
+          <span class="unit">m</span>
+        </div>
+        <div class="field-row" id="vitalGroupRow">
+          <label for="vitalGroupSel">受け持つ武装</label>
+          <select id="vitalGroupSel"></select>
+        </div>
+        <div class="derived" id="vitalEffect"></div>
+        <div class="btn-row">
+          <button type="button" id="vitalDeleteBtn" class="danger">この区画を外す</button>
+        </div>
+      </div>
+      <p class="hint">演習で敵の弾がこの区画（ビューの半透明の球）の近くに当たると、その機能が落ちます。艦橋: 操艦の反応が鈍くなる。防御装置本体: 受けるダメージが増える。機関本体: 速度・推力が落ち、レーザーの火力・装填も落ちる（重力場機関なら姿勢の制御が落ち、揺れやすくなる）。火器統制装置: 受け持つグループの砲の精度が落ちる。射撃レーダー・測距儀・砲塔は、モデルの部品の位置でそのまま被弾します（測距が狂う・旋回や俯仰が止まる・撃てなくなる）。ビューの球をタップするか一覧から選ぶと、ギズモで動かせます。</p>
+    </details>
+
     <details class="adjust-section" id="perfSection" open>
       <summary>性能（自動計算）</summary>
       <div class="perf" id="perfBox">計算中…</div>

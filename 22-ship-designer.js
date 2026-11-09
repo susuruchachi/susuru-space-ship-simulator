@@ -28,6 +28,7 @@
   let selectedMainId = null; // v81: パネルで編集中の主エンジン
   let active = null;         // v81: ギズモを出している部品 { kind: 'pod' | 'main' | 'cog' | 'retro', id }
   let selectedRetroId = null; // v84: 選んでいる逆噴射ノズル
+  let selectedVitalId = null; // v89: 選んでいる重要区画
   let placing = null;        // v84: 船体をタップして置くもの 'pod' | 'retro'（null なら置かない）
   let hullVersion = 0;      // 船体の形が変わるたびに+1（表面の三角形キャッシュの無効化）
   let triCache = null;
@@ -264,6 +265,26 @@
       hit.userData.part = { kind: 'retro', id: n.id };
       g.add(hit);
       g.position.set(n.position.x, n.position.y, n.position.z);
+      markers.add(g);
+    }
+
+    // v89: 重要区画: 区画の大きさの半透明の球（選んでいると濃く）
+    for (const v of design.vitals || []) {
+      const K = SHIP_VITAL_KINDS[v.kind];
+      const sel = v.id === selectedVitalId;
+      const r = v.radius > 0 ? v.radius : shipVitalAutoRadius(design);
+      const g = new THREE.Group();
+      const ball = new THREE.Mesh(new THREE.SphereGeometry(r, 20, 14), new THREE.MeshBasicMaterial({ color: K.color, transparent: true, opacity: sel ? 0.42 : 0.22, depthTest: false, depthWrite: false }));
+      ball.renderOrder = 11;
+      g.add(ball);
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(r, Math.max(r * 0.03, u * 0.15), 6, 40), new THREE.MeshBasicMaterial({ color: sel ? 0xff7a3a : K.color, depthTest: false, transparent: true }));
+      ring.rotation.x = Math.PI / 2;
+      ring.renderOrder = 12;
+      g.add(ring);
+      const hit = new THREE.Mesh(new THREE.SphereGeometry(Math.max(r, u * 2.4), 8, 6), MAT.hit);
+      hit.userData.part = { kind: 'vital', id: v.id };
+      g.add(hit);
+      g.position.set(v.position.x, v.position.y, v.position.z);
       markers.add(g);
     }
 
@@ -723,6 +744,49 @@
     onPhysicsEdit();
   });
 
+  const vitalPos = makePosRows($('vitalPosRows'), () => {
+    const v = findVital(selectedVitalId);
+    return v ? v.position : { x: 0, y: 0, z: 0 };
+  }, (p) => {
+    const v = findVital(selectedVitalId);
+    if (!v) return;
+    v.position = p;
+    rebuildMarkers();
+    markDirty();
+  });
+  document.querySelectorAll('[data-add-vital]').forEach((btn) => btn.addEventListener('click', () => {
+    if (!design) return;
+    const kind = btn.dataset.addVital;
+    const d = design.hull.dims;
+    const at = { bridge: { x: 0, y: d.y * 0.3, z: -d.z * 0.1 }, defense: { x: 0, y: 0, z: 0 }, engine: { x: 0, y: -d.y * 0.1, z: d.z * 0.2 }, fcs: { x: 0, y: d.y * 0.25, z: -d.z * 0.05 } }[kind];
+    if (!Array.isArray(design.vitals)) design.vitals = [];
+    const v = normalizeShipVitals([{ kind, position: at }])[0];
+    design.vitals.push(v);
+    markDirty();
+    setActive('vital', v.id);
+  }));
+  $('vitalRadiusInput').addEventListener('change', () => {
+    const v = findVital(selectedVitalId);
+    if (!v) return;
+    const r = Number($('vitalRadiusInput').value);
+    v.radius = r > 0 ? r : null;
+    rebuildMarkers();
+    markDirty();
+    syncUi();
+  });
+  $('vitalGroupSel').addEventListener('change', () => {
+    const v = findVital(selectedVitalId);
+    if (!v) return;
+    v.group = $('vitalGroupSel').value;
+    markDirty();
+  });
+  $('vitalDeleteBtn').addEventListener('click', () => {
+    if (!design) return;
+    design.vitals = (design.vitals || []).filter((v) => v.id !== selectedVitalId);
+    markDirty();
+    setActive(null);
+  });
+
   const retroPos = makePosRows($('retroPosRows'), () => {
     const n = selectedRetro();
     return n ? n.position : { x: 0, y: 0, z: 0 };
@@ -843,6 +907,7 @@
     cogPos.sync(1.3);
     $('cogGizmoBtn').classList.toggle('active', !!(active && active.kind === 'cog'));
     renderPodList();
+    renderVitalList();
     renderRetroList();
     syncBoundaryUi();
     if (document.activeElement !== $('gyroTorqueInput')) $('gyroTorqueInput').value = design.gyro.torque > 0 ? inputValue(design.gyro.torque / 1000) : '';
@@ -942,6 +1007,50 @@
     return (h + v) || '中央';
   }
 
+  // v89: 重要区画の一覧・編集
+  function findVital(id) { return (design && design.vitals || []).find((v) => v.id === id) || null; }
+  function vitalLabel(v) {
+    const K = SHIP_VITAL_KINDS[v.kind];
+    const same = design.vitals.filter((x) => x.kind === v.kind);
+    return same.length > 1 ? `${K.label}${same.indexOf(v) + 1}` : K.label;
+  }
+  function vitalGroups() {
+    const g = design.weapons && Array.isArray(design.weapons.groups) ? design.weapons.groups : [];
+    return g.filter((x) => x && x.id);
+  }
+  function renderVitalList() {
+    const list = $('vitalList');
+    if (!list) return;
+    list.innerHTML = '';
+    for (const v of design.vitals || []) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = `pod-chip${v.id === selectedVitalId ? ' selected' : ''}`;
+      chip.style.borderLeft = `4px solid #${SHIP_VITAL_KINDS[v.kind].color.toString(16).padStart(6, '0')}`;
+      chip.textContent = vitalLabel(v);
+      chip.addEventListener('click', () => setActive(v.id === selectedVitalId ? null : 'vital', v.id));
+      list.appendChild(chip);
+    }
+    const v = findVital(selectedVitalId);
+    $('vitalEditor').style.display = v ? '' : 'none';
+    if (!v) return;
+    $('vitalEditorTitle').textContent = vitalLabel(v);
+    if (document.activeElement !== $('vitalRadiusInput')) {
+      $('vitalRadiusInput').value = v.radius > 0 ? inputValue(v.radius) : '';
+      $('vitalRadiusInput').placeholder = `自動（${inputValue(shipVitalAutoRadius(design))}）`;
+    }
+    $('vitalGroupRow').style.display = v.kind === 'fcs' ? '' : 'none';
+    if (v.kind === 'fcs') {
+      const sel = $('vitalGroupSel');
+      sel.innerHTML = '';
+      sel.appendChild(new Option('すべての武装', ''));
+      for (const g of vitalGroups()) sel.appendChild(new Option(g.parent ? `　${g.name}` : g.name, g.id));
+      sel.value = v.group || '';
+    }
+    $('vitalEffect').textContent = `被弾すると: ${SHIP_VITAL_KINDS[v.kind].effect}`;
+    vitalPos.sync(1.3);
+  }
+
   function renderPodList() {
     const list = $('podList');
     list.innerHTML = '';
@@ -980,6 +1089,7 @@
     active = kind ? { kind, id: kind === 'cog' ? null : id } : null;
     selectedPodId = kind === 'pod' ? id : null;
     selectedRetroId = kind === 'retro' ? id : null;
+    selectedVitalId = kind === 'vital' ? id : null;
     if (kind === 'main') selectedMainId = id;
     rebuildMarkers();
     syncUi();
@@ -990,6 +1100,8 @@
     if (!design) return;
     if (selectedPodId && !selectedPod()) selectedPodId = null;
     if (selectedRetroId && !selectedRetro()) selectedRetroId = null;
+    if (selectedVitalId && !findVital(selectedVitalId)) selectedVitalId = null;
+    if (active && active.kind === 'vital' && !findVital(active.id)) active = null;
     if (!findMain(selectedMainId)) selectedMainId = design.mains.length ? design.mains[0].id : null;
     if (active && ((isSurfaceKind(active.kind) && !surfacePart(active.kind, active.id))
       || (active.kind === 'main' && !findMain(active.id)))) active = null;
@@ -1616,6 +1728,7 @@
     if (!active || !design) return null;
     if (active.kind === 'cog') return design.cog;
     if (active.kind === 'main') { const e = findMain(active.id); return e ? e.position : null; }
+    if (active.kind === 'vital') { const v = findVital(active.id); return v ? v.position : null; }
     if (isSurfaceKind(active.kind)) { const part = surfacePart(active.kind, active.id); return part ? part.position : null; }
     return null;
   }
@@ -1632,6 +1745,7 @@
       const i = design.mains.findIndex((e) => e.id === id);
       return design.mains.length > 1 ? `主エンジン${i + 1}` : '主エンジン';
     }
+    if (kind === 'vital') { const v = findVital(id); return v ? vitalLabel(v) : '重要区画'; }
     if (kind === 'retro') return `逆噴射ノズル${design.retro.nozzles.findIndex((n) => n.id === id) + 1}`;
     return `姿勢スラスター${design.rcs.pods.findIndex((p) => p.id === id) + 1}`;
   }
@@ -1775,7 +1889,7 @@
     }
     // 視線と軸が平行に近いと指の小さな動きで遠くへ飛ぶため、位置の欄の
     // スライダーと同じ範囲（重心は船体の外形の1.3倍、主エンジンは1.5倍）に収める
-    const ext = d.kind === 'cog' ? 1.3 : d.kind === 'main' ? 1.5 : 1.6;
+    const ext = d.kind === 'cog' || d.kind === 'vital' ? 1.3 : d.kind === 'main' ? 1.5 : 1.6;
     const lim = (ax) => Math.max(design.hull.dims[ax] / 2 * ext, design.hull.size * 0.02);
     const q = { x: clamp(p.x, -lim('x'), lim('x')), y: clamp(p.y, -lim('y'), lim('y')), z: clamp(p.z, -lim('z'), lim('z')) };
     if (isSurfaceKind(d.kind)) {
@@ -1787,7 +1901,11 @@
   }
 
   function applyGizmoPosition(d, pos, normal) {
-    if (d.kind === 'cog') {
+    if (d.kind === 'vital') {
+      const v = findVital(d.id);
+      if (!v) return;
+      v.position = { x: pos.x, y: pos.y, z: pos.z };
+    } else if (d.kind === 'cog') {
       design.cog = pos;
     } else if (d.kind === 'main') {
       const e = findMain(d.id);

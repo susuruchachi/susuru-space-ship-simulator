@@ -151,8 +151,37 @@ function createShipDesign(baseClass, name) {
     collision: null,
     // v89: 武装（29-weapons.js）。砲塔・射撃レーダーの名前ごとの設定
     weapons: { mounts: {}, directors: {} },
+    // v89: 重要区画（被弾するとその機能が落ちる場所）。[{ id, kind, position, radius, group }]
+    vitals: [],
   };
   return design;
+}
+
+// v89: 重要区画（艦橋・防御装置本体・機関本体・火器統制装置）。被弾すると、その機能が落ちる（29-weapons.js）
+//   position: 設計の座標 [m]、radius: 区画の大きさ（半径 [m]。null なら船体の大きさから自動）、
+//   group: 火器統制装置が受け持つ武装のグループ（空なら全部）
+const SHIP_VITAL_KINDS = {
+  bridge: { label: '艦橋', color: 0x4fc3ff, effect: '指揮（操艦の反応・自動操艦）' },
+  defense: { label: '防御装置本体', color: 0x7cff8a, effect: '防御力（受けるダメージが増える）' },
+  engine: { label: '機関本体', color: 0xffa040, effect: '速度・推力、レーザーの火力と装填、重力場機関なら姿勢の制御と安定' },
+  fcs: { label: '火器統制装置', color: 0xff6af0, effect: '受け持つグループの砲の射撃の精度' },
+};
+function shipVitalAutoRadius(design) { return Math.max(1, (design && design.hull ? design.hull.size : 100) * 0.04); }
+function normalizeShipVitals(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const v of list) {
+    if (!v || !SHIP_VITAL_KINDS[v.kind]) continue;
+    const p = v.position || {};
+    out.push({
+      id: typeof v.id === 'string' && v.id ? v.id : `v${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      kind: v.kind,
+      position: { x: Number(p.x) || 0, y: Number(p.y) || 0, z: Number(p.z) || 0 },
+      radius: Number(v.radius) > 0 ? Number(v.radius) : null,
+      group: typeof v.group === 'string' ? v.group : '',
+    });
+  }
+  return out;
 }
 
 // 箱の仮船体用の姿勢スラスター初期配置: 艦首・艦尾寄りの断面の上下左右、計8基
@@ -304,6 +333,8 @@ function normalizeShipDesign(d) {
   // v85: 最高速度は空欄（null）なら無制限。最大加速度は無ければ制限なし
   out.maxSpeed = d.maxSpeed === null ? null : (Number(d.maxSpeed) > 0 ? Number(d.maxSpeed) : base.maxSpeed);
   out.maxAccel = Number(d.maxAccel) > 0 ? Number(d.maxAccel) : null;
+  // v89: 重要区画
+  out.vitals = normalizeShipVitals(d.vitals);
   // v89: 武装（29-weapons.js を読み込んでいない画面では、そのまま持ち回る）
   if (typeof normalizeShipWeapons === 'function') out.weapons = normalizeShipWeapons(d.weapons);
   else if (!out.weapons || typeof out.weapons !== 'object') out.weapons = { mounts: {}, directors: {} };
