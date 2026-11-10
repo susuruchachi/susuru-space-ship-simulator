@@ -261,9 +261,14 @@
     flex-direction: column;
     align-items: stretch;
     gap: 6px;
-    width: 92px;
+    width: 108px;
   }
-  .wpn-status { font-size: 10px; color: #ffd9a0; text-align: center; text-shadow: 0 1px 2px #000; }
+  .wpn-status { font-size: 10px; line-height: 1.35; color: #ffd9a0; text-align: center; text-shadow: 0 1px 2px #000; background: rgba(0,0,0,0.35); border-radius: 6px; padding: 2px 4px; }
+  .wpn-status:empty { display: none; }
+  .weapon-controls .wpn-btn, .weapon-controls select { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .weapon-controls select { width: 100%; box-sizing: border-box; height: 30px; }
+  .wpn-practice { font-size: 12px; }
+  .wpn-hp-text { white-space: nowrap; }
   .wpn-btn {
     height: 36px;
     border-radius: 8px;
@@ -302,22 +307,27 @@
   }
   .wpn-reticle::before { left: 50%; top: -10px; bottom: -10px; width: 2px; margin-left: -1px; }
   .wpn-reticle::after { top: 50%; left: -10px; right: -10px; height: 2px; margin-top: -1px; }
+  /* v89: 照準の案内は小さく。操作の説明は数秒で消え、倍率だけ残る */
   .wpn-hint {
     position: fixed;
-    top: 152px;
+    top: calc(104px + var(--sat, 0px));
     left: 50%;
     transform: translateX(-50%);
-    font-size: 12px;
+    font-size: 11px;
     color: #ffd0c0;
-    background: rgba(40,10,5,0.6);
-    padding: 4px 10px;
-    border-radius: 6px;
+    background: rgba(40,10,5,0.55);
+    padding: 3px 10px;
+    border-radius: 12px;
     pointer-events: none;
-    max-width: 80vw;
+    max-width: min(70vw, 560px);
     text-align: center;
   }
+  .wpn-hint-text { transition: opacity 0.6s; }
+  .wpn-hint.brief .wpn-hint-text { display: none; }
+  @media (max-height: 500px) { .wpn-hint { top: calc(64px + var(--sat, 0px)); } }
   @media (max-width: 700px), (max-height: 500px) {
-    .weapon-controls { right: 108px; bottom: 24px; width: 80px; gap: 4px; }
+    .weapon-controls { right: 108px; bottom: 24px; width: 92px; gap: 4px; }
+    .weapon-controls select { height: 26px; }
     .wpn-btn { height: 32px; font-size: 12px; }
   }
   body.clean-view .wpn-reticle, body.clean-view .wpn-hint { display: none !important; }
@@ -347,7 +357,11 @@
   .dmg-icon { pointer-events: auto; width: 26px; height: 26px; padding: 3px; border-radius: 50%; border: none; box-sizing: border-box; cursor: pointer; }
   .dmg-icon-in { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; border-radius: 50%; color: #fff; font-size: 11px; font-weight: bold; }
   /* v89: 砲塔の損傷（番号の下） */
-  .wpn-chip-dmg { font-size: 9px; line-height: 1; min-height: 9px; font-weight: bold; text-shadow: 0 1px 2px #000; }
+  .wpn-chipcol { width: 26px; }
+  .wpn-chip-dmg { position: relative; width: 100%; height: 13px; font-size: 9px; line-height: 9px; font-weight: bold; text-align: center; white-space: nowrap; text-shadow: 0 1px 2px #000; }
+  .wpn-chip-dmg span { display: block; height: 9px; }
+  .wpn-chip-dmg i { position: absolute; left: 0; bottom: 0; height: 3px; border-radius: 2px; background: #6fd0ff; box-shadow: 0 0 0 1px rgba(0,0,0,0.6); }
+  .wpn-chip-dmg:empty, .wpn-chip-dmg:not(.rep):not(.dmg-jam):not(.dmg-nofire):not(.dmg-dead) { height: 0; }
   .wpn-chip-dmg.rep { color: #6fd0ff; }
   .wpn-chip-dmg.dmg-jam { color: #ffb040; }
   .wpn-chip-dmg.dmg-nofire { color: #ff5a40; }
@@ -404,7 +418,7 @@
   .wpn-gunmark span { position: absolute; left: 14px; top: -12px; font-size: 10px; font-weight: bold; text-shadow: 0 1px 2px #000; }
   .wpn-chips {
     position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
-    display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-end; gap: 4px; max-width: 46vw; pointer-events: none;
+    display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start; gap: 3px; max-width: min(50vw, 620px); pointer-events: none;
   }
   .wpn-chipcol { pointer-events: auto; cursor: pointer; }
   .wpn-chip.viewing { outline: 2px solid #fff; outline-offset: 1px;

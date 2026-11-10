@@ -718,6 +718,13 @@ const Weapons = {
       this.startAim(dir || { x: 0, y: 0, z: -1 });
     }
     if (on !== this.view) this._setScopeLook(on);
+    // v89: 操作の説明は、照準の視点に入って 6 秒で消す（倍率の表示だけ残す）
+    if (on && !this.view && this._ui && this._ui.hint) {
+      const h = this._ui.hint;
+      h.classList.remove('brief');
+      clearTimeout(this._hintTimer);
+      this._hintTimer = setTimeout(() => h.classList.add('brief'), 6000);
+    }
     this.view = on;
     if (on && typeof CleanView !== 'undefined' && CleanView.on) CleanView.set(false);
     this._syncUi();
@@ -2131,9 +2138,10 @@ uniform float dmgTime;
       // 焼け焦げ
       dScorch = max(dScorch, (1.0 - smoothstep(0.35, 1.25, d)) * dmgInfo[i].z);
       // 赤熱: 中心ほど熱い（黄白 → 橙 → 暗い赤）
-      float h = heat * (1.0 - smoothstep(0.0, 1.0, d));
+      float h = min(heat, 1.25) * (1.0 - smoothstep(0.0, 0.9, d));
       h *= 0.85 + 0.15 * sin(dmgTime * 3.0 + q.x * 2.0 + q.y * 1.3);
-      dGlow += vec3(1.0, 0.16, 0.03) * smoothstep(0.02, 0.5, h) * 1.3 + vec3(0.9, 0.75, 0.25) * smoothstep(0.55, 1.1, h) * 1.4;
+      // 外側は暗い赤がうっすら、中心に近いほど急に明るく（広い面がべったり赤くならないように）
+      dGlow += vec3(1.0, 0.14, 0.03) * (h * h * 0.9) + vec3(0.95, 0.7, 0.22) * smoothstep(0.7, 1.15, h) * 1.2;
       // 穴: 黒い穴と、ふちの残り火
       if (hole > 0.0) {
         float hr = 0.42 * hole;
@@ -2837,7 +2845,7 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
     document.body.appendChild(chips);
     const hint = document.createElement('div');
     hint.className = 'wpn-hint';
-    hint.innerHTML = '<span class="wpn-zoom"></span>　画面をドラッグして狙う方向を決めます・ピンチで拡大（「照準」をもう一度押すと元の視点へ。狙いは続けます）';
+    hint.innerHTML = '<span class="wpn-zoom"></span><span class="wpn-hint-text">　ドラッグで狙う・ピンチで拡大（「照準」をもう一度押すと元の視点へ。狙いは続けます）</span>';
     document.body.appendChild(hint);
     const stop = (e) => { e.stopPropagation(); };
     box.addEventListener('touchstart', stop, { passive: true });
@@ -3086,7 +3094,7 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
       if (u.hpText) {
         const dmgN = (this._dmg ? this._dmg.parts.filter((x) => x.hp < x.max) : []).length;
         const rep = this._dmg ? this._dmg.parts.filter((x) => x.repair).length : 0;
-        u.hpText.textContent = `耐久 ${Math.ceil(f * 100)}%${dmgN ? `・損傷 ${dmgN}${rep ? `（修理 ${rep}）` : ''}` : ''}`;
+        u.hpText.textContent = `耐久 ${Math.ceil(f * 100)}%${dmgN ? ` 損傷${dmgN}${rep ? ` 修${rep}` : ''}` : ''}`;
       }
     }
     if (this._statusOverride && performance.now() < this._statusOverride.until) text = this._statusOverride.text;
@@ -3103,7 +3111,12 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
         m._chip.className = `wpn-chip st-${st}${ds ? ` dmg-${ds}` : ''}`;
         if (m._mark) m._mark.className = `wpn-gunmark st-${st}${m._smallGun ? ' small' : ''}`;
         // 砲塔の損傷と、修理中ならその進み具合
-        if (m._dtag) { m._dtag.textContent = ({ jam: '旋回×', nofire: '砲撃×', dead: '停止' }[ds] || '') + (rp >= 0 ? `${ds ? ' ' : ''}修${rp}%` : ''); m._dtag.className = `wpn-chip-dmg${ds ? ` dmg-${ds}` : ''}${rp >= 0 ? ' rep' : ''}`; }
+        // 砲塔の損傷（旋× = 旋回・俯仰不能、砲× = 砲撃不能、停 = 機能停止）と、修理中ならその進み具合（水色の棒）
+        if (m._dtag) {
+          m._dtag.innerHTML = `<span>${{ jam: '旋×', nofire: '砲×', dead: '停' }[ds] || (rp >= 0 ? '修' : '')}</span>${rp >= 0 ? `<i style="width:${Math.max(8, rp)}%"></i>` : ''}`;
+          m._dtag.className = `wpn-chip-dmg${ds ? ` dmg-${ds}` : ''}${rp >= 0 ? ' rep' : ''}`;
+          m._dtag.title = ({ jam: '旋回・俯仰不能', nofire: '砲撃不能', dead: '機能停止' }[ds] || '') + (rp >= 0 ? ` 修理中 ${rp}%` : '');
+        }
       }
       // 砲身ごとの装填の棒: 砲身の状態の色で、装填の済んだ割合だけ下から伸びる
       const rt = weaponReload(m.cfg);
