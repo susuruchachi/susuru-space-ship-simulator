@@ -560,6 +560,63 @@ const WeaponRig = {
     }
     return false;
   },
+  // v89: 砲身そのものが船体・ほかの砲塔にめり込むか（いまの旋回・仰角で）。
+  //   砲身を付け根から砲口まで細かくたどり、格子の埋まっているところ（自分の砲塔は除く）に入れば true。
+  //   元の向き（旋回0°・仰角0°）でもう触れている距離のところ（砲郭・防盾の中の付け根など。b.restOcc）は見ない
+  barrelHits(occ, m) {
+    if (!occ) return false;
+    const inv = new THREE.Matrix4().copy(occ.root.matrixWorld).invert();
+    const self = 2 + m.index;
+    const p = new THREE.Vector3(), q = new THREE.Quaternion(), d = new THREE.Vector3();
+    const scale = occ.cellWorld / occ.cell;
+    for (const b of m.barrels) {
+      if (!(b.length > 0)) continue;
+      b.node.getWorldPosition(p).applyMatrix4(inv);
+      b.node.getWorldQuaternion(q);
+      d.set(0, 1, 0).applyQuaternion(q).transformDirection(inv);
+      const len = b.length / scale, step = occ.cell * 0.5;
+      const n = Math.ceil(len / step);
+      for (let k = 1; k <= n; k++) {
+        if (b.restOcc && b.restOcc[k]) continue;
+        const t = Math.min(len, k * step);
+        const x = p.x + d.x * t, y = p.y + d.y * t, z = p.z + d.z * t;
+        const i = Math.floor((x - occ.min.x) / occ.cell), j = Math.floor((y - occ.min.y) / occ.cell), l = Math.floor((z - occ.min.z) / occ.cell);
+        if (i < 0 || j < 0 || l < 0 || i >= occ.nx || j >= occ.ny || l >= occ.nz) continue;
+        const v = occ.grid[(l * occ.ny + j) * occ.nx + i];
+        if (v !== 0 && v !== self) return true;
+      }
+    }
+    return false;
+  },
+  // 元の向きで、砲身のどの距離のところがもう触れているか（barrelHits で見ないところ）を覚える
+  measureBarrelRest(occ, rig) {
+    if (!occ) return;
+    const inv = new THREE.Matrix4().copy(occ.root.matrixWorld).invert();
+    const p = new THREE.Vector3(), q = new THREE.Quaternion(), d = new THREE.Vector3();
+    const scale = occ.cellWorld / occ.cell;
+    for (const m of rig.mounts) {
+      const self = 2 + m.index;
+      for (const b of m.barrels) {
+        b.restOcc = null;
+        if (!(b.length > 0)) continue;
+        b.node.getWorldPosition(p).applyMatrix4(inv);
+        b.node.getWorldQuaternion(q);
+        d.set(0, 1, 0).applyQuaternion(q).transformDirection(inv);
+        const len = b.length / scale, step = occ.cell * 0.5;
+        const n = Math.ceil(len / step);
+        const arr = new Uint8Array(n + 1);
+        for (let k = 1; k <= n; k++) {
+          const t = Math.min(len, k * step);
+          const x = p.x + d.x * t, y = p.y + d.y * t, z = p.z + d.z * t;
+          const i = Math.floor((x - occ.min.x) / occ.cell), j = Math.floor((y - occ.min.y) / occ.cell), l = Math.floor((z - occ.min.z) / occ.cell);
+          if (i < 0 || j < 0 || l < 0 || i >= occ.nx || j >= occ.ny || l >= occ.nz) continue;
+          const v = occ.grid[(l * occ.ny + j) * occ.nx + i];
+          if (v !== 0 && v !== self) arr[k] = 1;
+        }
+        b.restOcc = arr;
+      }
+    }
+  },
   restoreAll(rig) {
     if (!rig) return;
     for (const m of rig.mounts) this.setMountAngles(m, 0, 0);
@@ -650,6 +707,7 @@ const Weapons = {
     rig.mounts.forEach((m, k) => { m.num = k + 1; m.index = k; m.state = 'none'; });
     try { this._occ = WeaponRig.buildOcclusion(modelRoot, rig); } catch (e) { console.warn('射線の判定の準備に失敗しました', e); this._occ = null; }
     if (this._occ) for (const m of rig.mounts) for (const b of m.barrels) b.length = this._occ.barrelLen.get(b.node) || null;
+    this._restMeasured = false; // v89: 砲身の元の向きでの当たり（measureBarrelRest）は、最初の更新のときに測る（読み込み直後は部品の行列がまだ決まっていない）
     try { this._buildInset(modelRoot, rig); } catch (e) { console.warn('照準の小さな艦の図の準備に失敗しました', e); this._inset = null; }
     // 自動射撃: mode 'off' 切 / 'max' 最大（満タンで撃つ）/ 'set' 設定した出力（レーザーがその割合まで充電できたら撃つ）
     // v89: ゲームのボタンは最上位のグループだけ（中のグループの砲は、最上位のグループの自動射撃に従う）
@@ -819,6 +877,11 @@ const Weapons = {
     if (PRACTICE_MODE && !this._arena) this._placeArena(dt);
     this._updatePracticeInfo(dt);
     this._updateDamage(dt);
+    if (this._occ && !this._restMeasured && this.rig && this.rig.mounts.every((m) => m.yaw === 0 && m.elev === 0)) {
+      if (this._modelRoot) this._modelRoot.updateMatrixWorld(true);
+      WeaponRig.measureBarrelRest(this._occ, this.rig);
+      this._restMeasured = true;
+    }
     const ship = State.ship;
     if (!this.rig || !ship || !ship.mesh) return;
     ship.mesh.updateMatrixWorld(true);
@@ -861,10 +924,43 @@ const Weapons = {
       // v89: 砲塔が傷むと旋回・俯仰が遅くなり、ひどいと止まる
       const tf = this._turretMoveFactor(m);
       const ry = toRadW(weaponTraverseRate(c)) * dt * tf, re = toRadW(weaponElevRate(c)) * dt * tf;
-      let yaw = m.yaw + clamp(dy, -ry, ry);
-      if (full) yaw = Math.atan2(Math.sin(yaw), Math.cos(yaw));
-      const elev = m.elev + clamp(te - m.elev, -re, re);
-      if (yaw !== m.yaw || elev !== m.elev) WeaponRig.setMountAngles(m, yaw, elev);
+      let yawN = m.yaw + clamp(dy, -ry, ry);
+      if (full) yawN = Math.atan2(Math.sin(yawN), Math.cos(yawN));
+      const elevN = m.elev + clamp(te - m.elev, -re, re);
+      let yaw = m.yaw, elev = m.elev;
+      if (yawN !== m.yaw || elevN !== m.elev) {
+        // v89: 砲身が船体・ほかの砲塔にめり込まないように動かす。まっすぐ動かすとめり込むなら、
+        //   仰角をそのままに旋回 → 仰角を上げながら旋回 → その場で仰角を上げる → 下げながら旋回 → 仰角だけ、の順に、めり込まない動きを選ぶ
+        //   （俯角のまま前の砲塔の上を通るときは、砲身を上げて越える。上げきると甲板に刺さる砲は、刺さる手前で止まる）
+        const y0 = m.yaw, e0 = m.elev;
+        const cands = [[yawN, elevN]];
+        const avoid = !!this._occ && this._restMeasured && this.avoidBarrelHits !== false && m.barrels.some((b) => b.restOcc);
+        if (avoid) {
+          cands.push([yawN, e0]);
+          if (yawN !== y0) {
+            const eMinR = toRadW(c.elevMin), eMaxR = toRadW(c.elevMax);
+            const up = Math.min(eMaxR, e0 + re), dn = Math.max(eMinR, e0 - re);
+            cands.push([yawN, up], [y0, up], [yawN, dn]);
+          }
+          cands.push([y0, elevN]);
+        }
+        let moved = false, direct = false;
+        for (let ci = 0; ci < cands.length; ci++) {
+          const [cy, ce] = cands[ci];
+          if (cy === y0 && ce === e0) continue;
+          WeaponRig.setMountAngles(m, cy, ce);
+          if (avoid) { m.turret.updateMatrixWorld(true); if (WeaponRig.barrelHits(this._occ, m)) continue; }
+          yaw = cy; elev = ce; moved = true; direct = ci === 0;
+          break;
+        }
+        if (!moved) {
+          // どれもめり込む: いまの向きがもうめり込んでいるなら（設定を変えた直後など）、まっすぐ動かして抜け出す
+          WeaponRig.setMountAngles(m, y0, e0);
+          m.turret.updateMatrixWorld(true);
+          if (WeaponRig.barrelHits(this._occ, m)) { WeaponRig.setMountAngles(m, yawN, elevN); yaw = yawN; elev = elevN; direct = true; }
+        }
+        m._stuckT = direct ? 0 : (m._stuckT || 0) + dt;
+      } else m._stuckT = 0;
       const settled = Math.abs(Math.atan2(Math.sin(ty - yaw), Math.cos(ty - yaw))) < toRadW(0.5) && Math.abs(te - elev) < toRadW(0.5);
       m.onTarget = m.mode === 'exact' && settled;
       for (let i = 0; i < m.reloadLeft.length; i++) m.reloadLeft[i] = Math.max(0, m.reloadLeft[i] - dt);
@@ -883,6 +979,7 @@ const Weapons = {
       // v89: none 指向不可（ほぼ黒）/ near 指向不可だが寄せている（グレー）/ blocked 指向できたが射線が当たる（白）
       if (m.mode === 'none') m.state = 'none';
       else if (m.mode === 'near') m.state = 'near';
+      else if (!settled && m._stuckT > 0.6) m.state = 'blocked'; // v89: 砲身が船体などにつかえて、狙う向きまで動かせない
       else if (!settled) m.state = 'moving';
       else if (m.blocked.every((x) => x)) m.state = 'blocked';
       else if (m.target && m.target !== this.lock) m.state = 'indep'; // v89: 独立して別の目標を撃っている（橙）
@@ -2855,6 +2952,8 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
       if (e.kind === 'beam') {
         if (e.mount) {
           const { pos, dir } = this._barrelMuzzle(e.mount, e.barrel);
+          // v89: 撃っている途中で砲塔が回り、射線が船体・ほかの砲塔にかかったら、そこで照射をやめる
+          if (this._occ && WeaponRig.lineBlocked(this._occ, pos, dir, e.mount.index)) { this._disposeEffect(e); continue; }
           e.obj.position.copy(pos);
           e.obj.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
         }
