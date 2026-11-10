@@ -336,10 +336,13 @@ const SUN_FRAG = `
     vec3 V = normalize(uCamPos - vPos);
     float mu = max(dot(N, V), 0.0);
     // 周縁減光（中心が明るく縁が暗い）。縁ほど赤みが増す
-    float limb = 1.0 - 0.62 * (1.0 - mu) - 0.2 * (1.0 - mu) * (1.0 - mu);
+    // v89: 周縁減光は弱めに（縁まで明るい光球）。以前は中心だけがとても明るく縁が暗いオレンジだったため、
+    //   光のにじみ（ブルーム）が中心だけにかかって白い染みになり、縁は暗い輪のように見えていた
+    float limb = 1.0 - 0.26 * (1.0 - mu) - 0.12 * (1.0 - mu) * (1.0 - mu);
     vec3 tex = uHasMap > 0.5 ? texture2D(uMap, vUv).rgb : vec3(1.0, 0.8, 0.5);
-    vec3 warm = mix(vec3(1.0, 0.55, 0.25), vec3(1.0, 0.92, 0.75), mu);
-    vec3 col = (0.55 + 0.75 * tex) * warm * limb * 1.15 * uTint;
+    float gran = dot(tex, vec3(0.4, 0.4, 0.2));          // 粒状斑・黒点の濃淡（色はほぼ白のまま、明るさだけ少し変える）
+    vec3 warm = mix(vec3(1.0, 0.70, 0.40), vec3(1.0, 0.92, 0.76), smoothstep(0.0, 0.75, mu));
+    vec3 col = (0.66 + 0.46 * gran) * warm * limb * uTint;
     gl_FragColor = vec4(min(col, vec3(1.0)), 1.0);
   }
 `;
@@ -369,10 +372,12 @@ const GLOW_FRAG = `
     // 円盤の縁から外側へ向かって減衰させる（円盤が小さいときは普通の星の光芒）
     float rr = max(0.0, r - uDiscR) / max(1e-3, 1.0 - uDiscR);
     float core = exp(-rr * rr * 60.0) * uCoreScale;
-    float halo = exp(-rr * 7.0) * 0.55 + pow(max(0.0, 1.0 - rr), 3.0) * 0.12;
+    // v89: 円盤が大きく見えるときは、縁のすぐ外に明るいコロナを足し、十字の光条は弱める（点に見えるときだけ強い光条）
+    float big = 1.0 - uCoreScale;
+    float halo = exp(-rr * 7.0) * 0.55 + pow(max(0.0, 1.0 - rr), 3.0) * 0.12 + exp(-rr * 22.0) * 0.4 * big;
     float ang = atan(d.y, d.x);
-    float rays = pow(abs(cos(ang * 2.0)), 60.0) * exp(-rr * 3.0) * 0.35;
-    float onDisc = r < uDiscR ? 0.12 : 1.0;
+    float rays = pow(abs(cos(ang * 2.0)), 60.0) * exp(-rr * 3.0) * 0.35 * mix(0.18, 1.0, uCoreScale);
+    float onDisc = r < uDiscR ? 0.0 : 1.0;
     float v = (core + halo + rays) * uIntensity * smoothstep(1.0, 0.8, r) * onDisc;
     gl_FragColor = vec4(uColor * v, 1.0);
   }
