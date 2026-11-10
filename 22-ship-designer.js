@@ -29,6 +29,7 @@
   let active = null;         // v81: ギズモを出している部品 { kind: 'pod' | 'main' | 'cog' | 'retro', id }
   let selectedRetroId = null; // v84: 選んでいる逆噴射ノズル
   let selectedVitalId = null; // v89: 選んでいる重要区画
+  let selectedViewId = null; // v89: 選んでいる艦内の視点
   let placing = null;        // v84: 船体をタップして置くもの 'pod' | 'retro'（null なら置かない）
   let hullVersion = 0;      // 船体の形が変わるたびに+1（表面の三角形キャッシュの無効化）
   let triCache = null;
@@ -266,6 +267,22 @@
       g.add(hit);
       g.position.set(n.position.x, n.position.y, n.position.z);
       markers.add(g);
+    }
+
+    // v89: 艦内の視点: 小さな八面体（◆）と、前（艦首）向きの短い線
+    for (const v of design.viewpoints || []) {
+      const K = VIEWPOINT_KINDS[v.kind];
+      const sel = v.id === selectedViewId;
+      const g = new THREE.Group();
+      const gem = new THREE.Mesh(new THREE.OctahedronGeometry(u * 1.1), new THREE.MeshBasicMaterial({ color: sel ? 0xff7a3a : K.color, depthTest: false, transparent: true }));
+      gem.renderOrder = 13;
+      g.add(gem);
+      const hit = new THREE.Mesh(new THREE.SphereGeometry(u * 2.4, 8, 6), MAT.hit);
+      hit.userData.part = { kind: 'view', id: v.id };
+      g.add(hit);
+      g.position.set(v.position.x, v.position.y, v.position.z);
+      markers.add(g);
+      markers.add(lineMesh([{ x: v.position.x, y: v.position.y, z: v.position.z }, { x: v.position.x, y: v.position.y, z: v.position.z - u * 5 }], sel ? 0xff7a3a : K.color, false));
     }
 
     // v89: 重要区画: 区画の大きさの半透明の球（選んでいると濃く）
@@ -744,6 +761,50 @@
     onPhysicsEdit();
   });
 
+  const viewPos = makePosRows($('viewPosRows'), () => {
+    const v = findView(selectedViewId);
+    return v ? v.position : { x: 0, y: 0, z: 0 };
+  }, (p) => {
+    const v = findView(selectedViewId);
+    if (!v) return;
+    v.position = p;
+    rebuildMarkers();
+    markDirty();
+  });
+  document.querySelectorAll('[data-add-view]').forEach((btn) => btn.addEventListener('click', () => {
+    if (!design) return;
+    const kind = btn.dataset.addView;
+    const d = design.hull.dims;
+    // 置き始めの場所: 船橋・通常は上部構造の前寄り、見張り台はその上
+    const at = { normal: { x: 0, y: d.y * 0.35, z: -d.z * 0.12 }, lookout: { x: 0, y: d.y * 0.6, z: -d.z * 0.08 }, bridge: { x: 0, y: d.y * 0.42, z: -d.z * 0.14 } }[kind];
+    if (!Array.isArray(design.viewpoints)) design.viewpoints = [];
+    const v = normalizeShipViewpoints([{ kind, position: at }])[0];
+    design.viewpoints.push(v);
+    markDirty();
+    setActive('view', v.id);
+  }));
+  $('viewNameInput').addEventListener('change', () => {
+    const v = findView(selectedViewId);
+    if (!v) return;
+    v.name = $('viewNameInput').value.trim().slice(0, 20);
+    markDirty();
+    syncUi();
+  });
+  $('viewKindSel').addEventListener('change', () => {
+    const v = findView(selectedViewId);
+    if (!v) return;
+    v.kind = $('viewKindSel').value;
+    rebuildMarkers();
+    markDirty();
+    syncUi();
+  });
+  $('viewDeleteBtn').addEventListener('click', () => {
+    if (!design) return;
+    design.viewpoints = (design.viewpoints || []).filter((v) => v.id !== selectedViewId);
+    markDirty();
+    setActive(null);
+  });
+
   const vitalPos = makePosRows($('vitalPosRows'), () => {
     const v = findVital(selectedVitalId);
     return v ? v.position : { x: 0, y: 0, z: 0 };
@@ -908,6 +969,7 @@
     $('cogGizmoBtn').classList.toggle('active', !!(active && active.kind === 'cog'));
     renderPodList();
     renderVitalList();
+    renderViewList();
     renderRetroList();
     syncBoundaryUi();
     if (document.activeElement !== $('gyroTorqueInput')) $('gyroTorqueInput').value = design.gyro.torque > 0 ? inputValue(design.gyro.torque / 1000) : '';
@@ -1007,6 +1069,30 @@
     return (h + v) || '中央';
   }
 
+  // v89: 艦内の視点の一覧・編集
+  function findView(id) { return (design && design.viewpoints || []).find((v) => v.id === id) || null; }
+  function renderViewList() {
+    const list = $('viewList');
+    if (!list) return;
+    list.innerHTML = '';
+    for (const v of design.viewpoints || []) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = `pod-chip${v.id === selectedViewId ? ' selected' : ''}`;
+      chip.style.borderLeft = `4px solid #${VIEWPOINT_KINDS[v.kind].color.toString(16).padStart(6, '0')}`;
+      chip.textContent = shipViewpointLabel(design.viewpoints, v);
+      chip.addEventListener('click', () => setActive(v.id === selectedViewId ? null : 'view', v.id));
+      list.appendChild(chip);
+    }
+    const v = findView(selectedViewId);
+    $('viewEditor').style.display = v ? '' : 'none';
+    if (!v) return;
+    $('viewEditorTitle').textContent = `${shipViewpointLabel(design.viewpoints, v)}（${VIEWPOINT_KINDS[v.kind].label}）`;
+    if (document.activeElement !== $('viewNameInput')) $('viewNameInput').value = v.name || '';
+    $('viewKindSel').value = v.kind;
+    viewPos.sync(1.3);
+  }
+
   // v89: 重要区画の一覧・編集
   function findVital(id) { return (design && design.vitals || []).find((v) => v.id === id) || null; }
   function vitalLabel(v) {
@@ -1090,6 +1176,7 @@
     selectedPodId = kind === 'pod' ? id : null;
     selectedRetroId = kind === 'retro' ? id : null;
     selectedVitalId = kind === 'vital' ? id : null;
+    selectedViewId = kind === 'view' ? id : null;
     if (kind === 'main') selectedMainId = id;
     rebuildMarkers();
     syncUi();
@@ -1102,6 +1189,8 @@
     if (selectedRetroId && !selectedRetro()) selectedRetroId = null;
     if (selectedVitalId && !findVital(selectedVitalId)) selectedVitalId = null;
     if (active && active.kind === 'vital' && !findVital(active.id)) active = null;
+    if (selectedViewId && !findView(selectedViewId)) selectedViewId = null;
+    if (active && active.kind === 'view' && !findView(active.id)) active = null;
     if (!findMain(selectedMainId)) selectedMainId = design.mains.length ? design.mains[0].id : null;
     if (active && ((isSurfaceKind(active.kind) && !surfacePart(active.kind, active.id))
       || (active.kind === 'main' && !findMain(active.id)))) active = null;
@@ -1625,7 +1714,7 @@
       if (hit && typeof WeaponDesigner !== 'undefined' && WeaponDesigner.pickAt) {
         const pp = hit.object.userData.part;
         const pos = pp.kind === 'cog' ? design.cog : pp.kind === 'main' ? (findMain(pp.id) || {}).position
-          : pp.kind === 'vital' ? (findVital(pp.id) || {}).position : (surfacePart(pp.kind, pp.id) || {}).position;
+          : pp.kind === 'vital' ? (findVital(pp.id) || {}).position : pp.kind === 'view' ? (findView(pp.id) || {}).position : (surfacePart(pp.kind, pp.id) || {}).position;
         const c = pos ? toClient(pos) : null;
         const near = c && Math.hypot(c.x - e.clientX, c.y - e.clientY) <= 14;
         if (!near && WeaponDesigner.pickAt(raycaster)) { if (active) setActive(null); return; }
@@ -1742,6 +1831,7 @@
     if (active.kind === 'cog') return design.cog;
     if (active.kind === 'main') { const e = findMain(active.id); return e ? e.position : null; }
     if (active.kind === 'vital') { const v = findVital(active.id); return v ? v.position : null; }
+    if (active.kind === 'view') { const v = findView(active.id); return v ? v.position : null; }
     if (isSurfaceKind(active.kind)) { const part = surfacePart(active.kind, active.id); return part ? part.position : null; }
     return null;
   }
@@ -1759,6 +1849,7 @@
       return design.mains.length > 1 ? `主エンジン${i + 1}` : '主エンジン';
     }
     if (kind === 'vital') { const v = findVital(id); return v ? vitalLabel(v) : '重要区画'; }
+    if (kind === 'view') { const v = findView(id); return v ? shipViewpointLabel(design.viewpoints, v) : '視点'; }
     if (kind === 'retro') return `逆噴射ノズル${design.retro.nozzles.findIndex((n) => n.id === id) + 1}`;
     return `姿勢スラスター${design.rcs.pods.findIndex((p) => p.id === id) + 1}`;
   }
@@ -1902,7 +1993,7 @@
     }
     // 視線と軸が平行に近いと指の小さな動きで遠くへ飛ぶため、位置の欄の
     // スライダーと同じ範囲（重心は船体の外形の1.3倍、主エンジンは1.5倍）に収める
-    const ext = d.kind === 'cog' || d.kind === 'vital' ? 1.3 : d.kind === 'main' ? 1.5 : 1.6;
+    const ext = d.kind === 'cog' || d.kind === 'vital' || d.kind === 'view' ? 1.3 : d.kind === 'main' ? 1.5 : 1.6;
     const lim = (ax) => Math.max(design.hull.dims[ax] / 2 * ext, design.hull.size * 0.02);
     const q = { x: clamp(p.x, -lim('x'), lim('x')), y: clamp(p.y, -lim('y'), lim('y')), z: clamp(p.z, -lim('z'), lim('z')) };
     if (isSurfaceKind(d.kind)) {
@@ -1914,8 +2005,8 @@
   }
 
   function applyGizmoPosition(d, pos, normal) {
-    if (d.kind === 'vital') {
-      const v = findVital(d.id);
+    if (d.kind === 'vital' || d.kind === 'view') {
+      const v = d.kind === 'vital' ? findVital(d.id) : findView(d.id);
       if (!v) return;
       v.position = { x: pos.x, y: pos.y, z: pos.z };
     } else if (d.kind === 'cog') {

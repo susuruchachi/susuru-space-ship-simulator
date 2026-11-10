@@ -1180,6 +1180,32 @@
       <p class="hint">演習で敵の弾がこの区画（ビューの半透明の球）の近くに当たると、その機能が落ちます。艦橋: 操艦の反応が鈍くなる。防御装置本体: 受けるダメージが増える。機関本体: 速度・推力が落ち、レーザーの火力・装填も落ちる（重力場機関なら姿勢の制御が落ち、揺れやすくなる）。火器統制装置: 受け持つグループの砲の精度が落ちる。射撃レーダー・測距儀・砲塔は、モデルの部品の位置でそのまま被弾します（測距が狂う・旋回や俯仰が止まる・撃てなくなる）。ビューの球をタップするか一覧から選ぶと、ギズモで動かせます。</p>
     </details>
 
+    <details class="adjust-section" id="viewSection" open>
+      <summary>艦内の視点（1人称）</summary>
+      <div class="btn-row">
+        <button type="button" data-add-view="normal">＋ 通常視点</button>
+        <button type="button" data-add-view="lookout">＋ 見張り台</button>
+        <button type="button" data-add-view="bridge">＋ 船橋</button>
+      </div>
+      <div class="pod-list" id="viewList"></div>
+      <div class="pod-editor" id="viewEditor" style="display:none;">
+        <div class="pod-editor-title" id="viewEditorTitle"></div>
+        <div class="field-row">
+          <label for="viewNameInput">名前</label>
+          <input type="text" id="viewNameInput" maxlength="20" placeholder="（種類の名前）">
+        </div>
+        <div class="field-row">
+          <label for="viewKindSel">種類</label>
+          <select id="viewKindSel"><option value="normal">通常視点</option><option value="lookout">見張り台</option><option value="bridge">船橋</option></select>
+        </div>
+        <div class="pos-rows" id="viewPosRows"></div>
+        <div class="btn-row">
+          <button type="button" id="viewDeleteBtn" class="danger">この視点を外す</button>
+        </div>
+      </div>
+      <p class="hint">ここに置いた点から、ゲームで艦の中にいるように外を見られます（右上の「艦内の視点へ」で切り替え。ドラッグで見回す）。通常視点: 見回すだけ。見張り台: 双眼鏡（ピンチ・ホイールで拡大）が使え、画面の中央に入れた攻撃目標・天体を追尾します。船橋: 見張り台と同じことに加えて、機関・航行／武装／損傷の計器盤が出ます。ビューの目印（◆）をタップするか一覧から選ぶと、ギズモで動かせます。窓や見張り台の少し外側・上側に置くと、船体に隠れにくくなります。</p>
+    </details>
+
     <details class="adjust-section" id="perfSection" open>
       <summary>性能（自動計算）</summary>
       <div class="perf" id="perfBox">計算中…</div>
@@ -1248,6 +1274,7 @@
 <script src="25-google-sync.js"></script>
 <script src="09-ship-builder.js"></script>
 <script src="29-weapons.js"></script>
+<script src="31-viewpoints.js"></script>
 <script src="22-ship-designer.js"></script>
 </body>
 </html>

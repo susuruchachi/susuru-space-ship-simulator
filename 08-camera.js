@@ -142,6 +142,8 @@ const CameraSystem = {
       if (!(factor > 0) || !Number.isFinite(factor)) return;
       // v89: 照準の視点では、測距儀の倍率を変える（29-weapons.js）
       if (typeof Weapons !== 'undefined' && Weapons.view) { Weapons.zoomBy(factor); return; }
+      // v89: 艦内の視点では、双眼鏡の倍率を変える（31-viewpoints.js）
+      if (typeof Viewpoints !== 'undefined' && Viewpoints.active) { Viewpoints.zoomBy(factor); return; }
       if (State.settings.cameraMode === 'orbit') {
         this._orbit.distance = clamp(this._orbit.distance * factor, this.MIN_DISTANCE, this.MAX_DISTANCE);
       } else {

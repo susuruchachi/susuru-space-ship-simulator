@@ -153,6 +153,8 @@ function createShipDesign(baseClass, name) {
     weapons: { mounts: {}, directors: {} },
     // v89: 重要区画（被弾するとその機能が落ちる場所）。[{ id, kind, position, radius, group }]
     vitals: [],
+    // v89: 艦内の視点（31-viewpoints.js）。[{ id, kind: 'normal'|'lookout'|'bridge', name, position }]
+    viewpoints: [],
   };
   return design;
 }
@@ -335,6 +337,8 @@ function normalizeShipDesign(d) {
   out.maxAccel = Number(d.maxAccel) > 0 ? Number(d.maxAccel) : null;
   // v89: 重要区画
   out.vitals = normalizeShipVitals(d.vitals);
+  // v89: 艦内の視点（31-viewpoints.js を読み込んでいない画面では、そのまま持ち回る）
+  out.viewpoints = typeof normalizeShipViewpoints === 'function' ? normalizeShipViewpoints(d.viewpoints) : (Array.isArray(d.viewpoints) ? d.viewpoints : []);
   // v89: 武装（29-weapons.js を読み込んでいない画面では、そのまま持ち回る）
   if (typeof normalizeShipWeapons === 'function') out.weapons = normalizeShipWeapons(d.weapons);
   else if (!out.weapons || typeof out.weapons !== 'object') out.weapons = { mounts: {}, directors: {} };
