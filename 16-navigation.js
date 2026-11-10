@@ -1409,6 +1409,8 @@ const Navigation = {
       const R = Math.max(b.rM, b.rpM, b.rbM);
       const dx = u.x - b.pos.x, dy = u.y - b.pos.y, dz = u.z - b.pos.z;
       const d = Math.hypot(dx, dy, dz);
+      // v89: 降りられる天体（岩石の天体・ハビタブルゾーンの惑星）は、地表まで降りられる（接地は 30-planetfall.js）。ワープ中はこれまでどおり
+      if (!warping && typeof Planetfall !== 'undefined' && Planetfall.isLandable(b)) continue;
       const limit = R + this.minAltitude(b);
       if (!Number.isFinite(d) || d >= limit || d === 0) continue;
       // 境界まで押し戻す

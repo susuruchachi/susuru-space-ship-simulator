@@ -30,6 +30,7 @@ const PRECACHE = [
   "14-solar-system.js",
   "28-deep-space.js",
   "29-weapons.js",
+  "30-planetfall.js",
   "15-universe-render.js",
   "16-navigation.js",
   "17-space-hud.js",
