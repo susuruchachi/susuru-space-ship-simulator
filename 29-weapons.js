@@ -32,19 +32,125 @@ if (PRACTICE_MODE && typeof document !== 'undefined') {
 }
 // v89: 演習の敵の艦種・機種。L/W/H: 大きさ [m]、hp: 耐久、guns: 1回に撃つ門数、cal: 口径 [mm]、types: 砲の種類、
 //   reload [s]、range [m]、ikn: 最高速度 [IKn]、rel: 自艦に対して近づく・回る速さ [m/s]、tau: 速さを合わせる時間 [s]、standoff: 近づく距離 [m]
+//   v89: missile: ミサイルを撃つ艦（reload [s]・1回の数・撃ち始める距離 [m]）。cv（空母）は艦載機（対艦攻撃機）を出す。
+//   ms（ミサイル）は撃たれて出てくる小さな目標（波の数には数えない。小口径砲が落とす）
 const ENEMY_CLASSES = {
-  bb: { label: '戦艦', L: 230, W: 34, H: 30, color: 0xc0392b, hp: 900, guns: 6, cal: [356, 460], types: ['ap', 'he'], reload: [22, 30], range: 40000, ikn: [32, 36], rel: 600, tau: 3, standoff: [15000, 25000] },
-  ca: { label: '重巡洋艦', L: 190, W: 22, H: 20, color: 0xe67e22, hp: 450, guns: 4, cal: [203, 254], types: ['ap', 'he', 'rail'], reload: [12, 16], range: 30000, ikn: [35, 40], rel: 800, tau: 2.5, standoff: [10000, 18000] },
-  cl: { label: '軽巡洋艦', L: 160, W: 17, H: 16, color: 0xf1c40f, hp: 260, guns: 4, cal: [140, 155], types: ['he', 'coil', 'pulse'], reload: [7, 10], range: 25000, ikn: [38, 44], rel: 1000, tau: 2, standoff: [7000, 13000] },
-  dd: { label: '駆逐艦', L: 115, W: 11, H: 10, color: 0x1abc9c, hp: 140, guns: 2, cal: [100, 130], types: ['he', 'coil', 'pulse'], reload: [4, 6], range: 16000, ikn: [42, 50], rel: 1300, tau: 1.5, standoff: [4000, 8000] },
-  ac: { label: '対艦攻撃機', L: 18, W: 14, H: 4, color: 0xd35eff, hp: 30, guns: 1, cal: [75, 120], types: ['rail', 'xray'], reload: [3, 5], range: 6000, ikn: [90, 110], rel: 4000, tau: 0.4, standoff: [1000, 3000] },
+  bb: { label: '戦艦', L: 250, W: 34, H: 30, color: 0xc0392b, hp: 900, guns: 6, cal: [356, 460], types: ['ap', 'he'], reload: [22, 30], range: 40000, ikn: [32, 36], rel: 600, tau: 3, standoff: [15000, 25000] },
+  cv: { label: '空母', L: 280, W: 42, H: 26, color: 0x3f8cff, hp: 700, guns: 2, cal: [100, 130], types: ['he', 'pulse'], reload: [5, 7], range: 14000, ikn: [32, 36], rel: 600, tau: 3, standoff: [22000, 30000], carrier: { every: [7, 12], max: 10 } },
+  ca: { label: '重巡洋艦', L: 195, W: 22, H: 20, color: 0xe67e22, hp: 450, guns: 4, cal: [203, 254], types: ['ap', 'he', 'rail'], reload: [12, 16], range: 30000, ikn: [35, 40], rel: 800, tau: 2.5, standoff: [10000, 18000], missile: { reload: [70, 100], count: 2, range: 28000 } },
+  cl: { label: '軽巡洋艦', L: 165, W: 17, H: 16, color: 0xf1c40f, hp: 260, guns: 4, cal: [140, 155], types: ['he', 'coil', 'pulse'], reload: [7, 10], range: 25000, ikn: [38, 44], rel: 1000, tau: 2, standoff: [7000, 13000], missile: { reload: [60, 90], count: 1, range: 24000 } },
+  dd: { label: '駆逐艦', L: 118, W: 11, H: 10, color: 0x1abc9c, hp: 140, guns: 2, cal: [100, 130], types: ['he', 'coil', 'pulse'], reload: [4, 6], range: 16000, ikn: [42, 50], rel: 1300, tau: 1.5, standoff: [4000, 8000], missile: { reload: [50, 80], count: 1, range: 20000 } },
+  ac: { label: '対艦攻撃機', L: 20, W: 15, H: 4, color: 0xd35eff, hp: 30, guns: 1, cal: [75, 120], types: ['rail', 'xray'], reload: [3, 5], range: 6000, ikn: [90, 110], rel: 4000, tau: 0.4, standoff: [1000, 3000], missile: { reload: [40, 60], count: 1, range: 9000 } },
+  ms: { label: 'ミサイル', L: 9, W: 1.2, H: 1.2, color: 0xffa040, hp: 14, guns: 0, cal: [0, 0], types: ['he'], reload: [1, 1], range: 0, ikn: [150, 150], rel: 1800, tau: 0.9, standoff: [0, 0], temp: true },
 };
+// v89: 敵の艦の形（艦級ごとの大きさ [m]。艦首が +Z）。箱を並べて作る簡単な形で、艦種が見分けられる:
+//   戦艦 = 高い艦橋と大きな砲塔4基・煙突2本、空母 = 平らな飛行甲板と右舷の艦橋、重巡 = 砲塔3基、
+//   軽巡 = 小さな砲塔4基、駆逐艦 = 細い船体に砲塔3基、対艦攻撃機 = 三角の翼、ミサイル = 細い筒
+const EnemyModels = {
+  _cache: {},
+  _merge(parts) {
+    const pos = [], nor = [];
+    for (const [geo, m] of parts) {
+      const g = geo.index ? geo.toNonIndexed() : geo;
+      if (m) g.applyMatrix4(m);
+      g.computeVertexNormals();
+      for (const v of g.attributes.position.array) pos.push(v);
+      for (const v of g.attributes.normal.array) nor.push(v);
+      if (g !== geo) g.dispose();
+      geo.dispose();
+    }
+    const out = new THREE.BufferGeometry();
+    out.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    out.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+    out.computeBoundingSphere();
+    return out;
+  },
+  _box(w, h, l, x, y, z) { return [new THREE.BoxGeometry(w, h, l), new THREE.Matrix4().makeTranslation(x, y, z)]; },
+  _cyl(r, h, x, y, z, rotX) {
+    const m = new THREE.Matrix4().makeTranslation(x, y, z);
+    if (rotX) m.multiply(new THREE.Matrix4().makeRotationX(rotX));
+    return [new THREE.CylinderGeometry(r, r, h, 10), m];
+  },
+  // 先細りの船体（艦首 +Z が尖り、艦尾は少し絞る。底は V 字）
+  _hull(W, H, L) {
+    const g = new THREE.BoxGeometry(W, H, L, 2, 1, 12);
+    const p = g.attributes.position;
+    for (let i = 0; i < p.count; i++) {
+      const zf = p.getZ(i) / (L / 2);
+      let k = 1;
+      if (zf > 0.15) k = 1 - Math.pow((zf - 0.15) / 0.85, 1.7) * 0.94;
+      else if (zf < -0.75) k = 1 - ((-zf - 0.75) / 0.25) * 0.35;
+      let x = p.getX(i) * k, y = p.getY(i);
+      if (y < 0) { x *= 0.55; if (zf > 0.7) y *= 1 - (zf - 0.7) / 0.3 * 0.6; }
+      p.setXYZ(i, x, y, p.getZ(i));
+    }
+    return [g, null];
+  },
+  // 砲塔（低い箱）と砲身。dir: +1 艦首向き / -1 艦尾向き
+  _turret(parts, z, y, size, barrels, blen, dir) {
+    parts.push(this._box(size, size * 0.45, size * 1.2, 0, y + size * 0.22, z));
+    for (let i = 0; i < barrels; i++) {
+      const x = (i - (barrels - 1) / 2) * size * 0.32;
+      parts.push(this._box(size * 0.09, size * 0.09, blen, x, y + size * 0.3, z + dir * (size * 0.6 + blen / 2)));
+    }
+  },
+  get(cls) {
+    if (this._cache[cls]) return this._cache[cls];
+    const C = ENEMY_CLASSES[cls];
+    const L = C.L, W = C.W, H = C.H;
+    const parts = [];
+    if (cls === 'ms') {
+      parts.push(this._cyl(W / 2, L * 0.8, 0, 0, -L * 0.1, Math.PI / 2));
+      parts.push([new THREE.ConeGeometry(W / 2, L * 0.2, 10), new THREE.Matrix4().makeTranslation(0, 0, L * 0.4).multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2))]);
+      parts.push(this._box(W * 2.4, W * 0.15, L * 0.14, 0, 0, -L * 0.42));
+      parts.push(this._box(W * 0.15, W * 2.4, L * 0.14, 0, 0, -L * 0.42));
+    } else if (cls === 'ac') {
+      // 胴体・三角の翼・尾翼
+      const body = new THREE.BoxGeometry(W * 0.16, H * 0.55, L, 1, 1, 4);
+      const bp = body.attributes.position;
+      for (let i = 0; i < bp.count; i++) { const zf = bp.getZ(i) / (L / 2); if (zf > 0.3) { const k = 1 - (zf - 0.3) / 0.7 * 0.8; bp.setX(i, bp.getX(i) * k); bp.setY(i, bp.getY(i) * k); } }
+      parts.push([body, null]);
+      const wing = new THREE.BoxGeometry(W, H * 0.08, L * 0.55, 2, 1, 1);
+      const wp = wing.attributes.position;
+      for (let i = 0; i < wp.count; i++) { const xf = Math.abs(wp.getX(i)) / (W / 2); const z = wp.getZ(i); wp.setZ(i, z > 0 ? z * (1 - xf * 0.9) - xf * L * 0.12 : z - xf * L * 0.05); }
+      parts.push([wing, new THREE.Matrix4().makeTranslation(0, 0, -L * 0.12)]);
+      parts.push(this._box(W * 0.03, H * 0.9, L * 0.2, 0, H * 0.45, -L * 0.38));
+      parts.push(this._cyl(W * 0.06, L * 0.12, 0, 0, -L * 0.5, Math.PI / 2));
+    } else {
+      const hullH = H * 0.42;
+      parts.push(this._hull(W, hullH, L));
+      const deck = hullH / 2;
+      if (cls === 'cv') {
+        // 飛行甲板（全通）と右舷の艦橋・煙突
+        parts.push(this._box(W * 1.18, H * 0.06, L * 0.96, 0, deck + H * 0.1, 0));
+        parts.push(this._box(W * 0.9, H * 0.1, L * 0.8, 0, deck + H * 0.04, -L * 0.02));
+        parts.push(this._box(W * 0.16, H * 0.34, L * 0.14, W * 0.5, deck + H * 0.3, L * 0.08));
+        parts.push(this._box(W * 0.1, H * 0.22, L * 0.05, W * 0.5, deck + H * 0.58, L * 0.1));
+        parts.push(this._cyl(W * 0.06, H * 0.26, W * 0.5, deck + H * 0.56, L * 0.02));
+        parts.push(this._box(W * 0.02, H * 0.3, W * 0.02, W * 0.5, deck + H * 0.8, L * 0.1));
+      } else {
+        const cfg = {
+          bb: { sup: [[0.06, 0.26, 0.62, 0.3], [0.1, 0.1, 0.42, 0.62], [0.11, 0.05, 0.3, 0.9], [-0.14, 0.12, 0.5, 0.26]], fun: [[-0.02, 0.085], [-0.1, 0.075]], tur: [[0.3, 0, 1], [0.21, 0.09, 1], [-0.26, 0.09, -1], [-0.35, 0, -1]], ts: 0.5, tb: 2, bl: 0.085, mast: [[0.11, 1.15], [-0.16, 0.8]] },
+          ca: { sup: [[0.08, 0.22, 0.6, 0.3], [0.12, 0.08, 0.4, 0.62], [-0.12, 0.1, 0.5, 0.24]], fun: [[0.0, 0.09], [-0.07, 0.08]], tur: [[0.31, 0, 1], [0.22, 0.1, 1], [-0.3, 0, -1]], ts: 0.48, tb: 2, bl: 0.07, mast: [[0.12, 1.05], [-0.14, 0.8]] },
+          cl: { sup: [[0.08, 0.2, 0.55, 0.28], [0.12, 0.07, 0.38, 0.56], [-0.12, 0.08, 0.45, 0.22]], fun: [[0.0, 0.085], [-0.08, 0.075]], tur: [[0.33, 0, 1], [0.25, 0.1, 1], [-0.27, 0.1, -1], [-0.35, 0, -1]], ts: 0.4, tb: 2, bl: 0.055, mast: [[0.12, 1.0]] },
+          dd: { sup: [[0.14, 0.14, 0.6, 0.3], [0.17, 0.06, 0.42, 0.6]], fun: [[0.02, 0.1], [-0.08, 0.09]], tur: [[0.34, 0, 1], [-0.24, 0.1, -1], [-0.34, 0, -1]], ts: 0.42, tb: 1, bl: 0.06, mast: [[0.17, 1.05]] },
+        }[cls];
+        for (const [z, len, w, h] of cfg.sup) parts.push(this._box(W * w, H * h, L * len, 0, deck + H * h / 2, L * z));
+        for (const [z, r] of cfg.fun) parts.push(this._cyl(W * r * 1.6, H * 0.42, 0, deck + H * 0.3 + H * 0.21, L * z));
+        for (const [z, raise, dir] of cfg.tur) this._turret(parts, L * z, deck + H * raise, W * cfg.ts, cfg.tb, L * cfg.bl, dir);
+        for (const [z, h] of cfg.mast) parts.push(this._box(W * 0.03, H * h, W * 0.03, 0, deck + H * h / 2, L * z));
+      }
+    }
+    return (this._cache[cls] = this._merge(parts));
+  },
+};
+
 // 難易度: 艦種の出やすさ（重み）、敵の火力の倍率、目標の数
 const PRACTICE_DIFFICULTIES = {
-  easy: { label: 'やさしい', weights: { bb: 0, ca: 1, cl: 3, dd: 5, ac: 3 }, dmg: 0.6, count: 30 },
-  normal: { label: 'ふつう', weights: { bb: 1, ca: 2, cl: 3, dd: 4, ac: 3 }, dmg: 1.0, count: 45 },
-  hard: { label: 'むずかしい', weights: { bb: 3, ca: 4, cl: 3, dd: 3, ac: 4 }, dmg: 1.5, count: 45 },
-  extreme: { label: '激戦', weights: { bb: 6, ca: 5, cl: 3, dd: 2, ac: 5 }, dmg: 2.2, count: 60 },
+  easy: { label: 'やさしい', weights: { bb: 0, cv: 0, ca: 1, cl: 3, dd: 5, ac: 3 }, dmg: 0.6, count: 30 },
+  normal: { label: 'ふつう', weights: { bb: 1, cv: 0.5, ca: 2, cl: 3, dd: 4, ac: 3 }, dmg: 1.0, count: 45 },
+  hard: { label: 'むずかしい', weights: { bb: 3, cv: 1.2, ca: 4, cl: 3, dd: 3, ac: 4 }, dmg: 1.5, count: 45 },
+  extreme: { label: '激戦', weights: { bb: 6, cv: 2.5, ca: 5, cl: 3, dd: 2, ac: 5 }, dmg: 2.2, count: 60 },
 };
 
 // v89: 砲の状態の色（画面の番号・照準マーク・装填の棒・小さな図の線）
@@ -1198,7 +1304,7 @@ const Weapons = {
   _fleets() {
     const P = this.practice;
     if (!P) return [];
-    const list = P.targets.filter((t) => t.alive);
+    const list = P.targets.filter((t) => t.alive && !t.temp);
     const parent = list.map((_, i) => i);
     const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
     const L2 = this.FLEET_LINK * this.FLEET_LINK;
@@ -1207,7 +1313,7 @@ const Weapons = {
     }
     const groups = new Map();
     list.forEach((t, i) => { const r = find(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(t); });
-    const rank = { bb: 4, ca: 3, cl: 2, dd: 1, ac: 0 };
+    const rank = { bb: 4, cv: 3.5, ca: 3, cl: 2, dd: 1, ac: 0, ms: -1 };
     const out = [];
     for (const m of groups.values()) {
       if (m.length === 1 && (m[0].cls === 'ac' || m[0].cls === 'dd')) continue;
@@ -1588,36 +1694,15 @@ const Weapons = {
       const center = new THREE.Vector3(ship.position.x, ship.position.y, ship.position.z).addScaledVector(d, dists[gi]);
       for (let k = 0; k < perGroup; k++) {
         const cls = pickClass();
-        const C = ENEMY_CLASSES[cls];
         const off = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(cls === 'ac' ? 2000 : 3000);
-        const pos = center.clone().add(off);
-        const mat = new THREE.MeshStandardMaterial({ color: C.color, emissive: new THREE.Color(C.color).multiplyScalar(0.35), roughness: 0.6 });
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.scale.set(C.W, C.H, C.L); // 長さは Z（進む向き）
-        mesh.position.copy(pos);
-        group.add(mesh);
-        const type = pick(C.types);
-        const kind = ['pulse', 'cw', 'xray'].includes(type) ? 'laser' : 'kinetic';
-        const info = weaponTypeInfo(kind, type);
-        const weapon = {
-          kind, type, caliber: Math.round(rnd(C.cal)), speed: info.speed || 0, guns: C.guns,
-          reload: rnd(C.reload), range: C.range, dmgMul: diff.dmg,
-          color: pick(['#ff3a2a', '#3aff6a', '#c050ff', '#ffe23a']),
-        };
-        targets.push({
-          cls, label: C.label, pos, vel: new THREE.Vector3(State.ship.velocity.x, State.ship.velocity.y, State.ship.velocity.z).clampLength(0, C.ikn[1] * SHIP_IKN), size: Math.max(C.W, C.H, C.L) * 0.45, moving: cls === 'ac' || cls === 'dd',
-          alive: true, mesh, mat, center, group: gi, distShip: 0,
-          hp: C.hp, hpMax: C.hp, weapon, reloadLeft: 2 + Math.random() * weapon.reload,
-          maxSpeed: rnd(C.ikn) * SHIP_IKN, rel: C.rel * (0.8 + Math.random() * 0.4), tau: C.tau,
-          standoff: rnd(C.standoff), orbitSign: Math.random() < 0.5 ? 1 : -1,
-        });
+        targets.push(this._makeEnemy(cls, center.clone().add(off), gi, center, diff, group, geo));
       }
     }
     const shipSize = (CameraSystem._shipScale || 1) * 8;
     const hpMax = keepHP ? keepHP.shipHPMax : Math.max(200, 40 * shipSize);
     if (!keepHP) { this._resetDamage(); this._initDamage(hpMax); }
     this.practice = {
-      targets, group, geo, mats: targets.map((t) => t.mat), alive: targets.length, total: targets.length, wave, difficulty: diffKey,
+      targets, group, geo, mats: targets.map((t) => t.mat), alive: targets.length, total: targets.length, wave, difficulty: diffKey, diff,
       shipHPMax: hpMax, shipHP: keepHP ? keepHP.shipHP : hpMax,
     };
     this._buildTargetMarkers();
@@ -1626,6 +1711,122 @@ const Weapons = {
     const comp = Object.entries(count).map(([k, v]) => `${k}${v}`).join('・');
     this._flashStatus(`${wave > 1 ? `第${wave}波` : `演習開始（${diff.label}）`}: ${comp}`);
     this._syncUi();
+  },
+  // v89: 敵を1つ作る（艦・攻撃機・ミサイル）。見た目は「艦」（艦級の形・大きさ）か「箱」
+  enemyLook: 'ship',
+  _makeEnemy(cls, pos, gi, center, diff, group, boxGeo, parent) {
+    const C = ENEMY_CLASSES[cls];
+    const pick = (a) => a[Math.floor(Math.random() * a.length)];
+    const rnd = ([a, b]) => a + Math.random() * (b - a);
+    const shipLook = this.enemyLook !== 'box';
+    let mat;
+    if (cls === 'ms') {
+      if (!this._msMat) this._msMat = new THREE.MeshBasicMaterial({ color: 0xffb060 });
+      mat = this._msMat;
+    } else if (shipLook) {
+      // 灰色の船体に艦種の色を少し（暗い宇宙でも見えるように、艦種の色で少し光らせる）
+      const col = new THREE.Color(0x7c8894).lerp(new THREE.Color(C.color), 0.3);
+      mat = new THREE.MeshStandardMaterial({ color: col, emissive: new THREE.Color(C.color).multiplyScalar(0.2), roughness: 0.7, metalness: 0.2, flatShading: true });
+    } else mat = new THREE.MeshStandardMaterial({ color: C.color, emissive: new THREE.Color(C.color).multiplyScalar(0.35), roughness: 0.6 });
+    let mesh;
+    if (shipLook || cls === 'ms') mesh = new THREE.Mesh(EnemyModels.get(cls), mat);
+    else { mesh = new THREE.Mesh(boxGeo, mat); mesh.scale.set(C.W, C.H, C.L); } // 長さは Z（進む向き）
+    mesh.position.copy(pos);
+    if (cls === 'ms') {
+      // 遠くても見えるように、噴射の光の点
+      if (!this._msDotMat) this._msDotMat = new THREE.PointsMaterial({ map: this._dotTexture(), color: 0xffb060, size: 7, sizeAttenuation: false, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+      if (!this._msDotGeo) { this._msDotGeo = new THREE.BufferGeometry(); this._msDotGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0, 0, -ENEMY_CLASSES.ms.L / 2]), 3)); }
+      const dot = new THREE.Points(this._msDotGeo, this._msDotMat);
+      dot.frustumCulled = false;
+      mesh.add(dot);
+    }
+    group.add(mesh);
+    const type = pick(C.types);
+    const kind = ['pulse', 'cw', 'xray'].includes(type) ? 'laser' : 'kinetic';
+    const info = weaponTypeInfo(kind, type);
+    const weapon = {
+      kind, type, caliber: Math.round(rnd(C.cal)), speed: info.speed || 0, guns: C.guns,
+      reload: rnd(C.reload), range: C.range, dmgMul: diff.dmg,
+      color: pick(['#ff3a2a', '#3aff6a', '#c050ff', '#ffe23a']),
+    };
+    const sv = State.ship.velocity;
+    const t = {
+      cls, label: C.label, pos, vel: new THREE.Vector3(sv.x, sv.y, sv.z).clampLength(0, C.ikn[1] * SHIP_IKN),
+      size: cls === 'ms' ? 26 : Math.max(C.W, C.H, C.L) * 0.45, moving: cls === 'ac' || cls === 'dd' || cls === 'ms',
+      alive: true, mesh, mat, center, group: gi, distShip: pos.distanceTo(new THREE.Vector3(State.ship.position.x, State.ship.position.y, State.ship.position.z)),
+      hp: C.hp, hpMax: C.hp, weapon, reloadLeft: 2 + Math.random() * weapon.reload,
+      maxSpeed: rnd(C.ikn) * SHIP_IKN, rel: C.rel * (0.8 + Math.random() * 0.4), tau: C.tau,
+      standoff: rnd(C.standoff), orbitSign: Math.random() < 0.5 ? 1 : -1,
+      temp: !!C.temp,
+    };
+    if (C.missile) t.missileLeft = 8 + Math.random() * rnd(C.missile.reload);
+    if (C.carrier) { t.launchLeft = 4 + Math.random() * 6; t.launched = 0; }
+    if (cls === 'ms') { t.life = 60; t.spd = 500; t.dmg = 60 * diff.dmg; if (parent && parent.rv) t.rv = parent.rv.clone(); }
+    // 演習の途中で出てきた敵（艦載機・ミサイル）: 目印を足し、数に入れる
+    const P = this.practice;
+    if (P && P.targets) {
+      P.targets.push(t);
+      if (!t.temp) { P.alive++; P.total++; P.mats.push(mat); }
+      const u = this._ui;
+      if (u && u.tmarks) { const el = document.createElement('div'); el.className = `wpn-tmark${t.moving ? ' moving' : ''}${cls === 'ms' ? ' missile' : ''}`; u.tmarks.appendChild(el); t.el = el; }
+    }
+    return t;
+  },
+  // ミサイルを撃つ・艦載機を出す（_updateTargets から）
+  _enemyLaunch(t, dt, sp) {
+    const P = this.practice;
+    const C = ENEMY_CLASSES[t.cls];
+    const liveN = P.targets.reduce((n, x) => n + (x.alive ? 1 : 0), 0);
+    if (C.missile && P.shipHP > 0) {
+      t.missileLeft -= dt;
+      if (t.missileLeft <= 0) {
+        t.missileLeft = C.missile.reload[0] + Math.random() * (C.missile.reload[1] - C.missile.reload[0]);
+        if (t.distShip <= C.missile.range && liveN < 130) {
+          for (let i = 0; i < C.missile.count; i++) {
+            const off = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(t.size * 0.6);
+            this._makeEnemy('ms', t.pos.clone().add(off), t.group, t.center, P.diff, P.group, P.geo, t);
+          }
+        }
+      }
+    }
+    if (C.carrier) {
+      t.launchLeft -= dt;
+      if (t.launchLeft <= 0) {
+        t.launchLeft = C.carrier.every[0] + Math.random() * (C.carrier.every[1] - C.carrier.every[0]);
+        if (t.launched < C.carrier.max && liveN < 120) {
+          t.launched++;
+          const off = new THREE.Vector3(Math.random() - 0.5, 0.5 + Math.random() * 0.5, Math.random() - 0.5).multiplyScalar(120);
+          const a = this._makeEnemy('ac', t.pos.clone().add(off), t.group, t.center, P.diff, P.group, P.geo, t);
+          a.rv = (t.rv ? t.rv.clone() : new THREE.Vector3());
+          if (t.launched === 1) this._flashStatus('空母が艦載機を出し始めました');
+        }
+      }
+    }
+  },
+  // ミサイルの動き: 自艦を追い（少し遅れて向きを変える）、だんだん速くなる。船体に当たれば爆発。45秒で燃料切れ
+  _updateMissile(t, dt, sp, svReal) {
+    const P = this.practice;
+    t.life -= dt;
+    if (t.life <= 0 || P.shipHP <= 0) { this._destroyTarget(t); return; }
+    if (!t.rv) t.rv = new THREE.Vector3();
+    const R = sp.clone().sub(t.pos);
+    const dist = R.length();
+    const rh = R.clone().divideScalar(Math.max(1, dist));
+    t.spd = Math.min(t.rel, t.spd + 250 * dt); // ゆっくり加速（落とす時間がある）
+    t.rv.lerp(rh.multiplyScalar(t.spd), 1 - Math.exp(-dt / t.tau));
+    t.vel.copy(svReal).add(t.rv);
+    const prev = t.pos.clone();
+    t.pos.addScaledVector(t.rv, dt); // 自艦はこのフレームでもう動いているので、自艦に対する動きだけ進める
+    t.distShip = t.pos.distanceTo(sp);
+    if (t.rv.lengthSq() > 1) t.mesh.lookAt(t.pos.clone().add(t.rv));
+    t.mesh.position.copy(t.pos);
+    let hit = this._occ ? WeaponRig.segmentHitsGrid(this._occ, prev, t.pos) : null;
+    if (!hit && !this._occ && t.distShip < (CameraSystem._shipScale || 1) * 2) hit = t.pos.clone();
+    if (hit) {
+      this._hitShip(hit, t.dmg, t.rv.clone().normalize());
+      this._spark(hit, 0xffc070, 60);
+      this._destroyTarget(t);
+    }
   },
   stopPractice(keepUi) {
     const P = this.practice;
@@ -1648,8 +1849,13 @@ const Weapons = {
     const sp = new THREE.Vector3(ship.position.x, ship.position.y, ship.position.z);
     // 敵が合わせる速度: 自動操艦が動かしているあいだは巡航の速度（自動操艦の近づく・離れる分は合わせない）
     const sv = this._cruiseV ? this._cruiseV.clone() : new THREE.Vector3(ship.velocity.x, ship.velocity.y, ship.velocity.z);
-    for (const t of P.targets) {
+    const svShip = new THREE.Vector3(ship.velocity.x, ship.velocity.y, ship.velocity.z);
+    // 途中で増える（艦載機・ミサイル）ので、いまの分だけ回す
+    const list = P.targets.slice();
+    for (const t of list) {
       if (!t.alive) continue;
+      if (t.cls === 'ms') { this._updateMissile(t, dt, sp, svShip); continue; }
+      this._enemyLaunch(t, dt, sp);
       // v89: 先に動かしてから（自艦はこのフレームでもう動いているので、同じ時刻どうしで）、次に向かう向きを決める。
       //   以前は動かす前の位置から、もう動いた自艦へ向かう向きを決めていたため、自艦が速い（25 IKn で1フレーム約650 km）と
       //   敵がいつも1フレーム分先へ行き過ぎ、数百 km 前に居座っていた
@@ -1689,6 +1895,8 @@ const Weapons = {
         for (let g = 0; g < t.weapon.guns; g++) this._enemyFire(t, sp, svReal);
       }
     }
+    // 落とされたミサイルは一覧から外す（増え続けないように）
+    if (P.targets.length > 140) P.targets = P.targets.filter((t) => t.alive || !t.temp);
   },
   // 目標が自艦を撃つ
   _enemyFire(t, sp, sv) {
@@ -2540,7 +2748,7 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
     t.hp -= dmg;
     this._spark(point || t.pos, 0xffd090, 18);
     const f = clamp(1 - t.hp / t.hpMax, 0, 1);
-    t.mat.emissive.setRGB(0.45 + 0.5 * f, 0.15 * (1 - f), 0.05);
+    if (t.mat.emissive) t.mat.emissive.setRGB(0.45 + 0.5 * f, 0.15 * (1 - f), 0.05);
     if (t.hp <= 0) this._destroyTarget(t);
   },
   _spark(p, color, size) {
@@ -2556,8 +2764,9 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
   _destroyTarget(t) {
     if (!t.alive) return;
     t.alive = false;
-    this.practice.alive--;
+    if (!t.temp) this.practice.alive--;
     this.practice.group.remove(t.mesh);
+    if (t.el && t.temp) { t.el.remove(); t.el = null; }
     // 小さな爆発（明るい点が広がって消える）
     const ship = State.ship;
     const fmat = new THREE.PointsMaterial({ map: this._dotTexture(), color: 0xffd090, size: 46, sizeAttenuation: false, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
@@ -2571,7 +2780,7 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
       // 合わせていた目標を壊したら、近くに残っている目標（同じまとまりを先に）へ照準を合わせ直す
       let best = null, bestD = Infinity;
       for (const o of this.practice.targets) {
-        if (!o.alive) continue;
+        if (!o.alive || o.temp) continue;
         // 大型艦（戦艦・重巡）を先に。距離を小さく見積もる
         const d = o.pos.distanceTo(t.pos) * (o.group === t.group ? 1 : 3) * (o.cls === 'bb' ? 0.25 : o.cls === 'ca' ? 0.5 : 1);
         if (d < bestD && d < 15000) { bestD = d; best = o; }
@@ -2634,7 +2843,7 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
     this._visibleTarget = null;
     {
       let best = null, bestA = Infinity;
-      for (const t of this.practice.targets) { if (!t.alive || angOf(t) >= cone) continue; const a = score(t); if (a < bestA) { bestA = a; best = t; } }
+      for (const t of this.practice.targets) { if (!t.alive || t.temp || angOf(t) >= cone) continue; const a = score(t); if (a < bestA) { bestA = a; best = t; } }
       this._visibleTarget = best;
       // v89: 見ている方向の半球に目標があれば自動で照準を合わせる（自分で照準を動かした直後の1.5秒は合わせない）
       if (!this.lock && best && !(this._noAutoLockUntil > this._time)) this.lock = best;
@@ -2657,7 +2866,7 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
       this.aim.dirU = this._toUniverse({ x: nd.x, y: nd.y, z: nd.z });
     } else this.lockPanning = false;
   },
-  LOCK_CLASS_BONUS: { bb: Math.PI / 3, ca: Math.PI / 6 },
+  LOCK_CLASS_BONUS: { bb: Math.PI / 3, cv: Math.PI / 4, ca: Math.PI / 6 },
   PAN_TAU: 0.3, // 照準のパンの滑らかさ [s]
   PAN_MIN_RATE: 0.08, // [rad/s] 最後まで止まらずに合わせ切るための最低の速さ
   PAN_MAX_RATE: 2.1, // [rad/s] 約120°/s
@@ -2735,7 +2944,7 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
     return null;
   },
   // v89: 艦種の大きさ。大口径砲は大型艦（戦艦・重巡洋艦）を、小口径砲は中型〜小型（軽巡洋艦・駆逐艦・攻撃機）を優先して撃つ
-  _isLargeTarget(t) { return t.cls === 'bb' || t.cls === 'ca'; },
+  _isLargeTarget(t) { return t.cls === 'bb' || t.cls === 'ca' || t.cls === 'cv'; },
   // 大口径砲: 主砲（いちばん大きな口径）の 7割以上、かつ 200 mm 以上。それ以外は小口径砲
   _isLargeGun(m) { return m.cfg.caliber >= Math.max(200, this._mainCaliber * 0.7) - 1e-6; },
   // 砲の目標を決める
@@ -2756,7 +2965,9 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
       m._badT.set(m.target, this._time + 3);
       m._nextPick = 0;
     }
-    const ok = (t) => !(m._badT && m._badT.get(t) > this._time);
+    // 大口径砲はミサイルを狙わない（小口径砲が落とす）
+    const largeGun = this._isLargeGun(m);
+    const ok = (t) => !(m._badT && m._badT.get(t) > this._time) && !(largeGun && t.temp);
     const large = this._isLargeGun(m);
     const pref = (t) => (large ? this._isLargeTarget(t) : !this._isLargeTarget(t));
     const mainOk = main && ok(main) && this._canEngage(m, main);
@@ -3021,6 +3232,7 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
       <div class="wpn-status"></div>
       <div class="wpn-groups"></div>
       <select class="wpn-difficulty" title="演習の難易度"></select>
+      <select class="wpn-enemylook" title="敵の見た目"><option value="ship">敵: 艦の形</option><option value="box">敵: 箱</option></select>
       <button type="button" class="wpn-btn wpn-practice">演習</button>
       <div class="wpn-hp"><div class="wpn-hp-fill"></div><span class="wpn-hp-text"></span></div>
       <select class="wpn-maneuver" title="自動操艦: 目標の多い方へ、撃てる砲の多い向きに回し、間合いを合わせる"></select>
@@ -3060,6 +3272,15 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
     tmarks.className = 'wpn-tmarks';
     document.body.appendChild(tmarks);
     // v89: 難易度（演習モードだけ。選んだものを覚えておく）
+    // v89: 敵の見た目（艦の形／箱）。選んだものを覚えておく
+    const lsel = box.querySelector('.wpn-enemylook');
+    try { this.enemyLook = localStorage.getItem('spaceSimEnemyLook') === 'box' ? 'box' : 'ship'; } catch (e) { this.enemyLook = 'ship'; }
+    lsel.value = this.enemyLook;
+    lsel.addEventListener('change', () => {
+      this.enemyLook = lsel.value === 'box' ? 'box' : 'ship';
+      try { localStorage.setItem('spaceSimEnemyLook', this.enemyLook); } catch (e) { /* ignore */ }
+    });
+    this._lsel = lsel;
     const dsel = box.querySelector('.wpn-difficulty');
     for (const [k, d] of Object.entries(PRACTICE_DIFFICULTIES)) dsel.appendChild(new Option(`難易度: ${d.label}`, k));
     try { this.difficulty = localStorage.getItem('spaceSimPracticeDifficulty') || 'normal'; } catch (e) { this.difficulty = 'normal'; }
@@ -3267,6 +3488,7 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
     // v89: 演習は演習モード（index.html?mode=practice）だけ
     if (u.practice) { u.practice.style.display = PRACTICE_MODE ? '' : 'none'; u.practice.textContent = this.practice ? '演習をやめる' : '演習開始'; u.practice.classList.toggle('active', !!this.practice); }
     if (u.dsel) u.dsel.style.display = PRACTICE_MODE && !this.practice ? '' : 'none';
+    if (this._lsel) this._lsel.style.display = PRACTICE_MODE && !this.practice ? '' : 'none';
     if (u.tmarks) u.tmarks.style.display = has && this.view && this.practice ? '' : 'none';
     u.fire.style.display = this.aim.active ? '' : 'none';
     u.reticle.style.display = has && this.view ? '' : 'none';
