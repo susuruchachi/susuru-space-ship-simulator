@@ -1619,12 +1619,25 @@
       // 部品（重心・主エンジン・姿勢スラスター）をタップ → 選んでギズモを出す。
       // 何もないところをタップ → 選択を外す
       setRayFromClient(e.clientX, e.clientY);
-      const hit = raycaster.intersectObjects(markers.children, true).find((h) => h.object.userData.part);
+      let hit = raycaster.intersectObjects(markers.children, true).find((h) => h.object.userData.part);
+      // v89: 部品の当たり判定（見えない大きめの球）の端で、兵装の旋回範囲の扇形にも触れているときは、兵装を選ぶ。
+      //   部品の目印そのもの（中心から 14px 以内）をタップしたときは、これまでどおり部品
+      if (hit && typeof WeaponDesigner !== 'undefined' && WeaponDesigner.pickAt) {
+        const pp = hit.object.userData.part;
+        const pos = pp.kind === 'cog' ? design.cog : pp.kind === 'main' ? (findMain(pp.id) || {}).position
+          : pp.kind === 'vital' ? (findVital(pp.id) || {}).position : (surfacePart(pp.kind, pp.id) || {}).position;
+        const c = pos ? toClient(pos) : null;
+        const near = c && Math.hypot(c.x - e.clientX, c.y - e.clientY) <= 14;
+        if (!near && WeaponDesigner.pickAt(raycaster)) { if (active) setActive(null); return; }
+      }
       if (hit) {
         const part = hit.object.userData.part;
         setActive(part.kind, part.id);
         const sec = $({ pod: 'rcsSection', main: 'mainSection', cog: 'cogSection', retro: 'retroSection' }[part.kind]);
         if (sec) sec.open = true;
+      } else if (typeof WeaponDesigner !== 'undefined' && WeaponDesigner.pickAt && WeaponDesigner.pickAt(raycaster)) {
+        // v89: 兵装の旋回範囲の扇形をタップ → その兵装を選ぶ
+        if (active) setActive(null);
       } else if (active || selectedPodId || selectedRetroId) {
         setActive(null);
       }

@@ -3384,7 +3384,7 @@ const WeaponDesigner = {
       // 扇形の大きさは口径に合わせる（副砲などの小さな砲は小さく。たくさん並んでも重なりにくいように）
       const r0 = clamp((c.caliber / 1000) * 30, size * 0.01, size * 0.045);
       const r = on ? Math.max(r0 * 1.6, size * 0.03) : r0;
-      this._addPartMarks(m, m.turret, c.yawMin, c.yawMax, r, on ? 0xff7a50 : 0xff9070, on ? 0.38 : 0.16, on);
+      this._addPartMarks(m, m.turret, c.yawMin, c.yawMax, r, on ? 0xff7a50 : 0xff9070, on ? 0.38 : 0.16, on, { kind: 'mount', key: m.key });
       if (on) {
         // 砲身の仰角の範囲: 今の旋回角での、旋回の軸を含む縦の扇形
         const Fy = m.F.clone().applyAxisAngle(m.U, m.yaw);
@@ -3398,12 +3398,14 @@ const WeaponDesigner = {
       const c = normalizeWeaponDirector(design.weapons.directors[d.key]);
       const on = sel === d;
       const r = size * (on ? 0.06 : 0.04);
-      this._addPartMarks(d, d.node, c.yawMin, c.yawMax, r, 0x70ff9a, on ? 0.38 : 0.16, on);
+      this._addPartMarks(d, d.node, c.yawMin, c.yawMax, r, 0x70ff9a, on ? 0.38 : 0.16, on, { kind: 'director', key: d.key });
     }
   },
-  _addPartMarks(part, node, yawMin, yawMax, r, color, opacity, on) {
+  _addPartMarks(part, node, yawMin, yawMax, r, color, opacity, on, pick) {
     const pts = this._fanPoints((a) => part.F.clone().applyAxisAngle(part.U, a), toRadW(yawMin), toRadW(yawMax), r);
-    this._addFan(node, pts, color, opacity);
+    const g = this._addFan(node, pts, color, opacity);
+    // v89: 旋回範囲の扇形をタップすると、その砲塔・射撃レーダーを選ぶ（22-ship-designer.js の handleTap から pickAt）
+    if (pick && g) g.traverse((o) => { if (o.isMesh) o.userData.wpnPick = pick; });
     // 元の向き（0°）
     this._addLine(node, [new THREE.Vector3(), part.F.clone().multiplyScalar(r * 1.1)], color, on ? 0.9 : 0.5);
     if (on) {
@@ -3439,6 +3441,28 @@ const WeaponDesigner = {
     g.add(fan); g.add(edge);
     fan.renderOrder = 20; edge.renderOrder = 21;
     this._placeAt(node, g);
+    return g;
+  },
+  // v89: 画面のタップ（raycaster）で旋回範囲の扇形に当たれば、その兵装を選ぶ。選べたら true。
+  //   扇形が重なっていれば、選んでいないもの・手前のものを先に（同じところを続けてタップすると、重なった次の兵装へ）
+  pickAt(raycaster) {
+    if (!this._marks || !this._marks.children.length) return false;
+    this._marks.updateMatrixWorld(true);
+    const hits = raycaster.intersectObjects(this._marks.children, true).filter((h) => h.object.userData.wpnPick);
+    if (!hits.length) return false;
+    const seen = new Set(), cands = [];
+    for (const h of hits) { const p = h.object.userData.wpnPick; const k = `${p.kind}:${p.key}`; if (!seen.has(k)) { seen.add(k); cands.push(p); } }
+    const cur = this._sel ? `${this._sel.kind}:${this._sel.key}` : '';
+    const i = cands.findIndex((p) => `${p.kind}:${p.key}` === cur);
+    const p = i >= 0 ? cands[(i + 1) % cands.length] : cands[0];
+    if (i >= 0 && cands.length === 1) return true; // もう選んでいる
+    this._groupLocked = false;
+    this._select(p.kind, p.key);
+    const sec = this.$ && this.$('weaponSection');
+    if (sec) sec.open = true;
+    const ps = this.$ && this.$('wpnPartSel');
+    if (ps && ps.scrollIntoView) { try { ps.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (e) { /* ignore */ } }
+    return true;
   },
   _addLine(node, pts, color, opacity) {
     const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
