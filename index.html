@@ -1639,6 +1639,7 @@ function animateFrame() {
   Weapons.update(dt); // v89: 砲塔・射撃レーダーを狙う向きへ、弾・レーザーを動かす
   EngineFx.update(dt, camera, renderer);
   if (!Weapons.updateCamera(camera)) CameraSystem.update(camera); // v89: 照準の視点
+  Weapons.preRender(camera); // v89: 被弾の跡（船体のシェーダーへ渡す）
   DockingPlatform.update();
   ApproachVisualizer.update();
 

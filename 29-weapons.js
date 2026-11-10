@@ -633,6 +633,7 @@ const Weapons = {
     this.rig = rig;
     this._modelRoot = modelRoot;
     this._design = design || null;
+    try { this._patchDamageMaterials(modelRoot); } catch (e) { console.warn('被弾の跡の準備に失敗しました', e); }
     this.cfg = normalizeShipWeapons(design && design.weapons);
     // v89: グループ（設計に無ければ名前から分ける。ゲームの中だけで、設計は書き換えない）
     const gcfg = normalizeShipWeapons(JSON.parse(JSON.stringify(this.cfg)));
@@ -1776,9 +1777,8 @@ const Weapons = {
     const D = this._dmg;
     const ship = State.ship;
     if (ship && ship._dmgBaseMaxSpeed !== undefined) { ship.maxSpeed = ship._dmgBaseMaxSpeed; delete ship._dmgBaseMaxSpeed; }
-    if (D && D.spotGroup && D.spotGroup.parent) D.spotGroup.parent.remove(D.spotGroup);
-    if (D) for (const sp of D.spots) { if (sp.glow) sp.glow.material.dispose(); if (sp.hole) sp.hole.material.dispose(); }
-    if (D) for (const sm of D.smoke) sm.sprite.material.dispose();
+    if (D && D.smokePts) { if (D.smokePts.parent) D.smokePts.parent.remove(D.smokePts); D.smokePts.geometry.dispose(); D.smokePts.material.dispose(); }
+    if (this._dmgU) this._dmgU.dmgCount.value = 0;
     if (this.rig) for (const m of this.rig.mounts) m._dmgPart = null;
     this._dmg = null;
     this._renderDamageUi(true);
@@ -1807,10 +1807,7 @@ const Weapons = {
         parts.push(pt);
       }
     }
-    // 被弾の跡（艦のメッシュに付ける。艦と一緒に動く）
-    const spotGroup = new THREE.Group();
-    if (ship && ship.mesh) ship.mesh.add(spotGroup);
-    this._dmg = { parts, spots: [], smoke: [], spotGroup, smokeT: 0, uiT: 0, wobble: { x: 0, y: 0, z: 0 } };
+    this._dmg = { parts, spots: [], smokeT: 0, uiT: 0, wobble: { x: 0, y: 0, z: 0 } };
     this._renderDamageUi(true);
   },
   // 区画の世界の位置
@@ -2075,37 +2072,113 @@ const Weapons = {
   },
 
   // ---------------------------------------------------------
-  // v89: 被弾の跡: 当たったところが赤く焼ける（ダメージが大きいほど広く・明るく、時間とともに冷める）。
-  //   同じところへの被弾がかさんで装甲を破ると、黒い穴があき、煙が出続ける
+  // v89: 被弾の跡（船体の部品そのものに描く）
+  //   艦のモデルのマテリアルのシェーダーに少し書き足して、被弾したところを直接塗る:
+  //     焼け焦げ（黒ずむ・残る）、赤熱（当たった直後は黄白、冷めると暗い赤。ダメージが大きいほど広い）、
+  //     装甲を破った穴（黒い穴と、ふちの残り火）。ふちは模様でぎざぎざにする。
+  //   跡は、当たった部品（砲塔なら砲塔、それ以外は船体）の座標で覚えるので、砲塔が回れば一緒に動く。
+  //   重くならないように: 跡は20個まで（近い被弾は1つにまとめる）、煙は1つの点の集まり（描画1回）
   // ---------------------------------------------------------
-  _glowTexture() {
-    if (this._glowTex) return this._glowTex;
-    const c = document.createElement('canvas');
-    c.width = c.height = 64;
-    const g = c.getContext('2d');
-    const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
-    grad.addColorStop(0, 'rgba(255,255,255,1)');
-    grad.addColorStop(0.35, 'rgba(255,255,255,0.65)');
-    grad.addColorStop(1, 'rgba(255,255,255,0)');
-    g.fillStyle = grad;
-    g.fillRect(0, 0, 64, 64);
-    this._glowTex = new THREE.CanvasTexture(c);
-    return this._glowTex;
+  DMG_MAX_SPOTS: 20,
+  SMOKE_MAX: 600,
+  _dmgUniforms() {
+    if (this._dmgU) return this._dmgU;
+    const spots = [], info = [];
+    for (let i = 0; i < this.DMG_MAX_SPOTS; i++) { spots.push(new THREE.Vector4(0, 0, 0, 1)); info.push(new THREE.Vector4(0, 0, 0, 0)); }
+    this._dmgU = { dmgSpots: { value: spots }, dmgInfo: { value: info }, dmgCount: { value: 0 }, dmgRot: { value: new THREE.Matrix3() }, dmgTime: { value: 0 } };
+    return this._dmgU;
   },
-  _holeTexture() {
-    if (this._holeTex) return this._holeTex;
-    const c = document.createElement('canvas');
-    c.width = c.height = 64;
-    const g = c.getContext('2d');
-    const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
-    grad.addColorStop(0, 'rgba(0,0,0,1)');
-    grad.addColorStop(0.45, 'rgba(10,6,4,0.95)');
-    grad.addColorStop(0.7, 'rgba(40,20,10,0.6)');
-    grad.addColorStop(1, 'rgba(0,0,0,0)');
-    g.fillStyle = grad;
-    g.fillRect(0, 0, 64, 64);
-    this._holeTex = new THREE.CanvasTexture(c);
-    return this._holeTex;
+  // 艦のモデルのマテリアルに、被弾の跡を描く処理を足す（読み込んだときに1回。跡が無いあいだは何もしないので軽い）
+  _patchDamageMaterials(root) {
+    if (!root) return;
+    const U = this._dmgUniforms();
+    const N = this.DMG_MAX_SPOTS;
+    const done = new Set();
+    root.traverse((o) => {
+      if (!o.isMesh || !o.material) return;
+      for (const mat of Array.isArray(o.material) ? o.material : [o.material]) {
+        if (!mat || done.has(mat) || mat.userData.dmgPatched || mat.isShaderMaterial || mat.isPointsMaterial || mat.isLineBasicMaterial) continue;
+        done.add(mat);
+        mat.userData.dmgPatched = true;
+        const prev = mat.onBeforeCompile;
+        mat.onBeforeCompile = (shader, renderer) => {
+          if (prev) prev.call(mat, shader, renderer);
+          if (!shader.vertexShader.includes('#include <project_vertex>') || !shader.fragmentShader.includes('#include <tonemapping_fragment>')) return;
+          Object.assign(shader.uniforms, U);
+          shader.vertexShader = 'varying vec3 vDmgView;\n' + shader.vertexShader.replace('#include <project_vertex>', '#include <project_vertex>\n  vDmgView = mvPosition.xyz;');
+          shader.fragmentShader = `varying vec3 vDmgView;
+uniform vec4 dmgSpots[${N}];
+uniform vec4 dmgInfo[${N}];
+uniform int dmgCount;
+uniform mat3 dmgRot;
+uniform float dmgTime;
+` + shader.fragmentShader.replace('#include <tonemapping_fragment>', `
+  if (dmgCount > 0) {
+    float dScorch = 0.0, dHole = 0.0;
+    vec3 dGlow = vec3(0.0);
+    for (int i = 0; i < ${N}; i++) {
+      if (i >= dmgCount) break;
+      vec3 dv = vDmgView - dmgSpots[i].xyz;
+      float rr = dmgSpots[i].w;
+      float d2 = dot(dv, dv);
+      if (d2 > rr * rr * 2.6) continue;
+      // ふちの模様（艦の向きに固定。カメラを回しても流れない）
+      vec3 q = (dmgRot * dv) * (5.0 / rr);
+      float n = sin(q.x * 1.7 + sin(q.y * 2.3 + 1.0)) * sin(q.y * 1.3 + sin(q.z * 1.9 + 2.0)) * sin(q.z * 2.1 + sin(q.x * 1.1 + 3.0));
+      float n2 = sin(q.x * 4.1 + q.y * 3.3) * sin(q.y * 4.7 + q.z * 3.9);
+      float d = sqrt(d2) / rr * (1.0 + 0.32 * n + 0.10 * n2);
+      float heat = dmgInfo[i].x, hole = dmgInfo[i].y;
+      // 焼け焦げ
+      dScorch = max(dScorch, (1.0 - smoothstep(0.35, 1.25, d)) * dmgInfo[i].z);
+      // 赤熱: 中心ほど熱い（黄白 → 橙 → 暗い赤）
+      float h = heat * (1.0 - smoothstep(0.0, 1.0, d));
+      h *= 0.85 + 0.15 * sin(dmgTime * 3.0 + q.x * 2.0 + q.y * 1.3);
+      dGlow += vec3(1.0, 0.16, 0.03) * smoothstep(0.02, 0.5, h) * 1.3 + vec3(0.9, 0.75, 0.25) * smoothstep(0.55, 1.1, h) * 1.4;
+      // 穴: 黒い穴と、ふちの残り火
+      if (hole > 0.0) {
+        float hr = 0.42 * hole;
+        dHole = max(dHole, 1.0 - smoothstep(hr * 0.82, hr, d));
+        float rim = smoothstep(hr * 0.9, hr * 1.05, d) * (1.0 - smoothstep(hr * 1.05, hr * 1.7, d));
+        dGlow += vec3(1.0, 0.32, 0.06) * rim * (0.55 + 0.45 * heat) * (0.75 + 0.25 * sin(dmgTime * 5.0 + q.z * 3.0));
+      }
+    }
+    gl_FragColor.rgb *= 1.0 - 0.88 * dScorch;
+    gl_FragColor.rgb += dGlow * (1.0 - dHole);
+    gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.012, 0.008, 0.006), dHole);
+  }
+#include <tonemapping_fragment>`);
+        };
+        const prevKey = mat.customProgramCacheKey;
+        mat.customProgramCacheKey = function () { return (prevKey ? prevKey.call(this) : '') + '|dmg1'; };
+        mat.needsUpdate = true;
+      }
+    });
+  },
+  // 当たった点の部品: 砲塔の格子ならその砲塔、それ以外は艦のメッシュ
+  _hitOwnerNode(point) {
+    const ship = State.ship;
+    const occ = this._occ;
+    if (occ && this.rig) {
+      const inv = new THREE.Matrix4().copy(occ.root.matrixWorld).invert();
+      const o = point.clone().applyMatrix4(inv);
+      const ci = Math.floor((o.x - occ.min.x) / occ.cell), cj = Math.floor((o.y - occ.min.y) / occ.cell), cl = Math.floor((o.z - occ.min.z) / occ.cell);
+      let best = 0, bd = 9;
+      for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) {
+        const x = ci + a, y = cj + b, z = cl + c;
+        if (x < 0 || y < 0 || z < 0 || x >= occ.nx || y >= occ.ny || z >= occ.nz) continue;
+        const v = occ.grid[(z * occ.ny + y) * occ.nx + x];
+        const dd = Math.abs(a) + Math.abs(b) + Math.abs(c);
+        if (v && dd < bd) { bd = dd; best = v; }
+      }
+      if (best >= 2 && this.rig.mounts[best - 2]) return this.rig.mounts[best - 2].turret;
+    }
+    return ship.mesh;
+  },
+  _spotWorld(sp, out) { return sp.node.localToWorld((out || new THREE.Vector3()).copy(sp.local)); },
+  _spotRadius(sp, size) {
+    const P = this.practice;
+    const ref = P ? P.shipHPMax * 0.01 : 50;
+    return size * 0.012 * (1 + Math.sqrt(sp.dmg / ref) * 1.3); // ダメージが大きいほど広く
   },
   _addHitSpot(point, dmg, dir) {
     const D = this._dmg;
@@ -2114,86 +2187,150 @@ const Weapons = {
     const size = (CameraSystem._shipScale || 1) * 8;
     const P = this.practice;
     ship.mesh.updateMatrixWorld(true);
-    const inv = new THREE.Matrix4().copy(ship.mesh.matrixWorld).invert();
-    const local = point.clone().applyMatrix4(inv);
-    // 外向き（弾の来た向き）を艦の座標で。跡を少し外へ浮かせ、煙の出る向きにする
-    let out = dir ? dir.clone().negate().transformDirection(inv) : local.clone().normalize();
-    if (out.lengthSq() < 1e-9) out.set(0, 1, 0);
-    out.normalize();
-    const merge = size * 0.025;
-    let sp = D.spots.find((x) => x.local.distanceTo(local) < merge);
-    if (!sp) {
-      if (D.spots.length >= 80) return;
-      sp = { local, out, dmg: 0, heat: 0 };
-      const mat = new THREE.SpriteMaterial({ map: this._glowTexture(), color: 0xff6020, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
-      sp.glow = new THREE.Sprite(mat);
-      sp.glow.renderOrder = 4;
-      D.spotGroup.add(sp.glow);
+    // 近くの跡にまとめる（同じ部品・世界の距離で）。20個を超えるときは、いちばん近い跡へ
+    const merge = size * 0.035;
+    const w = new THREE.Vector3();
+    let sp = null, bd = Infinity;
+    for (const x of D.spots) { const d = this._spotWorld(x, w).distanceTo(point); if (d < bd) { bd = d; sp = x; } }
+    if (!sp || (bd > merge && D.spots.length < this.DMG_MAX_SPOTS)) {
+      const node = this._hitOwnerNode(point);
+      node.updateMatrixWorld(true);
+      const inv = new THREE.Matrix4().copy(node.matrixWorld).invert();
+      // 外向き（弾の来た向き）: 煙の出る向き（艦のメッシュの座標）
+      const sinv = new THREE.Matrix4().copy(ship.mesh.matrixWorld).invert();
+      let out = dir ? dir.clone().negate().transformDirection(sinv) : point.clone().applyMatrix4(sinv).normalize();
+      if (out.lengthSq() < 1e-9) out.set(0, 1, 0);
+      sp = { node, local: point.clone().applyMatrix4(inv), out: out.normalize(), dmg: 0, heat: 0, hole: 0, holeT: 0 };
       D.spots.push(sp);
     }
     sp.dmg += dmg;
-    sp.heat = Math.min(1.5, sp.heat + 0.25 + dmg / Math.max(1, P ? P.shipHPMax * 0.01 : 50));
+    sp.heat = Math.min(1.5, sp.heat + 0.3 + dmg / Math.max(1, P ? P.shipHPMax * 0.01 : 50));
     // 装甲を破る: 同じところへのダメージが艦の耐久の 1.2% を超えたら穴
     if (!sp.hole && P && sp.dmg > P.shipHPMax * 0.012) {
-      const hm = new THREE.SpriteMaterial({ map: this._holeTexture(), color: 0xffffff, transparent: true, depthWrite: false });
-      sp.hole = new THREE.Sprite(hm);
-      sp.hole.renderOrder = 3;
-      D.spotGroup.add(sp.hole);
+      sp.hole = 1;
       this._flashStatus('装甲を破られました（火災・煙）');
+      this._emitSmoke(sp, 14, size); // 破られた瞬間に、まとまった煙
     }
-    this._placeSpot(sp, size);
+    this._emitSmoke(sp, sp.hole ? 4 : 2, size);
   },
-  _placeSpot(sp, size) {
-    const P = this.practice;
-    const ref = P ? P.shipHPMax * 0.01 : 50;
-    const r = size * 0.006 * (1 + Math.sqrt(sp.dmg / ref) * 1.6); // ダメージが大きいほど広く
-    const p = sp.local.clone().addScaledVector(sp.out, r * 0.12);
-    sp.glow.position.copy(p);
-    const h = clamp(sp.heat, 0, 1.5);
-    sp.glow.scale.setScalar(r * 2 * (0.6 + 0.4 * Math.min(1, h)));
-    // 熱い: 黄白 → 冷める: 暗い赤（冷めきっても、焼けた跡がうっすら残る）
-    const c = sp.glow.material.color;
-    c.setRGB(1.0 * Math.min(1, 0.25 + h), 0.15 + 0.55 * Math.min(1, Math.max(0, h - 0.4)), 0.05 + 0.3 * Math.max(0, h - 0.9));
-    sp.glow.material.opacity = 0.25 + 0.75 * Math.min(1, h);
-    if (sp.hole) { sp.hole.position.copy(sp.local.clone().addScaledVector(sp.out, r * 0.15)); sp.hole.scale.setScalar(r * 1.3); }
+  // 煙: 1つの点の集まり（艦のメッシュの子。艦と一緒に動く）。描画は1回
+  _ensureSmoke() {
+    const D = this._dmg;
+    const ship = State.ship;
+    if (!D || D.smokePts || !ship || !ship.mesh) return;
+    const n = this.SMOKE_MAX;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+    geo.setAttribute('aData', new THREE.BufferAttribute(new Float32Array(n * 3), 3)); // 大きさ [m]・濃さ・熱さ
+    geo.setDrawRange(0, 0);
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { uScale: { value: 600 } },
+      vertexShader: `attribute vec3 aData; varying vec2 vA; uniform float uScale;
+void main() { vec4 mv = modelViewMatrix * vec4(position, 1.0); gl_Position = projectionMatrix * mv; gl_PointSize = clamp(aData.x * uScale / max(0.001, -mv.z), 1.0, 220.0); vA = aData.yz; }`,
+      fragmentShader: `varying vec2 vA;
+void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a = (1.0 - smoothstep(0.25, 1.0, r)) * vA.x; if (a < 0.004) discard;
+  vec3 col = mix(vec3(0.085, 0.08, 0.078), vec3(0.95, 0.38, 0.09), vA.y * 0.7); gl_FragColor = vec4(col, a); }`,
+      transparent: true, depthWrite: false,
+    });
+    const pts = new THREE.Points(geo, mat);
+    pts.frustumCulled = false;
+    pts.renderOrder = 6;
+    ship.mesh.add(pts);
+    D.smokePts = pts;
+    D.smokeN = 0;
+    D.smokeArr = [];
   },
+  _emitSmoke(sp, count, size) {
+    const D = this._dmg;
+    const ship = State.ship;
+    if (!D || !ship || !ship.mesh) return;
+    this._ensureSmoke();
+    if (!D.smokeArr) return;
+    const sinv = new THREE.Matrix4().copy(ship.mesh.matrixWorld).invert();
+    const p0 = this._spotWorld(sp).applyMatrix4(sinv);
+    const r = this._spotRadius(sp, size);
+    for (let i = 0; i < count; i++) {
+      if (D.smokeArr.length >= this.SMOKE_MAX) D.smokeArr.shift();
+      const jit = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5);
+      const v = sp.out.clone().multiplyScalar(0.6 + Math.random() * 0.8).addScaledVector(jit, 0.7).multiplyScalar(size * 0.012);
+      D.smokeArr.push({ p: p0.clone().addScaledVector(jit, r * 0.5), v, t: 0, life: 3.5 + Math.random() * 3.5, r0: Math.max(size * 0.006, r * (0.35 + Math.random() * 0.3)), hot: sp.hole ? 0.9 : 0.5 });
+    }
+  },
+  // 毎フレーム: 冷ます・煙を出す／動かす
   _updateHitSpots(dt) {
     const D = this._dmg;
-    if (!D || !D.spots.length) return;
+    if (!D) return;
     const size = (CameraSystem._shipScale || 1) * 8;
+    const hpMax = this.practice ? this.practice.shipHPMax : 1000;
     for (const sp of D.spots) {
-      // 冷める（大きな傷ほどゆっくり。少し赤みは残る）
-      const floor = Math.min(0.35, 0.08 + sp.dmg / Math.max(1, (this.practice ? this.practice.shipHPMax : 1000) * 0.05));
-      sp.heat = Math.max(floor, sp.heat - dt * 0.05);
-      this._placeSpot(sp, size);
+      // 冷める（大きな傷ほど赤みが残る）
+      const floor = Math.min(0.4, 0.1 + sp.dmg / Math.max(1, hpMax * 0.05));
+      sp.heat = Math.max(floor, sp.heat - dt * 0.06);
     }
-    // 煙: 穴から少しずつ出て、外へ流れながら広がって薄くなる（艦と一緒に動く）
-    D.smokeT -= dt;
-    const holes = D.spots.filter((x) => x.hole);
-    if (holes.length && D.smokeT <= 0) {
-      D.smokeT = 0.12;
-      for (const sp of holes) {
-        if (D.smoke.length > 160) break;
-        if (Math.random() > 0.6) continue;
-        const mat = new THREE.SpriteMaterial({ map: this._glowTexture(), color: 0x2a2624, transparent: true, opacity: 0.55, depthWrite: false });
-        const s = new THREE.Sprite(mat);
-        s.position.copy(sp.local);
-        D.spotGroup.add(s);
-        const jit = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(0.5);
-        D.smoke.push({ sprite: s, v: sp.out.clone().add(jit).normalize().multiplyScalar(size * (0.01 + Math.random() * 0.01)), t: 0, life: 3 + Math.random() * 2, r0: size * 0.008 });
+    // 煙: 穴からはたくさん、まだ熱い跡からも少し。全体で毎秒90個まで
+    D.smokeT = (D.smokeT || 0) - dt;
+    if (D.spots.length && D.smokeT <= 0) {
+      D.smokeT = 0.1;
+      const src = D.spots.filter((x) => x.hole || x.heat > 0.6);
+      const budget = 9;
+      let used = 0;
+      for (const sp of src.sort(() => Math.random() - 0.5)) {
+        if (used >= budget) break;
+        const n = sp.hole ? (Math.random() < 0.85 ? 2 : 1) : (Math.random() < 0.35 ? 1 : 0);
+        if (n) { this._emitSmoke(sp, n, size); used += n; }
       }
     }
-    const keep = [];
-    for (const sm of D.smoke) {
-      sm.t += dt;
-      if (sm.t >= sm.life) { D.spotGroup.remove(sm.sprite); sm.sprite.material.dispose(); continue; }
-      const k = sm.t / sm.life;
-      sm.sprite.position.addScaledVector(sm.v, dt);
-      sm.sprite.scale.setScalar(sm.r0 * (1 + k * 4));
-      sm.sprite.material.opacity = 0.55 * (1 - k);
-      keep.push(sm);
+    if (D.smokeArr && D.smokePts) {
+      const pos = D.smokePts.geometry.attributes.position, dat = D.smokePts.geometry.attributes.aData;
+      let k = 0;
+      const keep = [];
+      for (const sm of D.smokeArr) {
+        sm.t += dt;
+        if (sm.t >= sm.life) continue;
+        const u = sm.t / sm.life;
+        sm.p.addScaledVector(sm.v, dt);
+        sm.v.multiplyScalar(1 - Math.min(0.5, dt * 0.25)); // だんだん遅く
+        pos.setXYZ(k, sm.p.x, sm.p.y, sm.p.z);
+        // 広がって薄くなる。出た直後だけ火の色
+        dat.setXYZ(k, sm.r0 * (1 + u * 5), 0.5 * Math.min(1, u * 8) * (1 - u), sm.hot * Math.max(0, 1 - u * 6));
+        keep.push(sm);
+        k++;
+      }
+      D.smokeArr = keep;
+      D.smokePts.geometry.setDrawRange(0, k);
+      pos.needsUpdate = true; dat.needsUpdate = true;
     }
-    D.smoke = keep;
+  },
+  // 描く直前（カメラが決まったあと）: 跡の位置をカメラの座標にして、シェーダーへ渡す（index.html animateFrame）
+  preRender(cam) {
+    const U = this._dmgU;
+    if (!U) return;
+    const D = this._dmg;
+    const ship = State.ship;
+    if (!D || !D.spots.length || !ship || !ship.mesh || !cam) { U.dmgCount.value = 0; return; }
+    cam.updateMatrixWorld();
+    const view = new THREE.Matrix4().copy(cam.matrixWorld).invert();
+    const size = (CameraSystem._shipScale || 1) * 8;
+    const w = new THREE.Vector3();
+    let n = 0;
+    for (const sp of D.spots) {
+      if (n >= this.DMG_MAX_SPOTS) break;
+      this._spotWorld(sp, w).applyMatrix4(view);
+      U.dmgSpots.value[n].set(w.x, w.y, w.z, this._spotRadius(sp, size));
+      // 穴は、あいた瞬間から 0.4 秒で広がる
+      if (sp.hole) sp.holeT = Math.min(1, (sp.holeT || 0) + (this._dt || 0.016) / 0.4);
+      U.dmgInfo.value[n].set(Math.min(1.5, sp.heat), sp.hole ? 0.3 + 0.7 * sp.holeT : 0, 1, 0);
+      n++;
+    }
+    U.dmgCount.value = n;
+    U.dmgTime.value = (this._time || 0) % 1000;
+    // カメラの座標 → 艦の座標（向きだけ）。ふちの模様を艦に固定する
+    const m = new THREE.Matrix4().copy(ship.mesh.matrixWorld).invert().multiply(cam.matrixWorld);
+    U.dmgRot.value.setFromMatrix4(m);
+    if (D.smokePts && typeof renderer !== 'undefined' && renderer) {
+      const h = renderer.domElement.height || window.innerHeight;
+      D.smokePts.material.uniforms.uScale.value = h / (2 * Math.tan(((cam.fov || 60) * Math.PI) / 360));
+    }
   },
 
   // 目標に当たった: 耐久を減らし、無くなったら壊れる（当たるたびに赤く焼ける）
