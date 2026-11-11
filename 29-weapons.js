@@ -984,6 +984,8 @@ const Weapons = {
     if (PRACTICE_MODE && !this._arena) this._placeArena(dt);
     this._updatePracticeInfo(dt);
     this._updateDamage(dt);
+    this._layoutT = (this._layoutT || 0) - dt;
+    if (this._layoutT <= 0) { this._layoutT = 0.3; try { this._layoutBottom(); } catch (e) { /* ignore */ } }
     if (this._occ && !this._restMeasured && this.rig && this.rig.mounts.every((m) => m.yaw === 0 && m.elev === 0)) {
       if (this._modelRoot) this._modelRoot.updateMatrixWorld(true);
       WeaponRig.measureBarrelRest(this._occ, this.rig);
@@ -1382,16 +1384,23 @@ const Weapons = {
   },
   // v89: 小さな図は、ドラッグで動かし、右下の角で大きさを変えられる（最後の状態をこの端末に保存。ダブルタップで元の場所へ）
   INSET_LAYOUT_KEY: 'spaceSimWeaponInset',
+  // v89: 船橋の視点では、別の場所・大きさを覚える（既定は左上のメニューのボタンの下）
+  _insetBridge() { return typeof document !== 'undefined' && document.body.classList.contains('viewpoint-bridge'); },
+  _insetKey() { return this.INSET_LAYOUT_KEY + (this._insetBridge() ? ':bridge' : ''); },
   _insetLayout() {
-    if (this._insetLayoutCache !== undefined) return this._insetLayoutCache;
+    const key = this._insetKey();
+    this._insetLayoutCaches = this._insetLayoutCaches || {};
+    if (this._insetLayoutCaches[key] !== undefined) return this._insetLayoutCaches[key];
     let v = null;
-    try { v = JSON.parse(localStorage.getItem(this.INSET_LAYOUT_KEY) || 'null'); } catch (e) { v = null; }
-    this._insetLayoutCache = v && Number.isFinite(v.x) && Number.isFinite(v.bottom) && v.w > 0 && v.h > 0 ? v : null;
-    return this._insetLayoutCache;
+    try { v = JSON.parse(localStorage.getItem(key) || 'null'); } catch (e) { v = null; }
+    this._insetLayoutCaches[key] = v && Number.isFinite(v.x) && Number.isFinite(v.bottom) && v.w > 0 && v.h > 0 ? v : null;
+    return this._insetLayoutCaches[key];
   },
   _saveInsetLayout(v) {
-    this._insetLayoutCache = v;
-    try { if (v) localStorage.setItem(this.INSET_LAYOUT_KEY, JSON.stringify(v)); else localStorage.removeItem(this.INSET_LAYOUT_KEY); } catch (e) { /* ignore */ }
+    const key = this._insetKey();
+    this._insetLayoutCaches = this._insetLayoutCaches || {};
+    this._insetLayoutCaches[key] = v;
+    try { if (v) localStorage.setItem(key, JSON.stringify(v)); else localStorage.removeItem(key); } catch (e) { /* ignore */ }
   },
   _bindInsetDrag(frame) {
     let drag = null, lastTap = 0;
@@ -1436,7 +1445,7 @@ const Weapons = {
     const s = this._inset;
     // v89: 演習中は、照準の視点でなくても出す（そのときは照準に関係なく、いま見ている向きを奥に）
     const practiceShow = !!(this._practiceOn() && this.practice);
-    const show = !!(s && (this.view || practiceShow) && this.hasWeapons() && this._modelRoot && !(typeof CleanView !== 'undefined' && CleanView.on));
+    const show = !!(s && (this.view || practiceShow || this._insetBridge()) && this.hasWeapons() && this._modelRoot && !(typeof CleanView !== 'undefined' && CleanView.on));
     if (s && s.frame) { s.frame.style.display = show ? '' : 'none'; s.frame.classList.toggle('free-look', !this.view); }
     if (!show) return;
     const ship = State.ship;
@@ -1452,11 +1461,28 @@ const Weapons = {
       h = Math.round(clamp(L.h, 80, window.innerHeight * 0.8));
       x = Math.round(clamp(L.x, 0, window.innerWidth - w));
       bottom = Math.round(clamp(L.bottom, 0, window.innerHeight - h));
+    } else if (this._insetBridge()) {
+      // 船橋: 左上のメニューのボタンの下（レーダー）
+      const tab = document.querySelector('.side-menu-tab');
+      const tr = tab ? tab.getBoundingClientRect() : { left: 10, bottom: 60 };
+      x = Math.round(Math.max(10, tr.left));
+      // 損傷の図が上の段（メニューのボタンの横）にあれば、その下から
+      let topY = tr.bottom + 8;
+      const dm = document.querySelector('.bridge-dmg');
+      if (dm && getComputedStyle(dm).display !== 'none') { const r = dm.getBoundingClientRect(); if (r.top < tr.bottom + 20 && r.left < x + w) topY = Math.max(topY, r.bottom + 8); }
+      bottom = Math.round(Math.max(0, window.innerHeight - topY - h));
     } else {
       const cr = this._ui.chips.getBoundingClientRect();
       const cx = cr.width > 0 ? cr.left + cr.width / 2 : window.innerWidth / 2;
       bottom = cr.height > 0 ? window.innerHeight - cr.top + 6 : 90;
       x = Math.round(cx - w / 2);
+      // 上の航行のメニューにかからないように（かかるなら小さくする）
+      const nav = document.querySelector('.space-nav-panel');
+      if (nav && getComputedStyle(nav).display !== 'none') {
+        const nr = nav.getBoundingClientRect();
+        const room = window.innerHeight - bottom - (nr.bottom + 6);
+        if (nr.height > 0 && room < h) { h = Math.max(64, room); w = Math.round(h * 1.6); x = Math.round(cx - w / 2); }
+      }
     }
     s.box = { x, bottom, w, h };
     s.frame.style.left = `${x}px`; s.frame.style.bottom = `${bottom}px`;
@@ -3405,11 +3431,16 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
     box.innerHTML = `
       <div class="wpn-status"></div>
       <div class="wpn-groups"></div>
-      <select class="wpn-difficulty" title="演習の難易度"></select>
-      <select class="wpn-enemylook" title="敵の見た目"><option value="ship">敵: 艦の形</option><option value="box">敵: 箱</option></select>
-      <button type="button" class="wpn-btn wpn-practice">演習</button>
+      <div class="wpn-prow">
+        <button type="button" class="wpn-btn wpn-ptoggle" title="演習の設定（難易度・敵の見た目・開始／終了・自動操艦）">演習 ▸</button>
+        <div class="wpn-pmenu">
+          <select class="wpn-difficulty" title="演習の難易度"></select>
+          <select class="wpn-enemylook" title="敵の見た目"><option value="ship">敵: 艦の形</option><option value="box">敵: 箱</option></select>
+          <button type="button" class="wpn-btn wpn-practice">演習</button>
+          <select class="wpn-maneuver" title="自動操艦: 目標の多い方へ、撃てる砲の多い向きに回し、間合いを合わせる"></select>
+        </div>
+      </div>
       <div class="wpn-hp"><div class="wpn-hp-fill"></div><span class="wpn-hp-text"></span></div>
-      <select class="wpn-maneuver" title="自動操艦: 目標の多い方へ、撃てる砲の多い向きに回し、間合いを合わせる"></select>
       <button type="button" class="wpn-btn wpn-focus" title="オン: すべての砲を照準の目標へ向ける／オフ: 自動射撃の砲は艦種や距離で自分の目標を選ぶ">全門指向</button>
       <button type="button" class="wpn-btn wpn-fire">撃て</button>
       <button type="button" class="wpn-btn wpn-view">照準</button>
@@ -3464,7 +3495,12 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
       this.difficulty = dsel.value;
       try { localStorage.setItem('spaceSimPracticeDifficulty', this.difficulty); } catch (e) { /* ignore */ }
     });
+    // v89: 演習の設定は、小さな「演習 ▸」ボタンで開く（武装の列が縦に長くならないように）
+    const ptoggle = box.querySelector('.wpn-ptoggle'), pmenu = box.querySelector('.wpn-pmenu');
+    ptoggle.addEventListener('click', () => { pmenu.classList.toggle('open'); ptoggle.classList.toggle('active', pmenu.classList.contains('open')); });
+    this._closePMenu = () => { pmenu.classList.remove('open'); ptoggle.classList.remove('active'); };
     box.querySelector('.wpn-practice').addEventListener('click', () => {
+      this._closePMenu();
       if (this.practice) { this.stopPractice(); this._flashStatus('演習をやめました'); } else this.startPractice();
     });
     const msel = box.querySelector('.wpn-maneuver');
@@ -3478,7 +3514,7 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
       this.setFocusAll(!this.focusAll);
       this._flashStatus(this.focusAll ? '全門指向: すべての砲を照準の目標へ向けます' : '全門指向を切りました（自動射撃の砲は自分で目標を選びます）');
     });
-    this._ui = { box, tmarks, dsel, hp: box.querySelector('.wpn-hp'), hpFill: box.querySelector('.wpn-hp-fill'), hpText: box.querySelector('.wpn-hp-text'), maneuverBtn: box.querySelector('.wpn-maneuver'), practice: box.querySelector('.wpn-practice'), focusBtn: box.querySelector('.wpn-focus'), groups: box.querySelector('.wpn-groups'), reticle, marks, chips, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
+    this._ui = { box, tmarks, dsel, hp: box.querySelector('.wpn-hp'), hpFill: box.querySelector('.wpn-hp-fill'), hpText: box.querySelector('.wpn-hp-text'), maneuverBtn: box.querySelector('.wpn-maneuver'), practice: box.querySelector('.wpn-practice'), ptoggle: box.querySelector('.wpn-ptoggle'), pmenu: box.querySelector('.wpn-pmenu'), focusBtn: box.querySelector('.wpn-focus'), groups: box.querySelector('.wpn-groups'), reticle, marks, chips, hint, zoom: hint.querySelector('.wpn-zoom'), status: box.querySelector('.wpn-status'), view: box.querySelector('.wpn-view'), stop: box.querySelector('.wpn-stop'), fire: box.querySelector('.wpn-fire') };
     this._syncUi();
   },
   // 砲塔ごとの小さな照準マーク（照準の視点）と、下の番号（装填・指向の状態）
@@ -3646,6 +3682,27 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
       mk.style.top = `${((1 - v.y) / 2) * H}px`;
     }
   },
+  // v89: 下の段の並べ方: 砲の番号の列を、左下の操縦（レバー・ロール・スティック）と右の武装の列のあいだに収める
+  _layoutBottom() {
+    const u = this._ui;
+    if (!u || !u.chips || u.chips.style.display === 'none') return;
+    const W = window.innerWidth;
+    // （position: fixed の要素は offsetParent が null なので、表示と大きさで見る）
+    const vis = (el) => { if (!el || getComputedStyle(el).display === 'none') return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    let L = 8, R = W - 8;
+    for (const sel of ['.throttle-lever', '.btn-roll-left', '.btn-roll-right', '.stick-move']) { const el = document.querySelector(sel); if (vis(el)) L = Math.max(L, el.getBoundingClientRect().right); }
+    for (const el of [u.box, document.querySelector('.stick-look'), document.querySelector('.btn-boost')]) {
+      if (!vis(el)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.left > W * 0.4) R = Math.min(R, r.left);
+    }
+    const w = Math.max(80, R - L - 16);
+    const c = u.chips;
+    c.style.left = `${Math.round(L + 8)}px`;
+    c.style.width = `${Math.round(w)}px`;
+    c.style.maxWidth = 'none';
+    c.style.transform = 'none';
+  },
   _flashStatus(text) {
     this._statusOverride = { text, until: performance.now() + 1800 };
   },
@@ -3662,6 +3719,10 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
     // v89: 演習は演習モード（index.html?mode=practice）だけ
     if (u.practice) { u.practice.style.display = PRACTICE_MODE ? '' : 'none'; u.practice.textContent = this.practice ? '演習をやめる' : '演習開始'; u.practice.classList.toggle('active', !!this.practice); }
     if (u.dsel) u.dsel.style.display = PRACTICE_MODE && !this.practice ? '' : 'none';
+    if (u.ptoggle) {
+      u.ptoggle.parentElement.style.display = PRACTICE_MODE || this.practice ? '' : 'none';
+      u.ptoggle.textContent = this.practice ? `演習中 ${this.autoManeuver ? '・操艦 ' : ''}▸` : '演習 ▸';
+    }
     if (this._lsel) this._lsel.style.display = PRACTICE_MODE && !this.practice ? '' : 'none';
     if (u.tmarks) u.tmarks.style.display = has && this.view && this.practice ? '' : 'none';
     u.fire.style.display = this.aim.active ? '' : 'none';
@@ -3691,6 +3752,7 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
     if (this._statusOverride && performance.now() < this._statusOverride.until) text = this._statusOverride.text;
     if (u.status.textContent !== text) u.status.textContent = text;
     u.fire.disabled = !(s.ready > 0);
+    const bridge = typeof document !== 'undefined' && document.body.classList.contains('viewpoint-bridge');
     for (const m of this.rig.mounts) {
       const st = this.aim.active ? m.state : 'none';
       const ds = this._turretDamageState(m);
@@ -3709,12 +3771,20 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
           m._dtag.title = ({ jam: '旋回・俯仰不能', nofire: '砲撃不能', dead: '機能停止' }[ds] || '') + (rp >= 0 ? ` 修理中 ${rp}%` : '');
         }
       }
-      // 砲身ごとの装填の棒: 砲身の状態の色で、装填の済んだ割合だけ下から伸びる
+      // v89: 船橋の視点では、自動射撃の砲は故障しているものだけ出す（場所をとらないように）
+      if (m._chip) {
+        const pt = m._dmgPart;
+        const hurt = !!ds || rp >= 0 || !!(pt && (pt.dead || pt.hp < pt.max - 1e-6)) || m.barrels.some((b) => b.destroyed);
+        const hide = bridge && this._groupMode(m) !== 'off' && !hurt;
+        const col = m._chip.parentElement;
+        if (col && col._hidden !== hide) { col._hidden = hide; col.style.display = hide ? 'none' : ''; }
+      }
+      // 砲身ごとの装填の棒: 砲身の状態の色で、装填の済んだ割合だけ伸びる
       const rt = weaponReload(m.cfg);
       for (const bb of m._bars || []) {
         // 自動射撃を「N%」にしているレーザーは、N% で一番上まで（その割合まで溜まったら撃つので）
         const k = Math.round(clamp((1 - m.reloadLeft[bb.i] / rt) / this._fullCharge(m), 0, 1) * 100);
-        if (k !== bb.last) { bb.last = k; bb.fill.style.height = `${k}%`; }
+        if (k !== bb.last) { bb.last = k; bb.fill.style.setProperty('--k', k); }
         const bst = this.aim.active && m.barrelStates ? m.barrelStates[bb.i] : 'none';
         if (bst !== bb.lastSt) { bb.lastSt = bst; bb.bar.className = `wpn-bar st-${bst}`; }
       }

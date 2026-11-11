@@ -225,8 +225,9 @@ const Viewpoints = {
     const el = ov.querySelector('.vp-info');
     if (el.textContent !== info) el.textContent = info;
     ov.classList.toggle('tracking', !!this._track);
-    this._bridgeT = (this._bridgeT || 0) - (dt || 0.016);
-    if (v.kind === 'bridge' && this._bridgeT <= 0) { this._bridgeT = 0.25; this._updateBridge(); }
+    // 船橋の計器は 0.25 秒ごとに（実際の時間で。フレームが遅い端末でも同じ間隔で）
+    const now = performance.now();
+    if (v.kind === 'bridge' && now - (this._bridgeAt || 0) >= 250) { this._bridgeAt = now; this._updateBridge(); }
     return true;
   },
 
@@ -238,31 +239,160 @@ const Viewpoints = {
     b.textContent = v ? `艦内: ${shipViewpointLabel(this.list, v)}` : '艦内の視点へ';
     b.classList.toggle('active', !!v);
     this._ov.style.display = v ? '' : 'none';
-    this._bridge.style.display = v && v.kind === 'bridge' ? '' : 'none';
+    const br = !!(v && v.kind === 'bridge');
+    for (const el of [this._frame, this._eng, this._dmgBox]) if (el) el.style.display = br ? '' : 'none';
+    if (br) { this._frameKey = ''; setTimeout(() => this._updateBridge(), 0); }
+    const info = this._ov && this._ov.querySelector('.vp-info');
+    if (info && !br) { info.style.top = ''; info.style.maxWidth = ''; }
     document.body.classList.toggle('viewpoint-active', !!v);
     document.body.classList.toggle('viewpoint-bridge', !!(v && v.kind === 'bridge'));
   },
 
   // ---------------------------------------------------------
-  // 船橋の計器盤: 機関・航行／武装／損傷。0.25秒ごとに書き直す
+  // v89: 船橋の視点の画面: 画面の縁の青い枠と、枠の中に並べる計器
+  //   上の段: [メニュー] [損傷の側面図] [航行のメニュー（星図など）] [機関出力] [視点の切り替え]
+  //   左: メニューの下にレーダー（姿勢の図。大きさ・場所は変えられる）
+  //   下の段: 操縦（レバー・スティック・BOOST）と、砲の番号（自動射撃の砲は故障しているものだけ）
+  //   画面の大きさに合わせて並べ直し、隙間が足りなければ、損傷の図はレーダーの下へ、機関出力は視点のボタンの下へ移す
   // ---------------------------------------------------------
   _buildBridge() {
-    const el = document.createElement('div');
-    el.className = 'bridge-console';
-    el.style.display = 'none';
-    el.innerHTML = `
-      <section class="bc-panel bc-eng"><h4>機関 / 航行<span class="bc-id">ENG-NAV</span></h4><div class="bc-body"></div></section>
-      <section class="bc-panel bc-wpn"><h4>武装<span class="bc-id">ARMAMENT</span></h4><div class="bc-body"></div></section>
-      <section class="bc-panel bc-dmg"><h4>損傷管制<span class="bc-id">DAMAGE CTRL</span></h4><div class="bc-body"></div></section>`;
-    document.body.appendChild(el);
-    this._bridge = el;
+    const frame = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    frame.setAttribute('class', 'bridge-frame');
+    frame.style.display = 'none';
+    document.body.appendChild(frame);
+    this._frame = frame;
+    const eng = document.createElement('div');
+    eng.className = 'bridge-eng bridge-box';
+    eng.style.display = 'none';
+    eng.innerHTML = '<div class="bb-head">機関 <span>ENGINE</span></div><div class="bb-body"></div>';
+    document.body.appendChild(eng);
+    this._eng = eng;
+    const dmg = document.createElement('div');
+    dmg.className = 'bridge-dmg bridge-box';
+    dmg.style.display = 'none';
+    dmg.innerHTML = '<div class="bb-head">損傷 <span>DAMAGE</span><button type="button" class="bb-side">左舷</button></div><canvas></canvas><div class="bb-legend"><i></i>軽<b></b>重</div>';
+    document.body.appendChild(dmg);
+    this._dmgBox = dmg;
+    this._dmgSide = 'port';
+    dmg.querySelector('.bb-side').addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._dmgSide = this._dmgSide === 'port' ? 'stbd' : 'port';
+      dmg.querySelector('.bb-side').textContent = this._dmgSide === 'port' ? '左舷' : '右舷';
+      this._drawDamage();
+    });
+    for (const el of [eng, dmg]) { el.addEventListener('touchstart', (e) => e.stopPropagation(), { passive: true }); el.addEventListener('mousedown', (e) => e.stopPropagation()); }
+    this._bridge = { style: {} }; // 以前の計器盤の代わり（_sync で display を書くだけ）
+    window.addEventListener('resize', () => { this._frameKey = ''; if (this._isBridge()) this._layoutBridge(); });
   },
+  _isBridge() { const v = this.current; return !!(v && v.kind === 'bridge'); },
+
+  // 画面の縁の枠（SVG）。角を落とした二重の線と、角・辺の飾り
+  _drawFrame() {
+    const W = window.innerWidth, H = window.innerHeight;
+    const key = `${W}x${H}`;
+    if (this._frameKey === key) return;
+    this._frameKey = key;
+    const f = this._frame;
+    f.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    f.setAttribute('width', W); f.setAttribute('height', H);
+    const o = 3, c = Math.min(26, W * 0.03), i = 7, ci = c - 3;
+    const poly = (k, cc) => `M${k + cc},${k} H${W - k - cc} L${W - k},${k + cc} V${H - k - cc} L${W - k - cc},${H - k} H${k + cc} L${k},${H - k - cc} V${k + cc} Z`;
+    const cx = W / 2;
+    const tick = [];
+    for (let x = cx - 160; x <= cx + 160; x += 20) if (Math.abs(x - cx) > 30) tick.push(`M${x},${H - i} V${H - i - (Math.abs(x - cx) % 60 < 1 ? 7 : 4)}`);
+    const L = Math.min(90, W * 0.12), Lv = Math.min(70, H * 0.12);
+    const corners = [
+      `M${o},${o + c + Lv} V${o + c} L${o + c},${o} H${o + c + L}`,
+      `M${W - o - c - L},${o} H${W - o - c} L${W - o},${o + c} V${o + c + Lv}`,
+      `M${W - o},${H - o - c - Lv} V${H - o - c} L${W - o - c},${H - o} H${W - o - c - L}`,
+      `M${o + c + L},${H - o} H${o + c} L${o},${H - o - c} V${H - o - c - Lv}`,
+    ].join(' ');
+    f.innerHTML = `
+      <defs><filter id="bfGlow" x="-5%" y="-5%" width="110%" height="110%"><feGaussianBlur stdDeviation="2.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      <linearGradient id="bfFade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5ec8ff" stop-opacity="0.95"/><stop offset="0.5" stop-color="#2f8fe0" stop-opacity="0.55"/><stop offset="1" stop-color="#5ec8ff" stop-opacity="0.95"/></linearGradient></defs>
+      <path d="${poly(o, c)}" fill="none" stroke="url(#bfFade)" stroke-width="1.6" filter="url(#bfGlow)"/>
+      <path d="${poly(i, ci)}" fill="none" stroke="#3aa8ff" stroke-opacity="0.32" stroke-width="1" stroke-dasharray="2 5"/>
+      <path d="${corners}" fill="none" stroke="#9ee6ff" stroke-width="3" stroke-linecap="square" filter="url(#bfGlow)"/>
+      <path d="M${cx - 50},${o} H${cx + 50} L${cx + 40},${o + 6} H${cx - 40} Z" fill="#5ec8ff" fill-opacity="0.55"/>
+      <path d="M${cx - 50},${H - o} H${cx + 50} L${cx + 40},${H - o - 6} H${cx - 40} Z" fill="#5ec8ff" fill-opacity="0.55"/>
+      <path d="${tick.join(' ')}" stroke="#5ec8ff" stroke-opacity="0.6" stroke-width="1"/>
+      <path d="M${o},${H / 2 - 40} V${H / 2 + 40} M${W - o},${H / 2 - 40} V${H / 2 + 40}" stroke="#9ee6ff" stroke-width="4" filter="url(#bfGlow)"/>`;
+  },
+
+  // 上の段の並べ方（重ならないように、隙間に入れる）
+  _layoutBridge() {
+    if (!this._isBridge()) return;
+    this._drawFrame();
+    const rect = (sel) => { const el = typeof sel === 'string' ? document.querySelector(sel) : sel; if (!el || getComputedStyle(el).display === 'none') return null; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 ? r : null; };
+    const W = window.innerWidth;
+    const tab = rect('.side-menu-tab') || { left: 10, right: 46, top: 10, bottom: 66 };
+    const nav = rect('.space-nav-panel');
+    const vp = rect(this._btn) || { left: W - 120, right: W - 10, top: 10, bottom: 40 };
+    const top = Math.round(Math.max(10, tab.top));
+    const gap = 8;
+    // 損傷の図: メニューのボタンと航行のメニューのあいだ
+    const dL = tab.right + gap, dR = (nav ? nav.left : W / 2) - gap;
+    const D = this._dmgBox, E = this._eng;
+    if (dR - dL >= 150) {
+      const w = Math.min(320, dR - dL);
+      Object.assign(D.style, { left: `${Math.round(dL)}px`, top: `${top}px`, width: `${Math.round(w)}px`, right: 'auto' });
+    } else {
+      // 狭い: 左の列（レーダーの下）
+      const ins = rect('.wpn-inset');
+      let t = (ins ? ins.bottom : tab.bottom) + gap;
+      if (nav && tab.left + Math.min(240, W * 0.36) > nav.left - gap) t = Math.max(t, nav.bottom + gap);
+      Object.assign(D.style, { left: `${Math.round(tab.left)}px`, top: `${Math.round(t)}px`, width: `${Math.round(Math.min(240, W * 0.36))}px`, right: 'auto' });
+    }
+    // 機関出力: 航行のメニューと視点のボタンのあいだ
+    const eL = (nav ? nav.right : W / 2) + gap, eR = vp.left - gap;
+    if (eR - eL >= 150) {
+      const w = Math.min(300, eR - eL);
+      Object.assign(E.style, { left: `${Math.round(eR - w)}px`, top: `${top}px`, width: `${Math.round(w)}px` });
+    } else {
+      // 狭い: 視点のボタンの下（航行のメニューにかかるなら、その下まで下げる）
+      let w = Math.min(230, W * 0.36);
+      let t = vp.bottom + gap;
+      // 航行のメニューの右に収まるなら、幅を詰めてそこに。収まらなければメニューの下まで下げる
+      if (nav && vp.right - w < nav.right + gap) {
+        if (vp.right - (nav.right + gap) >= 150) w = vp.right - (nav.right + gap);
+        else t = Math.max(t, nav.bottom + gap);
+      }
+      Object.assign(E.style, { left: `${Math.round(vp.right - w)}px`, top: `${Math.round(t)}px`, width: `${Math.round(w)}px` });
+    }
+    // 機関出力の箱の下に、右下の武装の列・損傷のマークがあれば、収まらないときは1行に縮める
+    E.classList.remove('compact');
+    const er = E.getBoundingClientRect();
+    let lim = window.innerHeight - 8;
+    for (const sel of ['.weapon-controls', '.dmg-icons', '.btn-boost']) { const r = rect(sel); if (r && r.left < er.right && r.right > er.left && r.top > er.top) lim = Math.min(lim, r.top - gap); }
+    if (er.bottom > lim) {
+      E.classList.add('compact');
+      E.style.maxHeight = `${Math.max(24, Math.round(lim - er.top))}px`;
+    } else E.style.maxHeight = '';
+    // 視点の案内（双眼鏡の倍率・追尾）は、航行のメニューの下へ（下の砲の番号と重ならないように）
+    const info = this._ov && this._ov.querySelector('.vp-info');
+    if (info) {
+      info.style.top = `${Math.round((nav ? nav.bottom : top + 40) + 6)}px`;
+      info.style.maxWidth = nav ? `${Math.round(nav.width - 24)}px` : '';
+    }
+    // 損傷の図の絵の大きさ（箱の幅に合わせる）
+    const cv = D.querySelector('canvas');
+    const cw = Math.max(80, D.clientWidth - 12);
+    const ch = Math.round(Math.max(36, Math.min(90, cw * 0.26)));
+    const pr = Math.min(2, window.devicePixelRatio || 1);
+    if (cv.width !== Math.round(cw * pr) || cv.height !== Math.round(ch * pr)) {
+      cv.width = Math.round(cw * pr); cv.height = Math.round(ch * pr);
+      cv.style.width = `${cw}px`; cv.style.height = `${ch}px`;
+      this._drawDamage();
+    }
+  },
+
   _bar(ratio, cls) { return `<span class="bc-bar ${cls || ''}"><i style="width:${Math.max(0, Math.min(100, ratio * 100)).toFixed(0)}%"></i></span>`; },
   _updateBridge() {
     const ship = State.ship;
-    if (!ship || !this._bridge) return;
+    if (!ship) return;
+    this._layoutBridge();
     const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-    // --- 機関・航行 ---
+    // --- 機関出力 ---
     const sp = Math.hypot(ship.velocity.x, ship.velocity.y, ship.velocity.z);
     const thr = Math.round((State.input.thrustForward ?? 0) * 100);
     const ratio = (kind) => (typeof HUD !== 'undefined' && HUD._computeThrustGroupRatio ? HUD._computeThrustGroupRatio(ship, kind) : 0);
@@ -270,71 +400,123 @@ const Viewpoints = {
     const ikn = typeof SHIP_IKN !== 'undefined' ? sp / SHIP_IKN : 0;
     const spText = ikn >= 0.01 ? `${ikn.toFixed(2)} IKn` : sp >= 1000 ? `${(sp / 1000).toFixed(2)} km/s` : `${sp.toFixed(1)} m/s`;
     const maxR = Number.isFinite(ship.maxSpeed) && ship.maxSpeed > 0 ? Math.min(1, sp / ship.maxSpeed) : 0;
-    let eng = `<div class="bc-row"><label>スロットル</label>${this._bar(Math.abs(thr) / 100, thr < 0 ? 'warn' : '')}<b>${thr}%</b></div>`;
-    eng += `<div class="bc-row"><label>主機出力</label>${this._bar(main)}<b>${Math.round(main * 100)}%</b></div>`;
+    const W = typeof Weapons !== 'undefined' ? Weapons : null;
+    const engEff = W && W._dmg ? W._eff('engine') : 1;
+    let eng = `<div class="bc-row"><label>レバー</label>${this._bar(Math.abs(thr) / 100, thr < 0 ? 'warn' : '')}<b>${thr}%</b></div>`;
+    eng += `<div class="bc-row"><label>主機</label>${this._bar(main)}<b>${Math.round(main * 100)}%</b></div>`;
     eng += `<div class="bc-row"><label>逆噴射</label>${this._bar(retro, 'warn')}<b>${Math.round(retro * 100)}%</b></div>`;
     eng += `<div class="bc-row"><label>速度</label>${this._bar(maxR)}<b>${spText}</b></div>`;
-    if (typeof Navigation !== 'undefined' && Navigation.locationInfo) {
-      try {
-        const li = Navigation.locationInfo();
-        if (li && li.body) { const a = li.altitude; eng += `<div class="bc-line">現在地 ${esc(li.body.ja || li.body.id)}・高度 ${a >= 1.5e9 ? (a / 1.495978707e11).toFixed(3) + ' au' : Math.round(a / 1000).toLocaleString() + ' km'}</div>`; }
-      } catch (e) { /* ignore */ }
-    }
     if (typeof Planetfall !== 'undefined' && Planetfall.active) {
       const a = Planetfall.active;
       eng += `<div class="bc-line">${esc(a.body.ja)} 高度 ${a.alt >= 1000 ? (a.alt / 1000).toFixed(1) + ' km' : Math.round(a.alt) + ' m'}・${esc(a.state)}</div>`;
     }
-    const W = typeof Weapons !== 'undefined' ? Weapons : null;
-    const engEff = W && W._dmg ? W._eff('engine') : 1;
     if (engEff < 0.999) eng += `<div class="bc-line bad">機関本体 損傷（働き ${Math.floor(engEff * 100)}%）</div>`;
-    this._bridge.querySelector('.bc-eng .bc-body').innerHTML = eng;
+    this._eng.querySelector('.bb-body').innerHTML = eng;
+    this._drawDamage();
+  },
 
-    // --- 武装 ---
-    let wp = '';
-    if (W && W.rig && W.rig.mounts.length) {
-      const P = W.practice;
-      if (P) wp += `<div class="bc-line">演習 第${P.wave}波・敵 残り ${P.alive}/${P.total}${W.lock ? `・照準: ${esc(W.lock.label)}` : ''}</div>`;
-      for (const g of W.groups || []) {
-        const ms = g.mounts;
-        const n = ms.length;
-        const ready = ms.filter((m) => m.state === 'ready' || m.state === 'indep').length;
-        const dead = ms.filter((m) => m._dmgPart && (m._dmgPart.dead || m._dmgPart.hp / m._dmgPart.max < W.TURRET_NOFIRE)).length;
-        const jam = ms.filter((m) => m._dmgPart && !m._dmgPart.dead && m._dmgPart.hp / m._dmgPart.max < W.TURRET_JAM && m._dmgPart.hp / m._dmgPart.max >= W.TURRET_NOFIRE).length;
-        wp += `<div class="bc-row"><label>${esc(g.name)}</label>${this._bar(n ? ready / n : 0, 'ok')}<b>${W.aim.active ? `射撃可 ${ready}` : '待機'}/${n}</b></div>`;
-        // 砲ごとの小さな四角（状態の色）
-        wp += `<div class="bc-cells">${ms.slice().sort((a, b) => a.num - b.num).map((m) => {
-          const pt = m._dmgPart;
-          const e = pt ? pt.hp / pt.max : 1;
-          const cls = pt && pt.dead ? 'x' : e < W.TURRET_NOFIRE ? 'd' : e < W.TURRET_JAM ? 'j' : W.aim.active ? `s-${m.state}` : 'idle';
-          return `<i class="${cls}" title="${m.num}番 ${esc(m.key)}"></i>`;
-        }).join('')}</div>`;
-        if (dead || jam) wp += `<div class="bc-line bad">${dead ? `射撃不能 ${dead}基` : ''}${dead && jam ? '・' : ''}${jam ? `旋回不能 ${jam}基` : ''}</div>`;
-      }
-      wp += `<div class="bc-line">${W.aim.active ? (W.focusAll ? '全門指向' : '照準中') : '照準していません'}${W.maneuverMode && W.maneuverMode !== 'off' ? `・${W.MANEUVER_MODES[W.maneuverMode]}` : ''}</div>`;
-    } else wp = '<div class="bc-line">武装なし</div>';
-    this._bridge.querySelector('.bc-wpn .bc-body').innerHTML = wp;
-
-    // --- 損傷 ---
-    let dm = '';
-    if (W && W.practice) {
-      const P = W.practice;
-      const f = Math.max(0, Math.min(1, P.shipHP / P.shipHPMax));
-      dm += `<div class="bc-row"><label>船体</label>${this._bar(f, f > 0.5 ? 'ok' : f > 0.25 ? 'warn' : 'bad')}<b>${Math.ceil(f * 100)}%</b></div>`;
+  // ---------------------------------------------------------
+  // 損傷の側面図: 艦の左舷（または右舷）から見た形に、損傷のあるところを黄色 → 赤で重ねる（ひどいほど赤く大きく）
+  // ---------------------------------------------------------
+  // 艦の形（横から見た影）: 射線の判定の格子から作る（艦の座標: 前 = -Z、上 = +Y、右 = +X）
+  _silhouette() {
+    const W = typeof Weapons !== 'undefined' ? Weapons : null;
+    const occ = W && W._occ;
+    const ship = State.ship;
+    if (!occ || !ship || !ship.mesh) return null;
+    if (this._sil && this._sil.occ === occ) return this._sil;
+    ship.mesh.updateMatrixWorld(true);
+    const M = new THREE.Matrix4().copy(ship.mesh.matrixWorld).invert().multiply(occ.root.matrixWorld);
+    const pts = [];
+    const v = new THREE.Vector3();
+    let zmin = Infinity, zmax = -Infinity, ymin = Infinity, ymax = -Infinity, xmax = 0;
+    for (let l = 0; l < occ.nz; l++) for (let j = 0; j < occ.ny; j++) for (let i = 0; i < occ.nx; i++) {
+      if (!occ.grid[(l * occ.ny + j) * occ.nx + i]) continue;
+      v.set(occ.min.x + (i + 0.5) * occ.cell, occ.min.y + (j + 0.5) * occ.cell, occ.min.z + (l + 0.5) * occ.cell).applyMatrix4(M);
+      pts.push(v.x, v.y, v.z);
+      if (v.z < zmin) zmin = v.z; if (v.z > zmax) zmax = v.z;
+      if (v.y < ymin) ymin = v.y; if (v.y > ymax) ymax = v.y;
+      xmax = Math.max(xmax, Math.abs(v.x));
     }
-    if (W && W._dmg) {
-      const D = W._dmg;
-      const order = { bridge: 0, engine: 1, defense: 2, fcs: 3, director: 4, turret: 5 };
-      const vit = D.parts.filter((x) => x.kind !== 'turret');
-      for (const pt of vit.sort((a, b) => order[a.kind] - order[b.kind])) {
-        const e = pt.hp / pt.max;
-        dm += `<div class="bc-row"><label>${esc(pt.label)}</label>${this._bar(e, pt.dead ? 'bad' : e > 0.6 ? 'ok' : e > 0.3 ? 'warn' : 'bad')}<b>${pt.dead ? '喪失' : pt.repair ? `修理 ${Math.round((pt.repair.t / pt.repair.total) * 100)}%` : `${Math.floor(e * 100)}%`}</b></div>`;
-      }
-      const tur = D.parts.filter((x) => x.kind === 'turret');
-      const hurt = tur.filter((x) => x.hp < x.max - 1e-6);
-      if (tur.length) dm += `<div class="bc-line${hurt.length ? ' bad' : ''}">砲塔 損傷 ${hurt.length}/${tur.length}基（喪失 ${tur.filter((x) => x.dead).length}・修理中 ${tur.filter((x) => x.repair).length}）</div>`;
-      const holes = D.spots.filter((x) => x.hole).length;
-      dm += `<div class="bc-line${holes ? ' bad' : ''}">被弾箇所 ${D.spots.length}・装甲貫通 ${holes}・修理班 ${D.parts.filter((x) => x.repair).length}/${W.REPAIR_MAX}</div>`;
-    } else dm += '<div class="bc-line">損傷なし（演習中に被弾すると表示します）</div>';
-    this._bridge.querySelector('.bc-dmg .bc-body').innerHTML = dm;
+    if (!pts.length) return null;
+    // 横から見た影（200 × 高さに合わせた行数）
+    const GW = 220, GH = Math.max(12, Math.round(GW * (ymax - ymin) / Math.max(1e-6, zmax - zmin)));
+    const grid = new Uint8Array(GW * GH);
+    for (let k = 0; k < pts.length; k += 3) {
+      const gx = Math.min(GW - 1, Math.floor((pts[k + 2] - zmin) / (zmax - zmin) * GW));
+      const gy = Math.min(GH - 1, Math.floor((ymax - pts[k + 1]) / (ymax - ymin) * GH));
+      grid[gy * GW + gx] = 1;
+    }
+    this._sil = { occ, M, zmin, zmax, ymin, ymax, xmax, GW, GH, grid };
+    return this._sil;
+  },
+  _drawDamage() {
+    if (!this._dmgBox || this._dmgBox.style.display === 'none') return;
+    const cv = this._dmgBox.querySelector('canvas');
+    const g = cv.getContext('2d');
+    const CW = cv.width, CH = cv.height;
+    g.clearRect(0, 0, CW, CH);
+    const S = this._silhouette();
+    if (!S) { g.fillStyle = 'rgba(160,220,255,0.6)'; g.font = `${Math.round(CH * 0.22)}px sans-serif`; g.fillText('艦の形を読み込み中…', 6, CH * 0.6); return; }
+    const port = this._dmgSide === 'port';
+    // 図の中の位置: 左舷から見ると艦首（-Z）が左、右舷から見ると艦首が右
+    const pad = 4;
+    const scale = Math.min((CW - pad * 2) / (S.zmax - S.zmin), (CH - pad * 2) / (S.ymax - S.ymin));
+    const ox = (CW - (S.zmax - S.zmin) * scale) / 2, oy = (CH - (S.ymax - S.ymin) * scale) / 2;
+    const toX = (z) => ox + (port ? (z - S.zmin) : (S.zmax - z)) * scale;
+    const toY = (y) => oy + (S.ymax - y) * scale;
+    // 艦の影
+    const cw = ((S.zmax - S.zmin) * scale) / S.GW, chh = ((S.ymax - S.ymin) * scale) / S.GH;
+    g.fillStyle = 'rgba(70,160,230,0.42)';
+    for (let gy = 0; gy < S.GH; gy++) for (let gx = 0; gx < S.GW; gx++) {
+      if (!S.grid[gy * S.GW + gx]) continue;
+      const x = port ? ox + gx * cw : ox + (S.GW - 1 - gx) * cw;
+      g.fillRect(x, oy + gy * chh, cw + 0.6, chh + 0.6);
+    }
+    // 喫水線のような基準線（艦の中心の高さ）
+    g.strokeStyle = 'rgba(120,210,255,0.35)'; g.lineWidth = 1; g.setLineDash([3, 4]);
+    g.beginPath(); g.moveTo(ox, toY(0)); g.lineTo(CW - ox, toY(0)); g.stroke(); g.setLineDash([]);
+    // 艦首の印
+    g.fillStyle = 'rgba(160,230,255,0.8)'; g.font = `${Math.max(8, Math.round(CH * 0.15))}px sans-serif`;
+    g.fillText('艦首', port ? 2 : CW - g.measureText('艦首').width - 2, Math.max(10, CH * 0.18));
+    const W = typeof Weapons !== 'undefined' ? Weapons : null;
+    const D = W && W._dmg;
+    if (!D) return;
+    const ship = State.ship;
+    const inv = new THREE.Matrix4().copy(ship.mesh.matrixWorld).invert();
+    const size = (typeof CameraSystem !== 'undefined' ? CameraSystem._shipScale || 1 : 1) * 8;
+    const marks = [];
+    // 見ている側（左舷なら -X）のものだけ。中心線の近くは両方に出す
+    const sideOk = (x) => (port ? x <= S.xmax * 0.3 : x >= -S.xmax * 0.3);
+    // 被弾の跡
+    const P = W.practice;
+    const ref = P ? P.shipHPMax * 0.012 : 100;
+    for (const sp of D.spots) {
+      const p = W._spotWorld(sp).applyMatrix4(inv);
+      if (!sideOk(p.x)) continue;
+      const sev = sp.hole ? 1 : Math.min(1, 0.25 + sp.dmg / ref * 0.75);
+      marks.push({ p, sev, r: W._spotRadius(sp, size) * (sp.hole ? 1.3 : 0.9) });
+    }
+    // 区画・砲塔の損傷
+    for (const pt of D.parts) {
+      const e = pt.hp / pt.max;
+      if (e >= 0.999 && !pt.dead) continue;
+      const p = W._partWorld(pt).applyMatrix4(inv);
+      if (!sideOk(p.x)) continue;
+      marks.push({ p, sev: pt.dead ? 1 : Math.min(1, 1 - e), r: Math.max(pt.radius || 0, size * 0.02), part: pt });
+    }
+    marks.sort((a, b) => a.sev - b.sev); // ひどいものを上に
+    for (const m of marks) {
+      const x = toX(m.p.z), y = toY(m.p.y);
+      const rr = Math.max(2.5, m.r * scale);
+      // 黄色 → 赤
+      const gcol = Math.round(220 * (1 - m.sev));
+      const grad = g.createRadialGradient(x, y, 0, x, y, rr);
+      grad.addColorStop(0, `rgba(255,${gcol},${Math.round(40 * (1 - m.sev))},${0.55 + 0.4 * m.sev})`);
+      grad.addColorStop(1, `rgba(255,${gcol},0,0)`);
+      g.fillStyle = grad;
+      g.beginPath(); g.arc(x, y, rr, 0, Math.PI * 2); g.fill();
+      if (m.part && m.part.dead) { g.strokeStyle = '#ff3020'; g.lineWidth = Math.max(1, CH * 0.02); g.beginPath(); g.moveTo(x - rr * 0.5, y - rr * 0.5); g.lineTo(x + rr * 0.5, y + rr * 0.5); g.moveTo(x + rr * 0.5, y - rr * 0.5); g.lineTo(x - rr * 0.5, y + rr * 0.5); g.stroke(); }
+    }
   },
 };

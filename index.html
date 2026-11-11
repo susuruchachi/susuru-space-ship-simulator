@@ -325,8 +325,25 @@
   .wpn-hint-text { transition: opacity 0.6s; }
   .wpn-hint.brief .wpn-hint-text { display: none; }
   @media (max-height: 500px) { .wpn-hint { top: calc(64px + var(--sat, 0px)); } }
+  /* v89: 演習の設定は「演習 ▸」で開く小さな箱に（武装の列の左に出る） */
+  .wpn-prow { position: relative; }
+  .wpn-prow .wpn-ptoggle { width: 100%; height: 28px; font-size: 11px; background: rgba(255,140,40,0.16); border-color: rgba(255,170,80,0.55); color: #ffd9a0; }
+  .wpn-pmenu { display: none; position: absolute; right: calc(100% + 6px); bottom: 0; width: 150px; flex-direction: column; gap: 4px; padding: 6px; border-radius: 8px; background: rgba(10,14,22,0.92); border: 1px solid rgba(255,170,80,0.5); box-shadow: 0 4px 14px rgba(0,0,0,0.5); }
+  .wpn-pmenu.open { display: flex; }
+  .wpn-pmenu select, .wpn-pmenu .wpn-btn { width: 100%; }
+  /* 画面の大きさで、ボタンの高さ・文字を変える */
+  .weapon-controls .wpn-btn { height: clamp(26px, 4.6vh, 36px); font-size: clamp(11px, 1.7vh, 13px); }
+  .weapon-controls .wpn-auto { min-height: clamp(26px, 4.4vh, 30px); }
+  @media (max-height: 620px) {
+    /* 背の低い画面: 武装の列を2列にして、上へ伸びすぎないように */
+    .weapon-controls { display: grid; grid-template-columns: 1fr 1fr; width: 188px; gap: 4px; }
+    .weapon-controls .wpn-status, .weapon-controls .wpn-hp { grid-column: 1 / -1; }
+    .weapon-controls .wpn-groups { grid-column: 1 / -1; flex-direction: row; }
+    .weapon-controls .wpn-groups > * { flex: 1; }
+    .weapon-controls .wpn-status { font-size: 9px; max-height: 2.8em; overflow: hidden; }
+  }
   @media (max-width: 700px), (max-height: 500px) {
-    .weapon-controls { right: 108px; bottom: 24px; width: 92px; gap: 4px; }
+    .weapon-controls { right: 108px; bottom: 24px; gap: 4px; }
     .weapon-controls select { height: 26px; }
     .wpn-btn { height: 32px; font-size: 12px; }
   }
@@ -419,6 +436,46 @@
     .bc-panel { width: min(200px, 31vw); font-size: 9.5px; padding: 6px 7px; }
     .bc-wpn { display: none; }
   }
+  /* ===== v89: 船橋の視点の画面（31-viewpoints.js） ===== */
+  .bridge-frame { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2; }
+  .bridge-box { position: fixed; z-index: 6; box-sizing: border-box; padding: 5px 8px 6px; color: #bfe9ff; font-size: 10.5px; line-height: 1.4;
+    background: linear-gradient(180deg, rgba(8,28,44,0.78), rgba(4,14,24,0.66)); border: 1px solid rgba(90,200,255,0.5);
+    box-shadow: inset 0 0 16px rgba(60,170,255,0.14), 0 0 10px rgba(40,140,220,0.2);
+    clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px); pointer-events: auto; }
+  .bb-head { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; padding-bottom: 2px; border-bottom: 1px solid rgba(90,200,255,0.35); font-size: 11px; font-weight: 600; letter-spacing: 0.1em; color: #e6f7ff; }
+  .bb-head span { font-size: 8px; letter-spacing: 0.2em; color: rgba(120,210,255,0.7); font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; }
+  .bb-side { margin-left: auto; font-size: 10px; padding: 1px 8px; border-radius: 3px; color: #cfeaff; background: rgba(40,110,170,0.5); border: 1px solid rgba(120,200,255,0.6); }
+  .bridge-dmg canvas { display: block; margin: 0 auto; }
+  .bb-legend { display: flex; align-items: center; justify-content: flex-end; gap: 4px; font-size: 9px; color: #8fc4e0; margin-top: 1px; }
+  .bb-legend i, .bb-legend b { display: inline-block; width: 22px; height: 5px; }
+  .bb-legend i { background: linear-gradient(90deg, #ffdc28, #ff9a20); }
+  .bb-legend b { background: linear-gradient(90deg, #ff6a20, #ff1e14); }
+  .bc-row { display: grid; grid-template-columns: 4.6em 1fr auto; align-items: center; gap: 6px; margin: 1px 0; }
+  .bc-row label { color: #8fc4e0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bc-row b { font-weight: 600; color: #f0fbff; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 10px; white-space: nowrap; }
+  .bc-bar { display: block; height: 6px; background: rgba(120,200,255,0.12); border: 1px solid rgba(90,200,255,0.3); position: relative; overflow: hidden; }
+  .bc-bar i { position: absolute; left: 0; top: 0; bottom: 0; background: linear-gradient(90deg, #2aa8ff, #7fe0ff); box-shadow: 0 0 6px rgba(90,200,255,0.8); }
+  .bc-bar.warn i { background: linear-gradient(90deg, #e09a20, #ffd870); }
+  .bc-line { margin: 1px 0; color: #9fd0ea; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bc-line.bad { color: #ff9a80; }
+  /* 狭い画面: 機関出力は「スロットル」と「速度」の2行だけに */
+  .bridge-eng.compact { overflow: hidden; padding-top: 3px; padding-bottom: 3px; }
+  .bridge-eng.compact .bb-head, .bridge-eng.compact .bc-line, .bridge-eng.compact .bc-row:nth-child(2), .bridge-eng.compact .bc-row:nth-child(3) { display: none; }
+  /* 船橋では、外の視点のボタン・演習の目印・大気圏の帯は出さない（機関の箱に高度を出す）。視点の切り替えは右上へ */
+  body.viewpoint-bridge .hud-camera-controls, body.viewpoint-bridge .practice-badge, body.viewpoint-bridge .planetfall-hud { display: none !important; }
+  body.viewpoint-bridge .btn-viewpoint { top: calc(12px + var(--sat, 0px)); right: calc(12px + var(--sar, 0px) + var(--wcr, 0px)); }
+  body.viewpoint-bridge .side-menu-tab { margin-top: 4px; margin-left: 4px; }
+  /* 航行のメニュー（星図など）は上の真ん中に、幅を控えめにして両側に計器の隙間をつくる */
+  body.viewpoint-bridge .space-nav-panel, body.viewpoint-bridge .space-nav-panel.is-compact { left: 50% !important; right: auto !important; transform: translateX(-50%) !important; top: calc(12px + var(--sat, 0px)) !important; width: min(42vw, 470px) !important; }
+  /* 砲の番号: 装填の棒を横向きに（番号の右に、砲身ごとに細い横棒） */
+  body.viewpoint-bridge .wpn-chipcol { flex-direction: row; width: auto; gap: 2px; align-items: center; }
+  body.viewpoint-bridge .wpn-bars { flex-direction: column; height: auto; width: 16px; gap: 1px; }
+  body.viewpoint-bridge .wpn-bar { width: 16px; height: 4px; }
+  body.viewpoint-bridge .wpn-bar-fill { top: 0; bottom: 0; right: auto; height: 100%; width: calc(var(--k, 100) * 1%); }
+  body.viewpoint-bridge .wpn-chip-dmg { width: auto; height: auto; }
+  body.viewpoint-bridge .wpn-chip-dmg:not(.rep):not(.dmg-jam):not(.dmg-nofire):not(.dmg-dead) { display: none; }
+  body.viewpoint-bridge .wpn-chips { gap: 3px 6px; }
+  body.viewpoint-bridge .vp-info { bottom: auto; font-size: 10.5px; box-sizing: border-box; }
   /* v89: 大気圏・着陸の表示（上のパネルの下） */
   .planetfall-hud { position: fixed; left: 50%; transform: translateX(-50%); top: calc(150px + var(--sat, 0px)); z-index: 4; max-width: 86vw; padding: 4px 12px; border-radius: 12px; font-size: 12px; color: #d8f0ff; background: rgba(0,20,40,0.55); border: 1px solid rgba(120,200,255,0.4); pointer-events: none; text-align: center; }
   .planetfall-hud.contact { color: #e8ffd8; border-color: rgba(150,255,150,0.6); background: rgba(10,40,10,0.55); }
@@ -490,7 +547,7 @@
   .wpn-bars { display: flex; gap: 2px; height: 18px; align-items: stretch; }
   /* v89: 砲身ごとの装填の棒。砲身の状態の色で、装填の済んだ割合だけ下から伸びる（地は暗い色） */
   .wpn-bar { position: relative; width: 5px; background: rgba(255,255,255,0.12); border-radius: 1px; overflow: hidden; }
-  .wpn-bar-fill { position: absolute; left: 0; right: 0; bottom: 0; height: 100%; background: currentColor; }
+  .wpn-bar-fill { position: absolute; left: 0; right: 0; bottom: 0; height: calc(var(--k, 100) * 1%); background: currentColor; }
   .wpn-bar.st-none { background: rgba(0,0,0,0.6); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12); }
   .st-ready { color: #3dff6e; }
   .st-moving { color: #ffd84a; }
