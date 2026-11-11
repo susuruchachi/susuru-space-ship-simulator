@@ -328,12 +328,13 @@ const CameraSystem = {
   // -----------------------------------------------------------
   setOrbitPreset(preset) {
     const presets = {
-      back: { azimuth: 0, elevation: 0.2 },
-      front: { azimuth: Math.PI, elevation: 0.2 },
-      left: { azimuth: -Math.PI / 2, elevation: 0.15 },
-      right: { azimuth: Math.PI / 2, elevation: 0.15 },
-      top: { azimuth: 0, elevation: this.MAX_ELEVATION },
-      bottom: { azimuth: 0, elevation: this.MIN_ELEVATION },
+      // v89: 選んだ向きのぴったり真横・真上から見る（以前は少し上から見ていた）
+      back: { azimuth: 0, elevation: 0 },
+      front: { azimuth: Math.PI, elevation: 0 },
+      left: { azimuth: -Math.PI / 2, elevation: 0 },
+      right: { azimuth: Math.PI / 2, elevation: 0 },
+      top: { azimuth: 0, elevation: Math.PI / 2 },
+      bottom: { azimuth: 0, elevation: -Math.PI / 2 },
     };
     const p = presets[preset];
     if (!p) return;
@@ -476,7 +477,9 @@ const CameraSystem = {
 
     // orbitモードでも船のロールに応じてupを追従させる（真上/真下
     // 付近を除き、chaseと同じ理屈で自然な傾きになる）
-    const upWorld = rotateVecByQuat({ x: 0, y: 1, z: 0 }, cq);
+    // v89: 真上・真下から見るときは、艦の上向きが視線と重なるので、艦首を画面の上にする
+    const upLocal = Math.abs(Math.cos(elevation)) < 0.05 ? { x: 0, y: 0, z: -1 } : { x: 0, y: 1, z: 0 };
+    const upWorld = rotateVecByQuat(upLocal, cq);
     camera.up.set(upWorld.x, upWorld.y, upWorld.z);
     camera.lookAt(targetX, targetY, targetZ);
   },

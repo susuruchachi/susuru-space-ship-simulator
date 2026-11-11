@@ -58,9 +58,19 @@ const Viewpoints = {
     btn.type = 'button';
     btn.className = 'btn-viewpoint';
     btn.style.display = 'none';
-    btn.addEventListener('click', () => this.cycle());
+    // v89: 押すと、視点の一覧（外からの視点・艦内の視点）を出して、そこから選ぶ
+    btn.addEventListener('click', (e) => { e.stopPropagation(); this._toggleMenu(); });
     document.body.appendChild(btn);
     this._btn = btn;
+    const menu = document.createElement('div');
+    menu.className = 'vp-menu';
+    menu.style.display = 'none';
+    menu.addEventListener('click', (e) => e.stopPropagation());
+    document.body.appendChild(menu);
+    this._menu = menu;
+    document.addEventListener('click', () => this._closeMenu());
+    // 右上の列（外の視点のボタンと定点の6つのボタン → 艦内の視点のボタン → 演習の目印）を重ならないように並べる
+    setInterval(() => { try { this._layoutRight(); } catch (e) { /* ignore */ } }, 300);
     // 双眼鏡の枠・追尾の表示
     const ov = document.createElement('div');
     ov.className = 'vp-overlay';
@@ -79,6 +89,39 @@ const Viewpoints = {
     this._sync();
   },
 
+  _toggleMenu() {
+    if (this._menu.style.display !== 'none') { this._closeMenu(); return; }
+    const m = this._menu;
+    m.innerHTML = '';
+    const add = (label, sub, active, fn) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = `vp-item${active ? ' active' : ''}`;
+      b.innerHTML = `<span>${label}</span>${sub ? `<small>${sub}</small>` : ''}`;
+      b.addEventListener('click', () => { this._closeMenu(); fn(); });
+      m.appendChild(b);
+    };
+    add('外からの視点', '追従・自由', !this.active, () => this.exit());
+    this.list.forEach((v, i) => add(shipViewpointLabel(this.list, v), VIEWPOINT_KINDS[v.kind].label, this.index === i, () => this.enter(i)));
+    const r = this._btn.getBoundingClientRect();
+    m.style.display = '';
+    m.style.top = `${Math.round(r.bottom + 4)}px`;
+    m.style.right = `${Math.round(window.innerWidth - r.right)}px`;
+    this._btn.classList.add('open');
+  },
+  _closeMenu() { if (this._menu) this._menu.style.display = 'none'; if (this._btn) this._btn.classList.remove('open'); },
+  _layoutRight() {
+    if (this._isBridge && this._isBridge()) return; // 船橋では、視点のボタンは右上（CSS）
+    const b = this._btn;
+    const cc = document.querySelector('.hud-camera-controls');
+    let y = null, right = null;
+    if (cc && getComputedStyle(cc).display !== 'none') { const r = cc.getBoundingClientRect(); if (r.height > 0) { y = r.bottom + 8; right = window.innerWidth - r.right; } }
+    if (b && b.style.display !== 'none') {
+      if (y !== null) { b.style.top = `${Math.round(y)}px`; b.style.right = `${Math.round(right)}px`; const r = b.getBoundingClientRect(); y = r.bottom + 8; }
+    } else if (b) { b.style.top = ''; b.style.right = ''; }
+    const badge = document.querySelector('.practice-badge');
+    if (badge && y !== null) { badge.style.top = `${Math.round(y)}px`; badge.style.right = `${Math.round(right)}px`; }
+  },
   cycle() {
     if (!this.list.length) return;
     const next = this.index + 1;
@@ -236,7 +279,9 @@ const Viewpoints = {
     if (!b) return;
     b.style.display = this.list.length ? '' : 'none';
     const v = this.current;
-    b.textContent = v ? `艦内: ${shipViewpointLabel(this.list, v)}` : '艦内の視点へ';
+    b.textContent = v ? `視点: ${shipViewpointLabel(this.list, v)} ▾` : '艦内の視点 ▾';
+    this._closeMenu();
+    if (v && v.kind === 'bridge') { b.style.top = ''; b.style.right = ''; }
     b.classList.toggle('active', !!v);
     this._ov.style.display = v ? '' : 'none';
     const br = !!(v && v.kind === 'bridge');
