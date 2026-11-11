@@ -3752,7 +3752,6 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
     if (this._statusOverride && performance.now() < this._statusOverride.until) text = this._statusOverride.text;
     if (u.status.textContent !== text) u.status.textContent = text;
     u.fire.disabled = !(s.ready > 0);
-    const bridge = typeof document !== 'undefined' && document.body.classList.contains('viewpoint-bridge');
     for (const m of this.rig.mounts) {
       const st = this.aim.active ? m.state : 'none';
       const ds = this._turretDamageState(m);
@@ -3771,11 +3770,11 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
           m._dtag.title = ({ jam: '旋回・俯仰不能', nofire: '砲撃不能', dead: '機能停止' }[ds] || '') + (rp >= 0 ? ` 修理中 ${rp}%` : '');
         }
       }
-      // v89: 船橋の視点では、自動射撃の砲は故障しているものだけ出す（場所をとらないように）
+      // v89: 自動射撃の砲は、故障しているものだけ出す（場所をとらないように。どの視点でも）
       if (m._chip) {
         const pt = m._dmgPart;
         const hurt = !!ds || rp >= 0 || !!(pt && (pt.dead || pt.hp < pt.max - 1e-6)) || m.barrels.some((b) => b.destroyed);
-        const hide = bridge && this._groupMode(m) !== 'off' && !hurt;
+        const hide = this._groupMode(m) !== 'off' && !hurt; // v89: どの視点でも（自動射撃の砲は故障しているものだけ）
         const col = m._chip.parentElement;
         if (col && col._hidden !== hide) { col._hidden = hide; col.style.display = hide ? 'none' : ''; }
       }

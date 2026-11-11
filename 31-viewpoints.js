@@ -244,6 +244,7 @@ const Viewpoints = {
     if (br) { this._frameKey = ''; setTimeout(() => this._updateBridge(), 0); }
     const info = this._ov && this._ov.querySelector('.vp-info');
     if (info && !br) { info.style.top = ''; info.style.maxWidth = ''; }
+    if (!br) { const navEl = document.querySelector('.space-nav-panel'); if (navEl) for (const k of ['left', 'width', 'transform']) navEl.style.removeProperty(k); }
     document.body.classList.toggle('viewpoint-active', !!v);
     document.body.classList.toggle('viewpoint-bridge', !!(v && v.kind === 'bridge'));
   },
@@ -326,39 +327,51 @@ const Viewpoints = {
     const rect = (sel) => { const el = typeof sel === 'string' ? document.querySelector(sel) : sel; if (!el || getComputedStyle(el).display === 'none') return null; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 ? r : null; };
     const W = window.innerWidth;
     const tab = rect('.side-menu-tab') || { left: 10, right: 46, top: 10, bottom: 66 };
-    const nav = rect('.space-nav-panel');
     const vp = rect(this._btn) || { left: W - 120, right: W - 10, top: 10, bottom: 40 };
     const top = Math.round(Math.max(10, tab.top));
     const gap = 8;
-    // 損傷の図: メニューのボタンと航行のメニューのあいだ
-    const dL = tab.right + gap, dR = (nav ? nav.left : W / 2) - gap;
+    // v89: 上の段を1列に収める: [損傷の図] [航行のメニュー] [機関出力] を、メニューのボタンと視点のボタンのあいだに
+    //   並べる。狭いときは、まず航行のメニューを縮め、それでも足りなければ損傷の図・機関出力も縮める（文字も小さく）
     const D = this._dmgBox, E = this._eng;
-    if (dR - dL >= 150) {
-      const w = Math.min(320, dR - dL);
-      Object.assign(D.style, { left: `${Math.round(dL)}px`, top: `${top}px`, width: `${Math.round(w)}px`, right: 'auto' });
+    const navEl = document.querySelector('.space-nav-panel');
+    const L0 = tab.right + gap, R0 = vp.left - gap;
+    const avail = R0 - L0 - gap * 2;
+    const want = { d: 230, n: 440, e: 210 }, min = { d: 104, n: 190, e: 96 };
+    let dw = want.d, nw = want.n, ew = want.e;
+    if (dw + nw + ew > avail) {
+      // 航行のメニューから縮める
+      nw = Math.max(min.n, avail - dw - ew);
+      if (dw + nw + ew > avail) {
+        // 損傷の図・機関出力を同じ割合で縮める
+        const k = Math.max(0, (avail - nw) / (want.d + want.e));
+        dw = Math.max(min.d, want.d * k); ew = Math.max(min.e, want.e * k);
+      }
+    }
+    const fits = dw + nw + ew <= avail + 1;
+    const small = dw < 170 || ew < 160;
+    D.classList.toggle('small', small); E.classList.toggle('small', small);
+    if (fits) {
+      Object.assign(D.style, { left: `${Math.round(L0)}px`, top: `${top}px`, width: `${Math.round(dw)}px`, right: 'auto' });
+      if (navEl) {
+        navEl.style.setProperty('left', `${Math.round(L0 + dw + gap)}px`, 'important');
+        navEl.style.setProperty('width', `${Math.round(nw)}px`, 'important');
+        navEl.style.setProperty('transform', 'none', 'important');
+      }
+      Object.assign(E.style, { left: `${Math.round(L0 + dw + gap + nw + gap)}px`, top: `${top}px`, width: `${Math.round(ew)}px` });
     } else {
-      // 狭い: 左の列（レーダーの下）
+      // とても狭い（縦向きのスマホなど）: 損傷の図はレーダーの下、機関出力は視点のボタンの下
+      if (navEl) for (const k of ['left', 'width', 'transform']) navEl.style.removeProperty(k);
+      const navR = rect('.space-nav-panel');
       const ins = rect('.wpn-inset');
       let t = (ins ? ins.bottom : tab.bottom) + gap;
-      if (nav && tab.left + Math.min(240, W * 0.36) > nav.left - gap) t = Math.max(t, nav.bottom + gap);
-      Object.assign(D.style, { left: `${Math.round(tab.left)}px`, top: `${Math.round(t)}px`, width: `${Math.round(Math.min(240, W * 0.36))}px`, right: 'auto' });
+      if (navR && tab.left + min.d > navR.left - gap) t = Math.max(t, navR.bottom + gap);
+      Object.assign(D.style, { left: `${Math.round(tab.left)}px`, top: `${Math.round(t)}px`, width: `${Math.round(Math.max(min.d, Math.min(200, W * 0.4)))}px`, right: 'auto' });
+      const w = Math.max(min.e, Math.min(190, W * 0.4));
+      let te = vp.bottom + gap;
+      if (navR && vp.right - w < navR.right + gap) te = Math.max(te, navR.bottom + gap);
+      Object.assign(E.style, { left: `${Math.round(vp.right - w)}px`, top: `${Math.round(te)}px`, width: `${Math.round(w)}px` });
     }
-    // 機関出力: 航行のメニューと視点のボタンのあいだ
-    const eL = (nav ? nav.right : W / 2) + gap, eR = vp.left - gap;
-    if (eR - eL >= 150) {
-      const w = Math.min(300, eR - eL);
-      Object.assign(E.style, { left: `${Math.round(eR - w)}px`, top: `${top}px`, width: `${Math.round(w)}px` });
-    } else {
-      // 狭い: 視点のボタンの下（航行のメニューにかかるなら、その下まで下げる）
-      let w = Math.min(230, W * 0.36);
-      let t = vp.bottom + gap;
-      // 航行のメニューの右に収まるなら、幅を詰めてそこに。収まらなければメニューの下まで下げる
-      if (nav && vp.right - w < nav.right + gap) {
-        if (vp.right - (nav.right + gap) >= 150) w = vp.right - (nav.right + gap);
-        else t = Math.max(t, nav.bottom + gap);
-      }
-      Object.assign(E.style, { left: `${Math.round(vp.right - w)}px`, top: `${Math.round(t)}px`, width: `${Math.round(w)}px` });
-    }
+    const nav = rect('.space-nav-panel');
     // 機関出力の箱の下に、右下の武装の列・損傷のマークがあれば、収まらないときは1行に縮める
     E.classList.remove('compact');
     const er = E.getBoundingClientRect();
@@ -377,7 +390,7 @@ const Viewpoints = {
     // 損傷の図の絵の大きさ（箱の幅に合わせる）
     const cv = D.querySelector('canvas');
     const cw = Math.max(80, D.clientWidth - 12);
-    const ch = Math.round(Math.max(36, Math.min(90, cw * 0.26)));
+    const ch = Math.round(Math.max(26, Math.min(64, cw * 0.24)));
     const pr = Math.min(2, window.devicePixelRatio || 1);
     if (cv.width !== Math.round(cw * pr) || cv.height !== Math.round(ch * pr)) {
       cv.width = Math.round(cw * pr); cv.height = Math.round(ch * pr);
@@ -404,7 +417,7 @@ const Viewpoints = {
     const engEff = W && W._dmg ? W._eff('engine') : 1;
     let eng = `<div class="bc-row"><label>レバー</label>${this._bar(Math.abs(thr) / 100, thr < 0 ? 'warn' : '')}<b>${thr}%</b></div>`;
     eng += `<div class="bc-row"><label>主機</label>${this._bar(main)}<b>${Math.round(main * 100)}%</b></div>`;
-    eng += `<div class="bc-row"><label>逆噴射</label>${this._bar(retro, 'warn')}<b>${Math.round(retro * 100)}%</b></div>`;
+    eng += `<div class="bc-row"><label>逆噴</label>${this._bar(retro, 'warn')}<b>${Math.round(retro * 100)}%</b></div>`;
     eng += `<div class="bc-row"><label>速度</label>${this._bar(maxR)}<b>${spText}</b></div>`;
     if (typeof Planetfall !== 'undefined' && Planetfall.active) {
       const a = Planetfall.active;
