@@ -4,7 +4,8 @@
 //
 // 艦船建造で置いた「視点」（design.viewpoints）から、艦の中にいるように外を見る。
 //   通常   : その場所から見回すだけ
-//   見張り台: 双眼鏡（ピンチ・ホイールで拡大）。見ているものを追尾する
+//   見張り台: 双眼鏡（「双眼鏡」ボタンを押しているあいだだけ拡大。ピンチ・ホイールで倍率）。
+//           双眼鏡のあいだは「自動追尾」ボタンで、見ているものを追尾する／しないを切り替える
 //   船橋   : 双眼鏡・追尾に加えて、艦全体の状況（機関・航行・武装・損傷）の計器盤を出す
 //
 // 見回す: 画面をドラッグ。追尾: 画面の中央近くに攻撃目標（照準の目標・演習の敵）・天体があると、
@@ -47,6 +48,9 @@ const Viewpoints = {
   _yaw: 0, _pitch: 0, // 見ている向き（艦に対して。yaw は左が＋、pitch は上が＋）
   _track: null,
   _noTrackUntil: 0,
+  _bino: false, // v89: 双眼鏡を使っているか（「双眼鏡」ボタン）。使っていないあいだは拡大しない
+  _binoFov: 15, // 双眼鏡の倍率（前に使った倍率を覚えておく。はじめは ×4）
+  autoTrack: false, // v89: 双眼鏡のあいだの自動追尾（「自動追尾」ボタン）
 
   get active() { return this.index >= 0 && this.index < this.list.length; },
   get current() { return this.active ? this.list[this.index] : null; },
@@ -75,9 +79,19 @@ const Viewpoints = {
     const ov = document.createElement('div');
     ov.className = 'vp-overlay';
     ov.style.display = 'none';
-    ov.innerHTML = '<div class="vp-bino"></div><div class="vp-cross"></div><div class="vp-info"></div>';
+    ov.innerHTML = '<div class="vp-bino"></div><div class="vp-cross"></div><div class="vp-info"><span class="vp-text"></span><button type="button" class="vp-tool vp-tool-bino">双眼鏡</button><button type="button" class="vp-tool vp-tool-track">自動追尾</button></div>';
     document.body.appendChild(ov);
     this._ov = ov;
+    try { this.autoTrack = localStorage.getItem('spaceSimVpAutoTrack') === '1'; } catch (e) { /* ignore */ }
+    // v89: 双眼鏡のボタン（押すと拡大、もう一度押すと元の倍率へ）と、自動追尾のボタン（双眼鏡のあいだだけ出る）
+    ov.querySelector('.vp-tool-bino').addEventListener('click', (e) => { e.stopPropagation(); this.setBino(!this._bino); });
+    ov.querySelector('.vp-tool-track').addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.autoTrack = !this.autoTrack;
+      if (!this.autoTrack) this._track = null;
+      this._noTrackUntil = 0;
+      try { localStorage.setItem('spaceSimVpAutoTrack', this.autoTrack ? '1' : '0'); } catch (e2) { /* ignore */ }
+    });
     this._buildBridge();
     this._sync();
   },
@@ -132,21 +146,31 @@ const Viewpoints = {
     if (!(i >= 0 && i < this.list.length)) return;
     if (typeof Weapons !== 'undefined' && Weapons.view) Weapons.setView(false);
     this.index = i;
-    this._yaw = 0; this._pitch = 0; this._fov = this.FOV_BASE; this._track = null;
+    this._yaw = 0; this._pitch = 0; this._fov = this.FOV_BASE; this._track = null; this._bino = false;
     this._sync();
   },
   exit() {
     this.index = -1;
-    this._track = null;
+    this._track = null; this._bino = false;
     if (this._savedFov && typeof camera !== 'undefined' && camera) { camera.fov = this._savedFov; camera.updateProjectionMatrix(); }
     this._savedFov = null;
     this._sync();
   },
 
+  // v89: 拡大するのは、双眼鏡を使っているあいだだけ（ピンチ・ホイールは双眼鏡の倍率を変える）
   zoomBy(factor) {
     const v = this.current;
-    if (!v || !VIEWPOINT_KINDS[v.kind].zoom) return;
-    this._fov = Math.max(this.FOV_MIN, Math.min(this.FOV_BASE, this._fov * factor));
+    if (!v || !VIEWPOINT_KINDS[v.kind].zoom || !this._bino) return;
+    this._fov = Math.max(this.FOV_MIN, Math.min(this.BINO_FOV_MAX, this._fov * factor));
+    this._binoFov = this._fov;
+  },
+  BINO_FOV_MAX: 30, // 双眼鏡のいちばん低い倍率（×2）
+  setBino(on) {
+    const v = this.current;
+    on = !!(on && v && VIEWPOINT_KINDS[v.kind].zoom);
+    this._bino = on;
+    this._fov = on ? Math.max(this.FOV_MIN, Math.min(this.BINO_FOV_MAX, this._binoFov)) : this.FOV_BASE;
+    if (!on) this._track = null;
   },
 
   _bindDrag(canvas) {
@@ -224,7 +248,7 @@ const Viewpoints = {
     if (off) { off.updateMatrixWorld(true); off.localToWorld(eye); } else ship.mesh.localToWorld(eye);
 
     // 追尾: 追っているものが無ければ、中央の近くにあるものを探す
-    if (K.track) {
+    if (K.track && this._bino && this.autoTrack) {
       if (this._track && !this._track.alive()) this._track = null;
       if (!this._track && performance.now() > this._noTrackUntil) {
         const d0 = this._dir(ship);
@@ -250,23 +274,30 @@ const Viewpoints = {
     cam.position.copy(eye);
     cam.up.set(up.x, up.y, up.z);
     cam.lookAt(eye.x + dir.x, eye.y + dir.y, eye.z + dir.z);
-    const fov = K.zoom ? this._fov : this.FOV_BASE;
+    const fov = K.zoom && this._bino ? this._fov : this.FOV_BASE;
     if (Math.abs(cam.fov - fov) > 1e-6) { cam.fov = fov; cam.updateProjectionMatrix(); }
 
     // 表示
     const mag = this.FOV_BASE / fov;
     const ov = this._ov;
-    ov.classList.toggle('bino', mag > 1.6);
+    ov.classList.toggle('bino', !!(K.zoom && this._bino));
     let info = `${shipViewpointLabel(this.list, v)}`;
-    if (K.zoom) info += `・双眼鏡 ×${mag.toFixed(1)}`;
+    if (K.zoom && this._bino) info += `・双眼鏡 ×${mag.toFixed(1)}`;
     if (this._track) {
       const d = this._track.dist();
       const fmt = d >= 1.5e9 ? `${(d / 1.495978707e11).toFixed(3)} au` : d >= 1e6 ? `${Math.round(d / 1000).toLocaleString()} km` : `${(d / 1000).toFixed(1)} km`;
       info += `・追尾: ${this._track.label}（${fmt}）`;
-    } else if (K.track) info += '・ドラッグで見回す／ピンチで拡大（中央に目標・天体を入れると追尾）';
+    } else if (K.zoom && this._bino) info += this.autoTrack && K.track ? '・ピンチで倍率（中央に目標・天体を入れると追尾）' : '・ピンチで倍率';
     else info += '・ドラッグで見回す';
-    const el = ov.querySelector('.vp-info');
+    const el = ov.querySelector('.vp-text');
     if (el.textContent !== info) el.textContent = info;
+    const bb = ov.querySelector('.vp-tool-bino'), tb = ov.querySelector('.vp-tool-track');
+    bb.style.display = K.zoom ? '' : 'none';
+    bb.classList.toggle('on', !!this._bino);
+    tb.style.display = K.zoom && K.track && this._bino ? '' : 'none';
+    tb.classList.toggle('on', !!this.autoTrack);
+    const tl = this.autoTrack ? '自動追尾: 入' : '自動追尾: 切';
+    if (tb.textContent !== tl) tb.textContent = tl;
     ov.classList.toggle('tracking', !!this._track);
     // 船橋の計器は 0.25 秒ごとに（実際の時間で。フレームが遅い端末でも同じ間隔で）
     const now = performance.now();
