@@ -219,14 +219,25 @@ const Planetfall = {
     if (this._sky || !this._scene) return;
     // 空: カメラを囲む大きな球（内側）。大気の色で、濃さに応じて星を隠す
     this._sky = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), new THREE.ShaderMaterial({
-      uniforms: { uColor: { value: new THREE.Color() }, uHorizon: { value: new THREE.Color() }, uUp: { value: new THREE.Vector3(0, 1, 0) }, uOpacity: { value: 0 }, uSun: { value: new THREE.Vector3(0, 1, 0) } },
+      uniforms: { uColor: { value: new THREE.Color() }, uHorizon: { value: new THREE.Color() }, uUp: { value: new THREE.Vector3(0, 1, 0) }, uOpacity: { value: 0 }, uSun: { value: new THREE.Vector3(0, 1, 0) }, uSunAng: { value: 0.0047 }, uPix: { value: 0.001 }, uSunCol: { value: new THREE.Color(1, 1, 1) } },
       vertexShader: 'varying vec3 vDir; void main() { vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-      fragmentShader: `uniform vec3 uColor; uniform vec3 uHorizon; uniform vec3 uUp; uniform vec3 uSun; uniform float uOpacity; varying vec3 vDir;
+      fragmentShader: `uniform vec3 uColor; uniform vec3 uHorizon; uniform vec3 uUp; uniform vec3 uSun; uniform float uOpacity; uniform float uSunAng; uniform float uPix; uniform vec3 uSunCol; varying vec3 vDir;
 void main() { vec3 d = normalize(vDir); float h = dot(d, uUp);
   vec3 c = mix(uHorizon, uColor, smoothstep(-0.05, 0.55, h));
-  float s = max(0.0, dot(d, uSun)); c += vec3(1.0, 0.9, 0.7) * pow(s, 48.0) * 0.35;
+  float cs = dot(d, uSun);
+  float s = max(0.0, cs); c += uSunCol * vec3(1.0, 0.9, 0.7) * pow(s, 48.0) * 0.35;
   // 地平線より下も同じ色で埋める（地面の向こうの霞）
-  gl_FragColor = vec4(c, uOpacity * (0.75 + 0.25 * smoothstep(0.6, -0.1, h))); }`,
+  float a = uOpacity * (0.75 + 0.25 * smoothstep(0.6, -0.1, h));
+  // v89: 恒星そのもの（円盤）と、まわりのにじみ。空が宇宙側の恒星を覆って灰色の円盤に見えてしまうので、空の側で明るく描く
+  float ang = acos(clamp(cs, -1.0, 1.0));
+  float k = smoothstep(0.02, 0.25, uOpacity);
+  float e = max(uPix * 0.75, uSunAng * 0.06);
+  float disc = (1.0 - smoothstep(uSunAng - e, uSunAng + e, ang)) * k;
+  float halo = (exp(-ang / (uSunAng * 2.5)) * 0.9 + exp(-ang / (uSunAng * 9.0)) * 0.35) * k;
+  c += uSunCol * halo;
+  c = mix(c, mix(uSunCol, vec3(1.0), 0.6) * 1.15, disc);
+  a = max(a, max(disc, min(1.0, halo * 0.9)));
+  gl_FragColor = vec4(c, a); }`,
       // 艦・地面より先に描く（不透明の組に入れて、合成だけ自分で指定する。透明の組に入れると艦の上に重なってしまう）
       side: THREE.BackSide, transparent: false, depthWrite: false, depthTest: false,
       blending: THREE.CustomBlending, blendSrc: THREE.SrcAlphaFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
@@ -323,6 +334,15 @@ void main() {
     this._sky.position.copy(cam.position);
     this._sky.scale.setScalar(Math.min(cam.far * 0.9, 80000));
     su.uColor.value.copy(skyCol); su.uHorizon.value.copy(horizon); su.uUp.value.copy(up); su.uOpacity.value = skyOpacity; su.uSun.value.copy(sun);
+    // 恒星の見かけの半径・色（低いほど赤く）、画面の1ピクセルの角度（円盤のふちをなめらかに）
+    su.uSunAng.value = Math.max(1e-4, Math.atan((star.meanRadiusM || 6.957e8) / Math.max(1, Math.hypot(sd.x, sd.y, sd.z))));
+    su.uPix.value = (((cam.fov || 60) * Math.PI) / 180) / Math.max(1, (typeof renderer !== 'undefined' && renderer ? renderer.domElement.clientHeight : window.innerHeight));
+    {
+      const sc = star.id === 'sun' || !star.color ? [1, 0.97, 0.9] : star.color;
+      const cm = Math.max(sc[0], sc[1], sc[2]) || 1;
+      const low = Math.max(0, 1 - Math.max(0, sunH) / 0.3);
+      su.uSunCol.value.setRGB(sc[0] / cm, sc[1] / cm, sc[2] / cm).lerp(new THREE.Color(1.0, 0.45, 0.18), low * 0.75);
+    }
 
     // 地面・海面: 高さ 150 km より下で出す。大きさは地平線まで（カメラの見える距離まで）
     const g = this._ground;
