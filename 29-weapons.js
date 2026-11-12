@@ -1573,7 +1573,7 @@ const Weapons = {
     if (!ship || !dl) return false;
     if (!this._savedFov) this._savedFov = cam.fov;
     const up = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
-    const dir = this.rig.directors[0];
+    const dir = this._viewDirector();
     let p;
     const vm = this._viewMount && this.rig.mounts.includes(this._viewMount) ? this._viewMount : null;
     if (vm) {
@@ -3019,9 +3019,61 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
     const seen = new Set();
     for (const t of P.targets) if (!seen.has(t.center)) { seen.add(t.center); t.center.copy(conv(t.center)); }
   },
+  // v89: 視点に使う射撃レーダー。何基もあるときは、いま狙っている向きの視線が船体・ほかの部品にいちばん隠れにくい台を選ぶ。
+  //   視線（と、そのまわり少しずれた向き4本）を格子でたどり、埋まっているところの数が少ない台ほどよい。
+  //   ちらつかないように、0.3秒ごとに見直し、いまの台よりはっきり良い台があるときだけ替える。壊れて失った台は使わない
+  _viewDirector() {
+    const list = this.rig ? this.rig.directors : [];
+    if (!list.length) return null;
+    const D = this._dmg;
+    const gone = (d) => !!(D && D.parts && D.parts.some((x) => x.kind === 'director' && x.node === d.node && x.dead));
+    const live = list.filter((d) => !gone(d));
+    if (!live.length) return list[0];
+    if (live.length === 1 || !this._occ) return live[0];
+    let cur = live.includes(this._viewDir) ? this._viewDir : null;
+    const now = performance.now();
+    if (cur && now - (this._viewDirT || 0) < 300) return cur;
+    this._viewDirT = now;
+    const dl = this.aimDirLocal();
+    if (!dl) return cur || live[0];
+    const ship = State.ship;
+    if (ship && ship.mesh) ship.mesh.updateMatrixWorld(true);
+    const occ = this._occ;
+    const inv = new THREE.Matrix4().copy(occ.root.matrixWorld).invert();
+    const d0 = new THREE.Vector3(dl.x, dl.y, dl.z).normalize();
+    const up = new THREE.Vector3(0, 1, 0).applyQuaternion(occ.root.getWorldQuaternion(new THREE.Quaternion()));
+    const side = new THREE.Vector3().crossVectors(d0, up);
+    if (side.lengthSq() < 1e-6) side.set(1, 0, 0); side.normalize();
+    const upp = new THREE.Vector3().crossVectors(side, d0).normalize();
+    const k = Math.tan((4 * Math.PI) / 180);
+    const dirs = [d0, d0.clone().addScaledVector(side, k).normalize(), d0.clone().addScaledVector(side, -k).normalize(), d0.clone().addScaledVector(upp, k).normalize(), d0.clone().addScaledVector(upp, -k).normalize()];
+    const step = occ.cell * 0.5, maxN = Math.ceil(((occ.nx + occ.ny + occ.nz) * occ.cell) / step);
+    const p = new THREE.Vector3();
+    const scoreOf = (dr) => {
+      dr.node.getWorldPosition(p).applyMatrix4(inv);
+      let sc = 0;
+      dirs.forEach((dw, di) => {
+        const d = dw.clone().transformDirection(inv);
+        let c = 0;
+        for (let n = 5; n < maxN; n++) { // 台そのもの（まわり格子2つ半）は見ない
+          const x = p.x + d.x * step * n, y = p.y + d.y * step * n, z = p.z + d.z * step * n;
+          const i = Math.floor((x - occ.min.x) / occ.cell), j = Math.floor((y - occ.min.y) / occ.cell), l = Math.floor((z - occ.min.z) / occ.cell);
+          if (i < 0 || j < 0 || l < 0 || i >= occ.nx || j >= occ.ny || l >= occ.nz) break;
+          if (occ.grid[(l * occ.ny + j) * occ.nx + i] !== 0) c++;
+        }
+        sc += c * (di === 0 ? 4 : 1);
+      });
+      return sc;
+    };
+    let best = null, bestS = Infinity, curS = Infinity;
+    for (const dr of live) { const sc = scoreOf(dr); if (dr === cur) curS = sc; if (sc < bestS) { bestS = sc; best = dr; } }
+    if (!cur || (curS > 0 && bestS < curS - 2)) cur = best;
+    this._viewDir = cur;
+    return cur;
+  },
   // 照準の視点を見ている点（射撃レーダー、無ければ艦の中心）
   _viewOrigin() {
-    const dir = this.rig && this.rig.directors[0];
+    const dir = this._viewDirector();
     const v = new THREE.Vector3();
     if (dir) dir.node.getWorldPosition(v);
     else { const p = State.ship.position; v.set(p.x, p.y, p.z); }
