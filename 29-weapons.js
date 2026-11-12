@@ -2125,7 +2125,8 @@ const Weapons = {
       for (const m of D.hidden || []) m.visible = true;
     }
     for (const T of this._thinMeshes || []) { T.clipAt = null; for (const m of T.mats) m.userData.dmgClipU.value.set(0, 0, 0, 0); }
-    if (this.rig) for (const m of this.rig.mounts) { m._gone = false; for (const b of m.barrels) b.destroyed = false; }
+    if (this.rig) for (const m of this.rig.mounts) { m._gone = false; for (const b of m.barrels) { b.destroyed = false; b._sev = undefined; b._sevT = undefined; } }
+    if (this._dmgU) this._dmgU.dmgSevCount.value = 0;
     this._dmg = null;
     this._applyDamageSides();
     if (this.rig) for (const m of this.rig.mounts) m._dmgPart = null;
@@ -2433,11 +2434,15 @@ const Weapons = {
   DMG_MAX_SPOTS: 20,
   DMG_MAX_ENTRIES: 28, // シェーダーへ渡す数（1つの跡が、船体と砲塔の両方の表面に付くことがあるので、跡の数より多い）
   SMOKE_MAX: 600,
+  DMG_MAX_SEV: 16, // 折れた砲身の数の上限（超えたら、砲身ごと消す）
   _dmgUniforms() {
     if (this._dmgU) return this._dmgU;
     const spots = [], info = [];
     for (let i = 0; i < this.DMG_MAX_ENTRIES; i++) { spots.push(new THREE.Vector4(0, 0, 0, 1)); info.push(new THREE.Vector4(0, 0, 0, 0)); }
-    this._dmgU = { dmgSpots: { value: spots }, dmgInfo: { value: info }, dmgCount: { value: 0 }, dmgTime: { value: 0 } };
+    // v89: 折れた砲身の「折れた先」（線分 A→B のまわり、半径 A.w の中は描かない）
+    const sevA = [], sevB = [];
+    for (let i = 0; i < this.DMG_MAX_SEV; i++) { sevA.push(new THREE.Vector4(0, 0, 0, 0)); sevB.push(new THREE.Vector4(0, 0, 0, 0)); }
+    this._dmgU = { dmgSpots: { value: spots }, dmgInfo: { value: info }, dmgCount: { value: 0 }, dmgTime: { value: 0 }, dmgSevA: { value: sevA }, dmgSevB: { value: sevB }, dmgSevCount: { value: 0 } };
     return this._dmgU;
   },
   // 艦のモデルのマテリアルに、被弾の跡を描く処理を足す（読み込んだときに1回。跡が無いあいだは何もしないので軽い）
@@ -2465,7 +2470,8 @@ const Weapons = {
         // 部品ごとに行列が違うので、マテリアルは部品ごとに複製する（プログラムは共有されるので、作り直しは増えない）
         const mat = src.clone();
         mat.userData = { ...src.userData, dmgPatched: true, dmgOrigSide: src.side };
-        const restU = { value: restM }, backU = { value: 0 }, clipU = { value: new THREE.Vector4(0, 0, 0, 0) };
+        const restU = { value: restM }, backU = { value: 0 }, clipU = { value: new THREE.Vector4(0, 0, 0, 0) }, kindU = { value: 0 };
+        mat.userData.dmgKindU = kindU; // 0 = 船体など / 1 = 砲塔・砲身（部品ごと動くもの） / 2 = 細い部品（マストなど）
         mat.userData.dmgBackU = backU;
         mat.userData.dmgClipU = clipU;
         const prev = src.onBeforeCompile;
@@ -2476,6 +2482,7 @@ const Weapons = {
           shader.uniforms.dmgRest = restU;
           shader.uniforms.dmgBack = backU;
           shader.uniforms.dmgClip = clipU;
+          shader.uniforms.dmgKind = kindU;
           shader.vertexShader = 'varying vec3 vDmgRest;\nuniform mat4 dmgRest;\n' + shader.vertexShader.replace('#include <project_vertex>', '#include <project_vertex>\n  vDmgRest = (dmgRest * vec4(position, 1.0)).xyz;');
           shader.fragmentShader = `varying vec3 vDmgRest;
 uniform vec4 dmgSpots[${N}];
@@ -2484,9 +2491,24 @@ uniform int dmgCount;
 uniform float dmgTime;
 uniform float dmgBack;
 uniform vec4 dmgClip;
+uniform float dmgKind;
+uniform vec4 dmgSevA[${this.DMG_MAX_SEV}];
+uniform vec4 dmgSevB[${this.DMG_MAX_SEV}];
+uniform int dmgSevCount;
 ` + shader.fragmentShader.replace('#include <tonemapping_fragment>', `
   // 切れ落ちた先（細い部品が途中で切られたとき、その先は描かない）
   if (dmgClip.xyz != vec3(0.0) && dot(dmgClip.xyz, vDmgRest) > dmgClip.w) discard;
+  // 折れた砲身の先（砲塔・砲身の部品だけ）
+  if (dmgKind > 0.5 && dmgKind < 1.5 && dmgSevCount > 0) {
+    for (int i = 0; i < ${this.DMG_MAX_SEV}; i++) {
+      if (i >= dmgSevCount) break;
+      vec3 sa = dmgSevA[i].xyz, sb = dmgSevB[i].xyz - sa;
+      vec3 sw = vDmgRest - sa;
+      float st = clamp(dot(sw, sb) / dot(sb, sb), 0.0, 1.0);
+      vec3 sd = sw - sb * st;
+      if (dot(sd, sd) < dmgSevA[i].w * dmgSevA[i].w) discard;
+    }
+  }
   if (dmgCount > 0) {
     float dScorch = 0.0, dHole = 0.0, dCut = 0.0, dCrater = 0.0, dDepth = 0.0;
     vec3 dGlow = vec3(0.0);
@@ -2513,7 +2535,8 @@ uniform vec4 dmgClip;
         float hr = 0.42 * hole;
         // 細い部品・角（w = 1）は、えぐれて無くなる（描かない）。船体などの厚いところ（w = 0）は、貫通させずに
         // 深くえぐれた凹みとして塗る（中まで作っていない船体の裏側・向こう側が見えないように）
-        if (dmgInfo[i].w > 0.5) dCut = max(dCut, 1.0 - step(hr * 0.86, d));
+        //   w = 2 は、砲塔に当たった跡: 砲塔・砲身はえぐれ、その下の船体は凹みとして塗る（船体に穴を抜かない）
+        if (dmgInfo[i].w > 0.5 && (dmgInfo[i].w < 1.5 || dmgKind > 0.5)) dCut = max(dCut, 1.0 - step(hr * 0.86, d));
         else { dCrater = max(dCrater, 1.0 - smoothstep(hr * 0.80, hr * 0.92, d)); dDepth = max(dDepth, 1.0 - d / hr); }
         dHole = max(dHole, 1.0 - smoothstep(hr * 0.86, hr * 1.08, d));
         float rim = smoothstep(hr * 0.86, hr * 1.0, d) * (1.0 - smoothstep(hr * 1.0, hr * 1.7, d));
@@ -2536,7 +2559,7 @@ uniform vec4 dmgClip;
 #include <tonemapping_fragment>`);
         };
         const prevKey = src.customProgramCacheKey;
-        mat.customProgramCacheKey = function () { return (prevKey ? prevKey.call(this) : '') + '|dmg3'; };
+        mat.customProgramCacheKey = function () { return (prevKey ? prevKey.call(this) : '') + '|dmg4'; };
         mat.needsUpdate = true;
         this._dmgMats.push(mat);
         return mat;
@@ -2573,7 +2596,7 @@ uniform vec4 dmgClip;
       const shipLen = Math.max(allSize.x, allSize.y, allSize.z);
       const C = all.getCenter(new THREE.Vector3());
       for (const e of boxes) {
-        if (e.isRig) continue;
+        if (e.isRig) { for (const m of e.mats) if (m.userData.dmgKindU) m.userData.dmgKindU.value = 1; continue; }
         const sz = e.box.getSize(new THREE.Vector3());
         const ax = ['x', 'y', 'z'].sort((a, b) => sz[b] - sz[a]);
         const a = sz[ax[0]], b = sz[ax[1]];
@@ -2583,6 +2606,7 @@ uniform vec4 dmgClip;
         const endMin = cen.clone(); endMin[ax[0]] = e.box.min[ax[0]];
         const endMax = cen.clone(); endMax[ax[0]] = e.box.max[ax[0]];
         const farSign = endMin.distanceTo(C) <= endMax.distanceTo(C) ? 1 : -1;
+        for (const m of e.mats) if (m.userData.dmgKindU) m.userData.dmgKindU.value = 2;
         this._thinMeshes.push({ mesh: e.mesh, mats: e.mats, k: ax[0], k1: ax[1], k2: ax[2], min: e.box.min[ax[0]], max: e.box.max[ax[0]], cen, cross: b / 2, farSign, clipAt: null });
       }
     }
@@ -2606,9 +2630,35 @@ uniform vec4 dmgClip;
       if (i < 0 || j < 0 || l < 0 || i >= occ.nx || j >= occ.ny || l >= occ.nz) return -1;
       return occ.grid[(l * occ.ny + j) * occ.nx + i] ? 1 : 0;
     };
-    // 当たった壁を抜ける（格子3つ分まで）
+    // v89: 砲塔に当たった（格子が砲塔のもの）: 砲塔・砲身だけえぐれ、下の船体は凹みとして塗る（2）
+    {
+      const gv = (t) => {
+        const x = o.x + d.x * t, y = o.y + d.y * t, z = o.z + d.z * t;
+        const i = Math.floor((x - occ.min.x) / occ.cell), j = Math.floor((y - occ.min.y) / occ.cell), l = Math.floor((z - occ.min.z) / occ.cell);
+        if (i < 0 || j < 0 || l < 0 || i >= occ.nx || j >= occ.ny || l >= occ.nz) return 0;
+        return occ.grid[(l * occ.ny + j) * occ.nx + i];
+      };
+      for (let t = -step; t <= step * 2; t += step) { const v = gv(t); if (v >= 2) return 2; if (v === 1) break; }
+    }
+    // v89: まわりの埋まっている格子の数: 面（船体の外板・甲板・角）なら多く、棒（マストなど）なら少ない。
+    //   面のところは、弾の向きにかかわらず穴を抜かない（中まで作っていない船体の内側・向こう側が見えてしまうため）
+    {
+      const R = Math.max(rc * 2.2, occ.cell * 3), nR = Math.ceil(R / occ.cell);
+      const ci = Math.floor((o.x - occ.min.x) / occ.cell), cj = Math.floor((o.y - occ.min.y) / occ.cell), cl = Math.floor((o.z - occ.min.z) / occ.cell);
+      let cnt = 0;
+      for (let a = -nR; a <= nR; a++) for (let b = -nR; b <= nR; b++) for (let c = -nR; c <= nR; c++) {
+        if (a * a + b * b + c * c > nR * nR) continue;
+        const i = ci + a, j = cj + b, l = cl + c;
+        if (i < 0 || j < 0 || l < 0 || i >= occ.nx || j >= occ.ny || l >= occ.nz) continue;
+        if (occ.grid[(l * occ.ny + j) * occ.nx + i]) cnt++;
+      }
+      this._lastThinCount = cnt / (Math.PI * nR * nR);
+      if (cnt > Math.PI * nR * nR * 0.62) return false;
+    }
+    // 当たった壁を抜ける（格子3つ分まで。それより厚ければ「厚い」）
     let t = 0;
     while (t < occ.cell * 3 && at(t) === 1) t += step;
+    if (at(t) === 1) return false;
     const t0 = t;
     const maxT = (size * 0.6) / scale;
     for (; t < maxT; t += step) {
@@ -2617,6 +2667,30 @@ uniform vec4 dmgClip;
       if (v === 1) return t - t0 < rc * 2.4; // 向こう側の壁: 近ければ細い（小さな砲塔・煙突の縁など）、遠ければ厚い
     }
     return true;
+  },
+  // v89: 砲身が折れた: 砲身ごと消さずに、折れたところから先だけ描かない（付け根側は残る）。
+  //   折れた先（動かす前の位置での線分）をシェーダーへ渡す。数が上限を超えたら、砲身ごと消す
+  _severBarrel(m, b, t, rc) {
+    const U = this._dmgU, D = this._dmg;
+    const cutT = Math.max(b.restLen * 0.1, t - rc * 0.35);
+    if (b._sev !== undefined) { if (cutT >= b._sevT) return; }
+    else {
+      if (!U || U.dmgSevCount.value >= this.DMG_MAX_SEV) { this._collapseNode(b.node); return; }
+      b._sev = U.dmgSevCount.value++;
+    }
+    b._sevT = cutT;
+    // 砲身の太さ: 隣の砲身との間隔の半分より少し細く（隣の砲身まで消さないように）。1門だけなら長さから
+    let rad = b.restLen * 0.09;
+    for (const o of m.barrels) {
+      if (o === b || !o.restP) continue;
+      const w = o.restP.clone().sub(b.restP);
+      const sep = w.addScaledVector(b.restD, -w.dot(b.restD)).length();
+      if (sep > 1e-6) rad = Math.min(rad, sep * 0.47);
+    }
+    const A = b.restP.clone().addScaledVector(b.restD, cutT + rad), B = b.restP.clone().addScaledVector(b.restD, b.restLen * 1.25);
+    U.dmgSevA.value[b._sev].set(A.x, A.y, A.z, rad);
+    U.dmgSevB.value[b._sev].set(B.x, B.y, B.z, 0);
+    if (D) D.clipped = true;
   },
   // 部品を消す（大きさを 0 に。ボーンでも、ふつうの部品でも効く）。演習をやめたら戻す
   _collapseNode(node) {
@@ -2633,7 +2707,8 @@ uniform vec4 dmgClip;
   _checkSevered(sp, size) {
     const D = this._dmg;
     const root = this._modelRoot;
-    if (!D || !root || !sp.hole || !sp.cut || !sp.rests || !sp.rests.length) return;
+    if (!D || !root || !sp.hole || !sp.rests || !sp.rests.length) return;
+    const gouge = !!sp.cut; // えぐれた穴（砲塔・細い部品）。船体の凹み（cut でない穴）は、近くの砲身を折るだけ
     const scale = new THREE.Vector3().setFromMatrixScale(root.matrixWorld).x || 1;
     const rc = (this._spotRadius(sp, size) * 0.42 * 0.86) / scale;
     const kill = (pt, why) => {
@@ -2647,7 +2722,7 @@ uniform vec4 dmgClip;
         if (!pt || !m._restM) continue;
         const Tc = new THREE.Vector3().setFromMatrixPosition(m._restM);
         const Rt = pt.radius / scale;
-        if (!m._gone && rc >= Rt * 0.5 && sp.rests.some((p) => p.distanceTo(Tc) < rc * 0.9 + Rt * 0.25)) {
+        if (gouge && !m._gone && rc >= Rt * 0.5 && sp.rests.some((p) => p.distanceTo(Tc) < rc * 0.9 + Rt * 0.25)) {
           m._gone = true;
           this._collapseNode(m.turret);
           for (const b of m.barrels) { b.destroyed = true; this._collapseNode(b.node); }
@@ -2656,26 +2731,27 @@ uniform vec4 dmgClip;
         }
         if (m._gone) continue;
         for (const b of m.barrels) {
-          if (b.destroyed || !b.restP) continue;
+          if (!b.restP || (b.destroyed && b._sev === undefined)) continue; // 折れた砲身は、もっと付け根側で折れることがある
           // 砲身（動かす前の位置）の線分と、穴の中心の距離
-          const hit = sp.rests.some((p) => {
+          let hitT = -1;
+          for (const p of sp.rests) {
             const w = p.clone().sub(b.restP);
             const tt = Math.max(b.restLen * 0.12, Math.min(b.restLen, w.dot(b.restD)));
-            return b.restP.clone().addScaledVector(b.restD, tt).distanceTo(p) < rc * 0.85;
-          });
-          if (hit) { b.destroyed = true; this._collapseNode(b.node); this._flashStatus(`${pt.label}: 砲身を失いました`); }
+            if (b.restP.clone().addScaledVector(b.restD, tt).distanceTo(p) < rc * 0.85 && (hitT < 0 || tt < hitT)) hitT = tt;
+          }
+          if (hitT >= 0) { if (!b.destroyed) this._flashStatus(`${pt.label}: 砲身が折れました`); b.destroyed = true; this._severBarrel(m, b, hitT, rc); }
         }
         if (m.barrels.length && m.barrels.every((b) => b.destroyed)) kill(pt, '砲身を全部失いました');
       }
       for (const d of this.rig.directors) {
         const pt = D.parts.find((x) => x.kind === 'director' && x.node === d.node);
-        if (!pt || pt.dead || !d._restP) continue;
+        if (!gouge || !pt || pt.dead || !d._restP) continue;
         if (sp.rests.some((p) => p.distanceTo(d._restP) < rc * 0.9)) { this._collapseNode(d.node); kill(pt, '失いました'); }
       }
     }
     const p0 = sp.rests[0];
     for (const T of this._thinMeshes || []) {
-      if (!T.mesh.visible) continue;
+      if (!gouge || !T.mesh.visible) continue;
       const pk = p0[T.k];
       if (pk < T.min - rc || pk > T.max + rc) continue;
       const dl = Math.hypot(p0[T.k1] - T.cen[T.k1], p0[T.k2] - T.cen[T.k2]);
@@ -2686,7 +2762,7 @@ uniform vec4 dmgClip;
       const rootEnd = s > 0 ? T.min : T.max;
       const remain = Math.abs(cut - rootEnd);
       D.clipped = true;
-      if (remain < (T.max - T.min) * 0.12) { T.mesh.visible = false; D.hidden.push(T.mesh); continue; }
+      if (remain < (T.max - T.min) * 0.04) { T.mesh.visible = false; D.hidden.push(T.mesh); continue; }
       if (T.clipAt !== null && s * T.clipAt <= s * cut) continue; // もっと付け根側で切れている
       T.clipAt = cut;
       for (const m of T.mats) { const v = m.userData.dmgClipU.value; v.set(0, 0, 0, s * cut); v[T.k] = s; }
@@ -2820,7 +2896,7 @@ uniform vec4 dmgClip;
       this._explode(point, sp, size); // v89: 大きな爆発
       this._applyDamageSides();
     }
-    if (sp.hole && sp.cut) this._checkSevered(sp, size);
+    if (sp.hole) this._checkSevered(sp, size);
     this._emitSmoke(sp, sp.hole ? 4 : 2, size);
   },
   // 煙: 1つの点の集まり（艦のメッシュの子。艦と一緒に動く）。描画は1回
@@ -2929,7 +3005,7 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
       for (const p of sp.rests || []) {
         if (n >= this.DMG_MAX_ENTRIES) break;
         U.dmgSpots.value[n].set(p.x, p.y, p.z, r);
-        U.dmgInfo.value[n].set(Math.min(1.5, sp.heat), sp.hole ? 0.3 + 0.7 * sp.holeT : 0, 1, sp.cut ? 1 : 0);
+        U.dmgInfo.value[n].set(Math.min(1.5, sp.heat), sp.hole ? 0.3 + 0.7 * sp.holeT : 0, 1, sp.cut ? (sp.cut === 2 ? 2 : 1) : 0);
         n++;
       }
     }
