@@ -482,7 +482,8 @@ const Viewpoints = {
     this._layoutBridge();
     const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
     // --- 機関出力 ---
-    const sp = Math.hypot(ship.velocity.x, ship.velocity.y, ship.velocity.z);
+    const cs0 = typeof Weapons !== 'undefined' && Weapons.combatSpeed ? Weapons.combatSpeed() : null;
+    const sp = cs0 !== null ? cs0 : Math.hypot(ship.velocity.x, ship.velocity.y, ship.velocity.z);
     const thr = Math.round((State.input.thrustForward ?? 0) * 100);
     const ratio = (kind) => (typeof HUD !== 'undefined' && HUD._computeThrustGroupRatio ? HUD._computeThrustGroupRatio(ship, kind) : 0);
     const main = ratio('main'), retro = ratio('retro');

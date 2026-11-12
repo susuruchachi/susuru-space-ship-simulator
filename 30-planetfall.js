@@ -142,8 +142,14 @@ const Planetfall = {
     const v = ship.velocity;
     let rel = { x: v.x - vs.x, y: v.y - vs.y, z: v.z - vs.z };
     const size = (typeof CameraSystem !== 'undefined' ? (CameraSystem._shipScale || 1) : 1) * 8;
-    const h0 = Math.max(1, size * 0.08); // 艦の重心から底までのおよその高さ
+    let h0 = Math.max(1, size * 0.08); // 艦の重心から底までのおよその高さ
     let alt = r - R;
+    // v89: 重力場機関の艦は、水のあるところでは、境界面の高さが水面と一致するように浮く（境界面が喫水線）
+    const surf = this._surfaceAt(body, upU);
+    if (surf.sea && ship.gravityDrive && Number.isFinite(ship.boundaryHeight)) {
+      const su = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
+      h0 = -ship.boundaryHeight * (su.x * up.x + su.y * up.y + su.z * up.z);
+    }
 
     // --- 大気の抵抗 ---
     const air = this._air(body);
@@ -162,7 +168,6 @@ const Planetfall = {
     }
 
     // --- 接地 ---
-    const surf = this._surfaceAt(body, upU);
     let state = alt < top ? (rho > 1e-6 ? '大気圏内' : '低高度') : '接近中';
     const vVert = rel.x * up.x + rel.y * up.y + rel.z * up.z;
     let contact = false;

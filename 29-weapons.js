@@ -934,6 +934,7 @@ const Weapons = {
     const vc = gm > 0 ? Math.sqrt(gm / dist) : 0;
     ship.velocity = { x: t.x * vc, y: t.y * vc, z: t.z * vc };
     if (ship.boundaryPoint) ship.boundaryPoint = { x: 0, y: 0, z: 0 };
+    this._capRef = null; // 最高速度の基準は、この海域の速度から
     this._arena = { bodyId: body.id, label };
     this._flashStatus(`演習海域: ${label}`);
   },
@@ -1976,6 +1977,32 @@ const Weapons = {
     if (this.maneuverMode === 'open') return Math.max(mainRange * 0.9, 5000);
     return clamp(mainRange * 0.45, 3000, 15000);
   },
+  // v89: 演習中の最高速度。母港の外では、重力で回る軌道を壊さないように最高速度で丸めていない（軌道の速さは最高速度より
+  //   ずっと速い）ので、演習中は「重力に任せて落ちている基準」に対する速さ（= 機関で出した速さ）を最高速度までに抑える。
+  //   基準は、演習の海域に着いたときの速度から始め、重力のぶんだけ一緒に変える
+  combatSpeedCap(ship, g, h) {
+    const on = this._practiceOn() && Number.isFinite(ship.maxSpeed) && ship.maxSpeed > 0
+      && typeof Navigation !== 'undefined' && Navigation.newtonianFlight && Navigation.newtonianFlight()
+      && !(Navigation.approach || Navigation.departure) && !(typeof Planetfall !== 'undefined' && Planetfall.active && Planetfall.active.contact);
+    if (!on) { this._capRef = null; return; }
+    const v = ship.velocity;
+    if (!this._capRef) this._capRef = new THREE.Vector3(v.x, v.y, v.z);
+    const R = this._capRef;
+    if (g) { R.x += g.x * h; R.y += g.y * h; R.z += g.z * h; }
+    const rx = v.x - R.x, ry = v.y - R.y, rz = v.z - R.z;
+    const sp = Math.hypot(rx, ry, rz);
+    ship.isAtMaxSpeed = sp >= ship.maxSpeed * 0.999;
+    if (sp > ship.maxSpeed) {
+      const k = ship.maxSpeed / sp;
+      v.x = R.x + rx * k; v.y = R.y + ry * k; v.z = R.z + rz * k;
+    }
+  },
+  // 演習中の速さ（最高速度と比べる速さ）。演習中でなければ null
+  combatSpeed() {
+    const ship = State.ship;
+    if (!this._capRef || !ship) return null;
+    return Math.hypot(ship.velocity.x - this._capRef.x, ship.velocity.y - this._capRef.y, ship.velocity.z - this._capRef.z);
+  },
   maneuverInput(ship, input, dt) {
     const out = this._maneuverInputCore(ship, input, dt);
     return this._damageInput(ship, out, dt);
@@ -2032,7 +2059,10 @@ const Weapons = {
       // 接近・離すは速く（3 km/s まで）。離すときは、足の遅い大型艦からは離れられるが、速い攻撃機は追いついてくる
       const vmax = this.maneuverMode === 'keep' ? 150 : 3000;
       const vdes = clamp((dist - want) * (this.maneuverMode === 'keep' ? 0.05 : 0.1), -vmax, vmax);
-      const dv = this._cruiseV.clone().addScaledVector(D, vdes).sub(sv);
+      const tv = this._cruiseV.clone().addScaledVector(D, vdes);
+      // v89: 最高速度を決めている艦は、自動操艦も最高速度までしか出さない
+      if (this._capRef && Number.isFinite(ship.maxSpeed)) { const rel = tv.clone().sub(this._capRef); if (rel.length() > ship.maxSpeed * 0.98) tv.copy(this._capRef).add(rel.setLength(ship.maxSpeed * 0.98)); }
+      const dv = tv.sub(sv);
       const dvL = dv.applyQuaternion(new THREE.Quaternion(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w).invert());
       // v89: 推力は「速度の差 ÷（出せる加速度 × 2秒）」の比例で、小さな差（3%未満）は噴かない。出力もなめらかに変える。
       //   以前は速度の差 ÷ 30 m/s で決めていたため、加速の大きい艦（Hood など）では毎フレーム行き過ぎ、前進と逆噴射を細かく繰り返していた
@@ -3083,7 +3113,15 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
       if (t.rv) { const r = Astro.mat3MulVec(newF.rotT, Astro.mat3MulVec(oldF.rot, t.rv)); t.rv.set(r.x, r.y, r.z); }
       t.mesh.position.copy(np);
     }
-    // 巡航の速度も新しいフレームへ（艦の位置で）
+    // 巡航の速度・最高速度の基準も新しいフレームへ（艦の位置で）
+    if (this._capRef) {
+      const sp = State.ship.position;
+      const pOld = nav.universeToLocal(nav.localToUniverse({ x: sp.x, y: sp.y, z: sp.z }, newF), oldF);
+      const vu = Astro.mat3MulVec(oldF.rot, this._capRef);
+      const vo = nav._framePointVelocity(oldF, pOld), vn = nav._framePointVelocity(newF, sp);
+      const v = Astro.mat3MulVec(newF.rotT, { x: vu.x + vo.x - vn.x, y: vu.y + vo.y - vn.y, z: vu.z + vo.z - vn.z });
+      this._capRef.set(v.x, v.y, v.z);
+    }
     if (this._cruiseV) {
       const sp = State.ship.position;
       const pOld = nav.universeToLocal(nav.localToUniverse({ x: sp.x, y: sp.y, z: sp.z }, newF), oldF);

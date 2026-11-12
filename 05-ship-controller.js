@@ -66,6 +66,8 @@ const ShipController = {
             ship.gravityAccel = g;
           }
         }
+        // v89: 演習中は、最高速度を決めている艦は最高速度を超えない（29-weapons.js combatSpeedCap）
+        if (typeof Weapons !== 'undefined' && Weapons.combatSpeedCap) Weapons.combatSpeedCap(ship, ship.gravityAccel, h);
         // v87: 自動航行の通常航行での進入（到着点で止まり切れる速さへ合わせる）
         if (typeof Navigation !== 'undefined' && Navigation.approach) {
           Navigation.stepApproach(ship, h);
@@ -224,7 +226,7 @@ const GravityDrive = {
   RESTORE_RATE: 3.0,      // 本来の姿勢へ戻る速さ（ずれの角度 × この値 [rad/s]）（v85: 強めに）
   RESTORE_MAX: 1.0,       // 戻る角速度の上限（最大角速度に対する割合）
   RESTORE_GRIP: 6.0,      // 境界面が艦の回転を引き寄せる強さ [1/s]
-  TURN_SPEED_LOSS: 2.5,   // 転針で速度が落ちる強さ（1 rad 向きを変えると速度は e^-2.5 ≈ 8% に）
+  TURN_SPEED_LOSS: 2.5,   // （v89 から使わない: 旋回では速さを変えず、速度の向きだけを回す）
   INPUT_DEADZONE: 0.05,
   // v85: 水上船のような横揺れ（ロールはばね。減衰を弱くして、起き上がりながら揺れる）
   ROLL_OMEGA: 3.2,        // 横揺れの固有角振動数 [rad/s]（v85: 復元力を強めに。周期 約2秒）
@@ -249,6 +251,11 @@ const GravityDrive = {
   },
   _docking(ship) {
     return !!ship.autoDockingEnabled;
+  },
+  // 速度の基準（演習中だけ。ふだんは 0 = フレームに対する速度）
+  _refV() {
+    const r = typeof Weapons !== 'undefined' ? Weapons._capRef : null;
+    return r ? { x: r.x, y: r.y, z: r.z } : { x: 0, y: 0, z: 0 };
   },
 
   // 艦の姿勢 → 境界面の姿勢への回転（艦のローカル軸の回転ベクトル [rad]）
@@ -310,10 +317,20 @@ const GravityDrive = {
       const fwd = rotateVecByQuat({ x: 0, y: 0, z: -1 }, ship.quaternion);
       const bUp = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.boundaryQuat);
       ship.boundaryQuat = this._quatFromForwardUp(fwd, bUp) || ship.boundaryQuat;
-      // 面の向きを変えたぶん、それまでの速度が一気に落ちる（自動の向き合わせ・ワープ中を除く）
+      // v89: 旋回は円運動のように: 速度の向きを、艦が向きを変えたぶんだけ一緒に回す（速さは変えない）。
+      //   以前は、面の向きを変えたぶん速度が一気に落ちていた（自動の向き合わせ・ワープ中は触らない）
       if (!ship._gdNoLoss && !rotationOnly) {
-        const k = Math.exp(-this.TURN_SPEED_LOSS * Math.hypot(w.x, w.y) * dt);
-        ship.velocity.x *= k; ship.velocity.y *= k; ship.velocity.z *= k;
+        const wm = Math.hypot(w.x, w.y);
+        if (wm > 1e-9) {
+          const ax = rotateVecByQuat({ x: w.x / wm, y: w.y / wm, z: 0 }, ship.quaternion);
+          // 演習中は、演習の基準（重力に任せて落ちている速度。29-weapons.js）に対する速度を回す
+          const ref = this._refV();
+          const rel = { x: ship.velocity.x - ref.x, y: ship.velocity.y - ref.y, z: ship.velocity.z - ref.z };
+          const sp0 = vecLength(rel);
+          const v = rotateVecByQuat(rel, axisAngleQuat(ax, wm * dt));
+          const sp1 = Math.hypot(v.x, v.y, v.z) || 1;
+          ship.velocity.x = ref.x + (v.x / sp1) * sp0; ship.velocity.y = ref.y + (v.y / sp1) * sp0; ship.velocity.z = ref.z + (v.z / sp1) * sp0;
+        }
       }
     }
     // v88: ロールの操作中は、境界面もロールする（面の「上」を艦の上へ合わせる）。v87 で境界面とのずれを
@@ -359,11 +376,13 @@ const GravityDrive = {
 
     // 竜骨: 船の向き以外へ進む速度（横滑り・上下）を数秒で打ち消す（横・上下へ動かしている間はしない）
     const f = rotateVecByQuat({ x: 0, y: 0, z: -1 }, ship.quaternion);
-    const vf = vecDot(ship.velocity, f);
+    const ref = this._refV(); // v89: 演習中は、演習の基準に対する速度の横滑りを打ち消す（軌道の速度は消さない）
+    const rv = { x: ship.velocity.x - ref.x, y: ship.velocity.y - ref.y, z: ship.velocity.z - ref.z };
+    const vf = vecDot(rv, f);
     const kk = 1 - Math.exp(-dt / this.KEEL_TIME);
-    ship.velocity.x -= (ship.velocity.x - f.x * vf) * kk;
-    ship.velocity.y -= (ship.velocity.y - f.y * vf) * kk;
-    ship.velocity.z -= (ship.velocity.z - f.z * vf) * kk;
+    ship.velocity.x -= (rv.x - f.x * vf) * kk;
+    ship.velocity.y -= (rv.y - f.y * vf) * kk;
+    ship.velocity.z -= (rv.z - f.z * vf) * kk;
   },
   // v86: 艦の向きが境界面から MAX_TILT より大きくずれたら、MAX_TILT のところで止める
   // （ずれが広がる向きの回転も止める）。姿勢を積分したあとに呼ぶ

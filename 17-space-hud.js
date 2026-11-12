@@ -414,7 +414,9 @@ const SpaceHud = {
         this._els.speed.textContent = `${w.autopilot ? '自動航行' : 'ワープ'}中: ${this.formatSpeed(w.speed)}${ikn}${th}`;
       }
     } else {
-      const v = vecLength(ship.velocity);
+      // v89: 演習中は、最高速度と比べる速さ（機関で出した速さ）を出す
+      const cs = typeof Weapons !== 'undefined' && Weapons.combatSpeed ? Weapons.combatSpeed() : null;
+      const v = cs !== null ? cs : vecLength(ship.velocity);
       const ikn = ship.gravityDrive && v >= 1000 ? `（${this.formatIKn(v)}）` : '';
       this._els.speed.textContent = `速度: ${this.formatSpeed(v)}${ikn}${w.status ? ' ・ ' + w.status : ''}`;
     }
