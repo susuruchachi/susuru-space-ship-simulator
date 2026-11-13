@@ -413,7 +413,16 @@ const WeaponRig = {
     for (const [l, list] of byLabel) {
       const bones = list.filter((o) => o.isBone);
       const pick = bones.length ? bones : list.filter((o) => !list.some((x) => x !== o && this._isAncestor(o, x)));
-      for (const o of pick) directors.push(this._makeDirector(uniqueKey(l), l, o));
+      for (let o of pick) {
+        // v89: 名前がアーマチュア（入れ物）に付いていて、中のボーンは別の名前（「ボーン」など）のモデル:
+        //   入れ物は原点にあるので、回す中心・視点の位置には、中のボーン（いちばん上の、重みの無い neutral_bone 以外）を使う
+        if (!o.isBone) {
+          let bone = null;
+          o.traverse((c) => { if (!bone && c.isBone && !/neutral_bone/i.test(c.name)) bone = c; });
+          if (bone) o = bone;
+        }
+        directors.push(this._makeDirector(uniqueKey(l), l, o));
+      }
     }
     return { mounts, directors };
   },
@@ -446,9 +455,11 @@ const WeaponRig = {
     const Y = new THREE.Vector3(0, 1, 0);
     const rest = node.quaternion.clone();
     let F = Y.clone().applyQuaternion(rest);
-    // 旋回の軸は親の上（+Y）。向き（ボーンのY軸）がほぼ真上なら、親の -Z（艦首側）を向きとする
+    // 旋回の軸は親の上（+Y）。向き（ボーンのY軸）がほぼ真上なら、ボーンの +X を正面とする
+    //   （v89: 以前は親の -Z に決め打ちで、ボーンを前後逆に置いた後ろ向きの台も同じ向きになっていた）
     const U = Y.clone();
     F.addScaledVector(U, -F.dot(U));
+    if (F.lengthSq() < 1e-6) { F = new THREE.Vector3(1, 0, 0).applyQuaternion(rest); F.addScaledVector(U, -F.dot(U)); }
     if (F.lengthSq() < 1e-6) F = new THREE.Vector3(0, 0, -1);
     F.normalize();
     return { key, label, node, rest, U, F, yaw: 0, kind: 'director' };
