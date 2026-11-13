@@ -1096,7 +1096,8 @@ const Weapons = {
             const up = Math.min(eMaxR, e0 + re), dn = Math.max(eMinR, e0 - re);
             cands.push([yawN, up], [y0, up], [yawN, dn]);
           }
-          cands.push([y0, elevN]);
+          // その場で仰角だけ変える。旋回したいのにつかえているときは、下げない（越えるために上げた砲身を、次のフレームで下げ直してしまう）
+          if (yawN === y0 || elevN >= e0) cands.push([y0, elevN]);
         }
         let moved = false, direct = false;
         for (let ci = 0; ci < cands.length; ci++) {
@@ -1106,6 +1107,22 @@ const Weapons = {
           if (avoid) { m.turret.updateMatrixWorld(true); if (WeaponRig.barrelHits(this._occ, m)) continue; }
           yaw = cy; elev = ce; moved = true; direct = ci === 0;
           break;
+        }
+        // v89: どれもめり込むとき、砲身をもっと上げれば越えられるなら、その仰角までその場で上げる。
+        //   1回ぶんだけ上げた姿勢が、格子の小さな出っ張りにかかっていると、上げることもできずに止まったままになり、
+        //   目標が反対側へ回ってから逆回りで戻っていた（旋回範囲が全周の砲でも、折り返して見えた）
+        //   （仰角だけをわずかに追従できた場合も、旋回は進んでいないので、同じく上げて越える）
+        if (avoid && yawN !== y0 && (!moved || (yaw === y0 && elev < e0 + re * 0.5))) {
+          moved = false;
+          const eMaxR = toRadW(c.elevMax), stepE = toRadW(2);
+          const hits = (y, e) => { WeaponRig.setMountAngles(m, y, e); m.turret.updateMatrixWorld(true); return WeaponRig.barrelHits(this._occ, m); };
+          for (let E = e0 + stepE; E <= eMaxR + 1e-9; E += stepE) {
+            if (hits(yawN, E) || hits(y0, E)) continue;
+            yaw = y0; elev = Math.min(E, e0 + Math.max(re, 1e-6));
+            WeaponRig.setMountAngles(m, yaw, elev);
+            moved = true;
+            break;
+          }
         }
         if (!moved) {
           // どれもめり込む: いまの向きがもうめり込んでいるなら（設定を変えた直後など）、まっすぐ動かして抜け出す
