@@ -543,7 +543,7 @@ const WeaponRig = {
     const barrelInfo = new Map();
     for (const m of rig.mounts) for (const br of m.barrels) {
       const BM = new THREE.Matrix4().multiplyMatrices(inv, br.node.matrixWorld);
-      barrelInfo.set(br.node, { p: new THREE.Vector3().setFromMatrixPosition(BM), d: new THREE.Vector3(0, 1, 0).transformDirection(BM), len: 0 });
+      barrelInfo.set(br.node, { p: new THREE.Vector3().setFromMatrixPosition(BM), d: new THREE.Vector3(0, 1, 0).transformDirection(BM), len: 0, pts: [], BM });
     }
     // v89: 砲塔の屋根の高さ（砲塔の付け根から、砲塔の上向きに測った砲塔の部品のいちばん高いところ）。砲塔の視点をその少し上に置く
     const turretInfo = rig.mounts.map((m) => {
@@ -598,6 +598,7 @@ const WeaponRig = {
           if (!info) continue;
           place(vtx, vi).sub(info.p);
           info.len = Math.max(info.len, vtx.dot(info.d));
+          info.pts.push(vtx.x, vtx.y, vtx.z);
         }
       }
       const triCount = index ? index.count / 3 : pos.count / 3;
@@ -620,9 +621,41 @@ const WeaponRig = {
     const scale = new THREE.Vector3().setFromMatrixScale(root.matrixWorld).x;
     const barrelLen = new Map();
     for (const [node, info] of barrelInfo) if (info.len > 0) barrelLen.set(node, info.len * scale);
+    // v89: 砲口の位置（砲身のボーンの座標）と、砲身の実際の向き。ボーンの軸が砲身の中心を通っていないモデルでは、
+    //   「ボーンの付け根 + ボーンの向き × 長さ」が砲口からずれ、光線・閃光が砲口の横や後ろから出ていた。
+    //   砲身の先のほう（長さの 85% より先）の頂点の中心を砲口とし、根元側（15〜35%）の中心から砲口への向きを砲身の向きとする
+    const barrelTip = new Map();
+    for (const [node, info] of barrelInfo) {
+      if (!(info.len > 0) || info.pts.length < 9) continue;
+      const tip = new THREE.Vector3(), base = new THREE.Vector3();
+      let nt = 0, nb = 0;
+      for (let i = 0; i < info.pts.length; i += 3) {
+        const t = (info.pts[i] * info.d.x + info.pts[i + 1] * info.d.y + info.pts[i + 2] * info.d.z) / info.len;
+        if (t > 0.85) { tip.x += info.pts[i]; tip.y += info.pts[i + 1]; tip.z += info.pts[i + 2]; nt++; }
+        else if (t > 0.15 && t < 0.35) { base.x += info.pts[i]; base.y += info.pts[i + 1]; base.z += info.pts[i + 2]; nb++; }
+      }
+      if (!nt) continue;
+      tip.divideScalar(nt);
+      // 砲口の面まで延ばす（中心は先のほうの頂点の平均、長さは測った長さ）
+      const perp = tip.clone().addScaledVector(info.d, -tip.dot(info.d));
+      const mz = info.d.clone().multiplyScalar(info.len).add(perp).add(info.p);
+      const BMi = new THREE.Matrix4().copy(info.BM).invert();
+      const rec = { local: mz.clone().applyMatrix4(BMi), off: perp.length() * scale, axisLocal: null, axisDeg: 0 };
+      if (nb) {
+        base.divideScalar(nb);
+        const ax = tip.clone().sub(base);
+        if (ax.lengthSq() > 1e-9) {
+          ax.normalize();
+          rec.axisDeg = (Math.acos(clamp(ax.dot(info.d), -1, 1)) * 180) / Math.PI;
+          rec.axisLocal = ax.clone().transformDirection(BMi);
+        }
+      }
+      barrelTip.set(node, rec);
+      info.pts = null;
+    }
     const turretTop = new Map();
     rig.mounts.forEach((m, k) => { if (turretInfo[k].top > 0) turretTop.set(m.turret, turretInfo[k].top * scale); });
-    return { grid, nx, ny, nz, cell, min, root, barrelLen, turretTop, cellWorld: cell * scale };
+    return { grid, nx, ny, nz, cell, min, root, barrelLen, barrelTip, turretTop, cellWorld: cell * scale };
   },
   // v89: 世界の線分 a→b が船体（格子のどこか）に当たるか。当たればその世界の点。格子の箱の中だけをたどる
   segmentHitsGrid(occ, a, b) {
@@ -824,7 +857,7 @@ const Weapons = {
     // 画面の番号: 並び順（名前の頭の数字の順。「1番主砲」…「12番主砲」、次に副砲など）の通し番号
     rig.mounts.forEach((m, k) => { m.num = k + 1; m.index = k; m.state = 'none'; });
     try { this._occ = WeaponRig.buildOcclusion(modelRoot, rig); } catch (e) { console.warn('射線の判定の準備に失敗しました', e); this._occ = null; }
-    if (this._occ) for (const m of rig.mounts) for (const b of m.barrels) b.length = this._occ.barrelLen.get(b.node) || null;
+    if (this._occ) for (const m of rig.mounts) for (const b of m.barrels) { b.length = this._occ.barrelLen.get(b.node) || null; b.tip = (this._occ.barrelTip && this._occ.barrelTip.get(b.node)) || null; }
     this._restMeasured = false; // v89: 砲身の元の向きでの当たり（measureBarrelRest）は、最初の更新のときに測る（読み込み直後は部品の行列がまだ決まっていない）
     try { this._buildInset(modelRoot, rig); } catch (e) { console.warn('照準の小さな艦の図の準備に失敗しました', e); this._inset = null; }
     // 自動射撃: mode 'off' 切 / 'max' 最大（満タンで撃つ）/ 'set' 設定した出力（レーザーがその割合まで充電できたら撃つ）
@@ -3488,6 +3521,8 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
     b.node.getWorldQuaternion(q);
     const dir = new THREE.Vector3(0, 1, 0).applyQuaternion(q).normalize();
     if (pivot) return { pos, dir };
+    // v89: 砲口: モデルの砲身の先の中心（ボーンの軸が砲身の中心からずれていても、砲口ぴったりから出る）
+    if (b.tip) return { pos: b.node.localToWorld(b.tip.local.clone()), dir };
     // 砲口: 砲身の付け根から、モデルで測った砲身の長さの先（測れなければ「口径の45倍」）
     const len = b.length > 0 ? b.length : (m.cfg.caliber / 1000) * 45;
     return { pos: pos.addScaledVector(dir, len), dir };
@@ -3542,12 +3577,24 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
   // 光線の見た目。follow（{ mount, barrel }）があれば砲身に付いて動く。撃った瞬間から pos に置く
   //   （以前は次の更新まで座標の原点にあり、原点から出た光線が描かれることがあった）
   _spawnBeamFx(pos, dir, len, r, color, life, follow, base) {
-    const geo = new THREE.CylinderGeometry(r, r, len, 8, 1, true);
-    geo.translate(0, len / 2, 0);
+    // v89: 筒は、手前ほど細かく区切って作る（砲口から 20 m、そこから 5 倍ずつ…射程まで）。
+    //   以前は射程いっぱい（数万 km）を1枚の細長い面で作っていたため、描くときの桁落ちで、砲口のあたりで筒が数 m ずれて
+    //   見えたり、砲口より後ろへ突き抜けて見えたりしていた（芯の白い線は2点だけなので合っていた）
+    const ys = [0];
+    for (let y = Math.min(len, 20); y < len; y *= 5) ys.push(y);
+    ys.push(len);
+    const N = ys.length - 1;
+    const geo = new THREE.CylinderGeometry(r, r, 1, 8, N, true);
+    {
+      const p = geo.attributes.position;
+      for (let i = 0; i < p.count; i++) p.setY(i, ys[clamp(Math.round((p.getY(i) + 0.5) * N), 0, N)]);
+      p.needsUpdate = true;
+      geo.computeBoundingSphere();
+    }
     const op = base === undefined ? 0.9 : base;
     const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: op, blending: THREE.AdditiveBlending, depthWrite: false });
     const beam = new THREE.Mesh(geo, mat);
-    const core = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, len, 0)]),
+    const core = new THREE.Line(new THREE.BufferGeometry().setFromPoints(ys.map((y) => new THREE.Vector3(0, y, 0))),
       new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
     const g = new THREE.Group();
     g.add(beam); g.add(core);
