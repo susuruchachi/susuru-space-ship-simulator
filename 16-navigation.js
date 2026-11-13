@@ -25,6 +25,7 @@
 
 const Navigation = {
   HOME_ALTITUDE_KM: 2000,
+  HOME_LEAVE_DIST: 150e3, // v89: 母港のフレームのまま離れてよい距離 [m]（戻るのは 100 km 以内）
   // 母港の向き: 地球の中心が「前方から何度下」に見えるか
   HOME_EARTH_BELOW_DEG: 70,
 
@@ -1447,6 +1448,18 @@ const Navigation = {
     if (!ship) return;
     if (!this.warp.active) this._guardSurface(false);
     this._shipU = this.shipUniverse();
+    // v89: 母港のフレームのまま通常航行で遠くへ行くと（惑星へ降りるなど）、座標が数千 km になり、描くときの桁落ちで
+    //   艦がばらばらに崩れて見えていた。母港から 150 km より離れたら、ほかの場所と同じ「艦の近くを原点にしたフレーム」へ
+    //   乗り換える（速度はそのまま。ここから先は、母港の外と同じ飛び方 = スロットルは推力の割合・重力で軌道を回る）。
+    //   100 km 以内へ戻ってきたら、母港のフレームへ戻す
+    if (!this.warp.active && !this.approach && !this.departure && !this.arrivalHold && this.homeFrame) {
+      if (this.frame.isHome) {
+        const d = Math.hypot(ship.position.x, ship.position.y, ship.position.z);
+        if (d > this.HOME_LEAVE_DIST && !(ship.autoDockingEnabled && ship._dockingPhase)) this._rebaseToDominantBody(false, true);
+      } else if (this.frame.bodyId === this.homeFrame.bodyId && !(typeof PRACTICE_MODE !== 'undefined' && PRACTICE_MODE)) {
+        this.goHomeFrameIfNear(true);
+      }
+    }
     // 母港以外のフレームでは、原点から離れすぎたら原点を艦に寄せ直す
     // （噴射粒子など float32 で保持される座標の精度を保つため）
     if (!this.frame.isHome && !this.warp.active) {
