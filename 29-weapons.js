@@ -2080,12 +2080,15 @@ const Weapons = {
       let aMax = typeof ThrusterSolver !== 'undefined' && ThrusterSolver._estimateMaxLinearDecel ? ThrusterSolver._estimateMaxLinearDecel(ship) : 10;
       if (ship.maxAccel > 0) aMax = Math.min(aMax, ship.maxAccel);
       const T = 2.0, dead = 0.03;
-      const cmd = (v) => { const r = clamp(v / (Math.max(1e-3, aMax) * T), -1, 1); return Math.abs(r) < dead ? 0 : r; };
+      // v89: 噴かない幅は、推力の割合（3%）と速度の差（0.5 m/s）の小さいほうで決める。加速のとても大きい艦
+      //   （重力場機関の艦は数十万 m/s² 出せる）では、数 km/s の差でも推力の割合が 3% に届かず、まったく動かなかった
+      const vDead = Math.min(dead * Math.max(1e-3, aMax) * T, 0.5);
+      const cmd = (v) => (Math.abs(v) < vDead ? 0 : clamp(v / (Math.max(1e-3, aMax) * T), -1, 1));
       const tgt = { f: cmd(-dvL.z), x: cmd(dvL.x), y: cmd(dvL.y) };
       const prev = this._mvOut || { f: 0, x: 0, y: 0 };
       const g = 1 - Math.exp(-dt / 0.25);
       this._mvOut = { f: prev.f + (tgt.f - prev.f) * g, x: prev.x + (tgt.x - prev.x) * g, y: prev.y + (tgt.y - prev.y) * g };
-      const z = (v) => (Math.abs(v) < dead * 0.5 ? 0 : v);
+      const z = (v) => (Math.abs(v) < Math.min(dead * 0.5, (vDead * 0.5) / (Math.max(1e-3, aMax) * T)) ? 0 : v);
       out.thrustForward = z(this._mvOut.f);
       out.thrustStrafeX = z(this._mvOut.x);
       out.thrustStrafeY = z(this._mvOut.y);
