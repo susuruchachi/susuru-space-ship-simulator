@@ -1991,7 +1991,22 @@ const Weapons = {
   // v89: 演習中の最高速度。母港の外では、重力で回る軌道を壊さないように最高速度で丸めていない（軌道の速さは最高速度より
   //   ずっと速い）ので、演習中は「重力に任せて落ちている基準」に対する速さ（= 機関で出した速さ）を最高速度までに抑える。
   //   基準は、演習の海域に着いたときの速度から始め、重力のぶんだけ一緒に変える
+  MANEUVER_SLIDE_ACCEL: 150, // 重力場機関の艦が、自動操艦で滑って動くときの加速度の上限 [m/s²]
+  maneuverStep(ship, h) {
+    const tv = this._mvSlide;
+    if (!tv || !this.autoManeuver || !this._practiceOn()) return;
+    const v = ship.velocity;
+    const dx = tv.x - v.x, dy = tv.y - v.y, dz = tv.z - v.z;
+    const d = Math.hypot(dx, dy, dz);
+    if (d < 1e-6) return;
+    let a = this.MANEUVER_SLIDE_ACCEL;
+    if (ship.maxAccel > 0) a = Math.min(a, ship.maxAccel);
+    // 近づくほどゆるめる（行き過ぎない）
+    const k = Math.min(1, (Math.min(a, d / 1.0) * h) / d);
+    v.x += dx * k; v.y += dy * k; v.z += dz * k;
+  },
   combatSpeedCap(ship, g, h) {
+    this.maneuverStep(ship, h);
     const on = this._practiceOn() && Number.isFinite(ship.maxSpeed) && ship.maxSpeed > 0
       && typeof Navigation !== 'undefined' && Navigation.newtonianFlight && Navigation.newtonianFlight()
       && !(Navigation.approach || Navigation.departure) && !(typeof Planetfall !== 'undefined' && Planetfall.active && Planetfall.active.contact);
@@ -2022,25 +2037,66 @@ const Weapons = {
     const userMove = Math.abs(input.thrustForward) >= 0.02 || Math.abs(input.thrustStrafeX) >= 0.05 || Math.abs(input.thrustStrafeY) >= 0.05;
     // 巡航の速度: 自動操艦が艦を動かしているあいだは、自動操艦に入ったときの速度（巡航）を保ち、その上に敵へ近づく・離れる分だけを足す。
     // 敵はこの巡航の速度に合わせて動くので、自動操艦の近づく・離れるが間合いに効く（レバーを使っている・切のときは今の速度）
-    if (!this.autoManeuver || userMove || !this._practiceOn()) { this._cruiseV = null; this._mvOut = null; }
+    if (!this.autoManeuver || userMove || !this._practiceOn()) { this._cruiseV = null; this._mvOut = null; this._mvSlide = null; }
     if (!this.autoManeuver || !this._practiceOn() || !this.rig || !ship.mesh) return input;
     if (typeof Navigation !== 'undefined' && (Navigation.isWarping() || Navigation.approach || Navigation.departure)) return input;
     const P = this.practice;
     const sp = new THREE.Vector3(ship.position.x, ship.position.y, ship.position.z);
     // 目標の方向（近いほど・大きな艦ほど重く）と、敵までの距離（耐久で重みづけ。まわりを飛ぶ攻撃機に引っぱられないように）
     const D = new THREE.Vector3();
-    let wsum = 0, dsum = 0;
+    let wsum = 0, dsum = 0, farD = -1, farDir = null, farT = null, keepD = -1, keepDir = null, nearD = Infinity;
+    // v89: 艦（戦艦〜駆逐艦・空母）が残っているあいだは、艦だけを相手に間合いを取る。攻撃機・ミサイルは数えない
+    //   （すぐそばを回る攻撃機が何機もいると、まとまりまでの距離が「近すぎる」と出て、接近を選んでも
+    //   攻撃機から逃げる向き＝敵の艦隊から離れる向きへ動き続けていた）
+    const hasShips = P.targets.some((t) => t.alive && !t.temp && t.cls !== 'ac' && t.cls !== 'ms');
     for (const t of P.targets) {
       if (!t.alive) continue;
+      if (hasShips && (t.temp || t.cls === 'ac' || t.cls === 'ms')) continue;
       const r = t.pos.clone().sub(sp);
       const d = Math.max(1000, r.length());
       const w = (t.hpMax || 100) / d;
-      D.addScaledVector(r.normalize(), w);
+      const rn = r.normalize();
+      D.addScaledVector(rn, w);
       wsum += w; dsum += d * w;
+      if (d > farD) { farD = d; farDir = rn.clone(); farT = t; }
+      if (t === this._mvFar) { keepD = d; keepDir = rn.clone(); }
+      if (d < nearD) nearD = d;
     }
     if (wsum <= 0 || D.lengthSq() < 1e-12) return input;
     D.normalize();
-    const dist = dsum / wsum;
+    // v89: 間合いを測る相手: 接近 = いちばん遠い敵（全部の敵を射程に入れる。向かう向きもその敵へ）、
+    //   離す = いちばん近い敵、維持 = 敵のまとまり（近いほど・大きいほど重く）。
+    //   以前はどれも「まとまり」で測っていたため、近くに小型艦がいると、接近を選んでも遠くの大型艦へは近づかなかった
+    let dist = dsum / wsum;
+    if (this.maneuverMode === 'close' && farDir) {
+      // 相手がころころ替わらないように、いまの相手より 25% 以上遠い敵が出たときだけ替える
+      if (keepDir && farD < keepD * 1.25) { farD = keepD; farDir = keepDir; } else this._mvFar = farT;
+      dist = farD; D.copy(farDir);
+    }
+    else if (this.maneuverMode === 'open') dist = nearD;
+    // 出したい速度の変化（今のフレームの座標）と、出せる加速度（前後 = 主機・逆噴射、横・上下 = 姿勢スラスター）
+    let dvW = null, aMax = 10, aLat = 10;
+    if (!userMove) {
+      const sv0 = new THREE.Vector3(ship.velocity.x, ship.velocity.y, ship.velocity.z);
+      if (!this._cruiseV) this._cruiseV = sv0.clone();
+      const want = this._maneuverDistance();
+      // 接近・離すは速く（3 km/s まで）。離すときは、足の遅い大型艦からは離れられるが、速い攻撃機は追いついてくる
+      const vmax = this.maneuverMode === 'keep' ? 150 : 3000;
+      const vdes = clamp((dist - want) * (this.maneuverMode === 'keep' ? 0.05 : 0.1), -vmax, vmax);
+      const tv = this._cruiseV.clone().addScaledVector(D, vdes);
+      // v89: 最高速度を決めている艦は、自動操艦も最高速度までしか出さない
+      if (this._capRef && Number.isFinite(ship.maxSpeed)) { const rel = tv.clone().sub(this._capRef); if (rel.length() > ship.maxSpeed * 0.98) tv.copy(this._capRef).add(rel.setLength(ship.maxSpeed * 0.98)); }
+      dvW = tv.sub(sv0);
+      if (typeof ThrusterSolver !== 'undefined') {
+        if (ThrusterSolver._estimateMaxLinearDecel) aMax = ThrusterSolver._estimateMaxLinearDecel(ship);
+        aLat = ThrusterSolver._estimateMaxLateralDecel ? ThrusterSolver._estimateMaxLateralDecel(ship) : aMax;
+      }
+      if (ship.maxAccel > 0) { aMax = Math.min(aMax, ship.maxAccel); aLat = Math.min(aLat, ship.maxAccel); }
+    }
+    // v89: 重力場機関の艦は、艦の向きを変えずに、境界面に沿って滑るようにどの向きへも動ける。主機は強いが姿勢スラスターでは
+    //   横・上下へほとんど動けないので、砲を向ける向き（たいてい横腹）のままでは敵の方へ進めなかった。
+    //   自動操艦が出したい速度へ、決まった加速度（MANEUVER_SLIDE_ACCEL まで）で直接合わせる（maneuverStep）
+    this._mvSlide = dvW && ship.gravityDrive ? dvW.clone().add(new THREE.Vector3(ship.velocity.x, ship.velocity.y, ship.velocity.z)) : null;
     this._mvT = (this._mvT || 0) - dt;
     if (this._mvT <= 0 || !this._mvQ) { this._mvT = 1.5; this._mvQ = this._bestManeuverQuat(ship, D); }
     const out = { ...input };
@@ -2063,35 +2119,25 @@ const Weapons = {
       out.attitudeHold = true;
     }
     // 動かす: まとまりまでの距離を、主砲の射程の 45%（3〜15 km）に保つ（スロットルレバーを使っていなければ）
-    if (!userMove) {
-      const sv = new THREE.Vector3(ship.velocity.x, ship.velocity.y, ship.velocity.z);
-      if (!this._cruiseV) this._cruiseV = sv.clone();
-      const want = this._maneuverDistance();
-      // 接近・離すは速く（3 km/s まで）。離すときは、足の遅い大型艦からは離れられるが、速い攻撃機は追いついてくる
-      const vmax = this.maneuverMode === 'keep' ? 150 : 3000;
-      const vdes = clamp((dist - want) * (this.maneuverMode === 'keep' ? 0.05 : 0.1), -vmax, vmax);
-      const tv = this._cruiseV.clone().addScaledVector(D, vdes);
-      // v89: 最高速度を決めている艦は、自動操艦も最高速度までしか出さない
-      if (this._capRef && Number.isFinite(ship.maxSpeed)) { const rel = tv.clone().sub(this._capRef); if (rel.length() > ship.maxSpeed * 0.98) tv.copy(this._capRef).add(rel.setLength(ship.maxSpeed * 0.98)); }
-      const dv = tv.sub(sv);
-      const dvL = dv.applyQuaternion(new THREE.Quaternion(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w).invert());
-      // v89: 推力は「速度の差 ÷（出せる加速度 × 2秒）」の比例で、小さな差（3%未満）は噴かない。出力もなめらかに変える。
-      //   以前は速度の差 ÷ 30 m/s で決めていたため、加速の大きい艦（Hood など）では毎フレーム行き過ぎ、前進と逆噴射を細かく繰り返していた
-      let aMax = typeof ThrusterSolver !== 'undefined' && ThrusterSolver._estimateMaxLinearDecel ? ThrusterSolver._estimateMaxLinearDecel(ship) : 10;
-      if (ship.maxAccel > 0) aMax = Math.min(aMax, ship.maxAccel);
+    if (dvW) {
+      const dvL = dvW.clone().applyQuaternion(new THREE.Quaternion(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w).invert());
+      // v89: 推力は「速度の差 ÷（出せる加速度 × 2秒）」の比例で、出力もなめらかに変える。前後は主機・逆噴射の加速度、
+      //   横・上下は姿勢スラスターの加速度で割る（以前は横・上下も主機の加速度で割っていたため、横の力の弱い艦では
+      //   横・上下の指示がほぼ 0 になっていた）。噴かない幅は、推力の割合（3%）と速度の差（0.5 m/s）の小さいほう
+      //   （加速のとても大きい艦では、数 km/s の差でも推力の割合が 3% に届かず、まったく動かなかった）
       const T = 2.0, dead = 0.03;
-      // v89: 噴かない幅は、推力の割合（3%）と速度の差（0.5 m/s）の小さいほうで決める。加速のとても大きい艦
-      //   （重力場機関の艦は数十万 m/s² 出せる）では、数 km/s の差でも推力の割合が 3% に届かず、まったく動かなかった
-      const vDead = Math.min(dead * Math.max(1e-3, aMax) * T, 0.5);
-      const cmd = (v) => (Math.abs(v) < vDead ? 0 : clamp(v / (Math.max(1e-3, aMax) * T), -1, 1));
-      const tgt = { f: cmd(-dvL.z), x: cmd(dvL.x), y: cmd(dvL.y) };
+      const mk = (a) => { const A = Math.max(1e-3, a) * T; const vd = Math.min(dead * A, 0.5); return { A, vd, cmd: (v) => (Math.abs(v) < vd ? 0 : clamp(v / A, -1, 1)), zero: Math.min(dead * 0.5, (vd * 0.5) / A) }; };
+      const KF = mk(aMax), KL = mk(aLat);
+      // 横・上下は半分までにして、姿勢の制御のぶんを残す（弱い姿勢スラスターを全開にすると、姿勢の制御と取り合いになり、艦が回り続ける）
+      const sl = !!this._mvSlide; // 滑って動く艦は、噴かない
+      const tgt = { f: sl ? 0 : KF.cmd(-dvL.z), x: sl ? 0 : KL.cmd(dvL.x) * 0.5, y: sl ? 0 : KL.cmd(dvL.y) * 0.5 };
       const prev = this._mvOut || { f: 0, x: 0, y: 0 };
       const g = 1 - Math.exp(-dt / 0.25);
       this._mvOut = { f: prev.f + (tgt.f - prev.f) * g, x: prev.x + (tgt.x - prev.x) * g, y: prev.y + (tgt.y - prev.y) * g };
-      const z = (v) => (Math.abs(v) < Math.min(dead * 0.5, (vDead * 0.5) / (Math.max(1e-3, aMax) * T)) ? 0 : v);
-      out.thrustForward = z(this._mvOut.f);
-      out.thrustStrafeX = z(this._mvOut.x);
-      out.thrustStrafeY = z(this._mvOut.y);
+      const z = (v, K) => (Math.abs(v) < K.zero ? 0 : v);
+      out.thrustForward = z(this._mvOut.f, KF);
+      out.thrustStrafeX = z(this._mvOut.x, KL);
+      out.thrustStrafeY = z(this._mvOut.y, KL);
     }
     return out;
   },
