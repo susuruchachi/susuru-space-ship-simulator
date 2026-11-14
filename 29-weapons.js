@@ -2189,6 +2189,7 @@ const Weapons = {
       const g = 1 - Math.exp(-dt / 0.25);
       this._mvOut = { f: prev.f + (tgt.f - prev.f) * g, x: prev.x + (tgt.x - prev.x) * g, y: prev.y + (tgt.y - prev.y) * g };
       const z = (v, K) => (Math.abs(v) < K.zero ? 0 : v);
+      out.thrustIsForce = true; // v89: 自動操艦の前後の値は、機関の出力の割合（レバーの「速度」モードでも）
       out.thrustForward = z(this._mvOut.f, KF);
       out.thrustStrafeX = z(this._mvOut.x, KL);
       out.thrustStrafeY = z(this._mvOut.y, KL);

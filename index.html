@@ -139,6 +139,15 @@
     background: rgba(255,255,255,0.35);
     border-color: rgba(255,255,255,0.85);
   }
+  /* v89: レバーの意味の切り替え（レバーのすぐ上の小さなボタン）。緑 = 速度（最高速度に対する割合）、橙 = 出力（機関の出力の割合） */
+  .btn-lever-mode {
+    position: fixed; left: 32px; bottom: 210px; width: 56px; height: 18px; padding: 0;
+    border-radius: 6px; font-size: 10px; line-height: 16px; font-weight: 600; letter-spacing: 0.05em;
+    color: #082a12; background: #5fe08a; border: 1px solid #b6ffd0; touch-action: manipulation; z-index: 3;
+  }
+  .btn-lever-mode.thrust { color: #2a1404; background: #ffa94a; border-color: #ffd9a8; }
+  .btn-lever-mode.fixed { opacity: 0.55; }
+  body.clean-view .btn-lever-mode, body.map-open .btn-lever-mode { display: none; }
   .throttle-lever-label {
     position: absolute;
     left: 0;
@@ -751,6 +760,7 @@
     .hud-docking-log-controls { top: auto; bottom: 236px; right: 6px; }
     .hud-side-menu { top: 210px; }
     .throttle-lever { left: 12px; bottom: 24px; width: 52px; height: 150px; }
+    .btn-lever-mode { left: 12px; bottom: 178px; width: 52px; }
     .btn-roll-left, .btn-roll-right { left: 72px; width: 52px; height: 38px; }
     .btn-roll-left { bottom: 70px; }
     .btn-roll-right { bottom: 24px; }
@@ -766,6 +776,7 @@
     .hud-side-menu { top: 52px; }
     .side-menu-panel { max-height: calc(100vh - 64px); overflow-y: auto; }
     .throttle-lever { left: 12px; bottom: 22px; width: 48px; height: 118px; }
+    .btn-lever-mode { left: 12px; bottom: 144px; width: 48px; height: 16px; line-height: 14px; }
     .btn-roll-left, .btn-roll-right { left: 68px; width: 52px; height: 36px; }
     .btn-roll-left { bottom: 66px; }
     .btn-roll-right { bottom: 22px; }
@@ -1594,6 +1605,7 @@ function initGame() {
   State.settings.showApproachGuides = persisted.showApproachGuides ?? true;
   // v41: 予定航路の線の表示/非表示。showApproachGuidesとは別トグル。
   State.settings.showRouteLine = persisted.showRouteLine ?? true;
+  State.settings.leverMode = persisted.leverMode === 'thrust' ? 'thrust' : 'speed'; // v89: レバーの意味（レバーの上の小さなボタンで切り替え）
   // v08: RCS最大出力の主機推力に対する上限比率。settings.htmlのみで
   // 変更する運用（ゲーム内HUDには専用UIを設けない）。
   State.settings.rcsThrustCapRatio = persisted.rcsThrustCapRatio ?? 1.0;

@@ -8,7 +8,7 @@
 // v77: 表記を「0.000.000.000」形式に変更（CHANGELOG.md「バージョン番号の
 // 付け方」参照）。左から メジャー.機能バージョン.修正番号.ビルド番号。
 // 機能バージョンは従来の vNN の番号（v77 → 077）。
-const GAME_VERSION = '0.089.000.069';
+const GAME_VERSION = '0.089.000.070';
 
 // v83: iPad・iPhone の Safari は viewport の user-scalable=no を無視し、2本指の
 // ジェスチャーでページ全体を拡大・縮小してしまう（3Dビューのピンチズームと
@@ -388,6 +388,7 @@ const DEFAULT_PERSISTED_SETTINGS = {
   retroDampingEnabled: true, // v10: 並進制動（逆噴射でのX/Y速度キャンセル）専用トグル
   cameraMode: 'chase', // 'chase'（追従）| 'orbit'（自由視点）
   rcsThrustCapRatio: 1.0, // v08: RCS最大出力の主機推力に対する上限比率（1.0=無制限）
+  leverMode: 'speed', // v89: スロットルレバーの意味 'speed'（最高速度に対する速さの割合）| 'thrust'（機関の出力の割合）
   showApproachGuides: true, // v40: 進入軸・目的地ゲートの可視化表示/非表示
   showRouteLine: true, // v41: 予定航路の線の表示/非表示（showApproachGuidesとは独立）。v42: 自動航行の航跡線もこのフラグで一括表示/非表示
 };

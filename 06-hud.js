@@ -30,8 +30,23 @@ const HUD = {
       <button class="btn-roll-left">ROLL-</button>
       <button class="btn-roll-right">ROLL+</button>
       <button class="btn-boost">BOOST</button>
+      <button type="button" class="btn-lever-mode"></button>
     `;
     domRoot.appendChild(wrap);
+    // v89: レバーの意味の切り替え（速度 ⇄ 出力）
+    const lm = wrap.querySelector('.btn-lever-mode');
+    this._leverModeBtn = lm;
+    lm.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const ship = State.ship;
+      if (!(ship && !Number.isFinite(ship.maxSpeed))) { // 最高速度が無制限の艦は出力だけ
+        State.settings.leverMode = State.settings.leverMode === 'thrust' ? 'speed' : 'thrust';
+        if (typeof savePersistedSettings === 'function') savePersistedSettings({ leverMode: State.settings.leverMode });
+      }
+      this._syncLeverMode(true);
+    });
+    this._syncLeverMode(true);
+    setInterval(() => this._syncLeverMode(false), 500);
 
     // ボタン系はタッチ押下状態を dataset.pressed で管理
     // （InputSystem._isPressed() が参照する）
@@ -572,6 +587,23 @@ const HUD = {
   },
 
   // 毎フレーム呼び出し
+  // v89: レバーの意味のボタンの表示（緑「速度」/ 橙「出力」）。最高速度が無制限の艦は、いつも出力
+  _syncLeverMode(force) {
+    const el = this._leverModeBtn;
+    if (!el) return;
+    const ship = State.ship;
+    const fixed = !!(ship && !Number.isFinite(ship.maxSpeed));
+    const thrust = fixed || State.settings.leverMode === 'thrust';
+    const key = `${thrust}|${fixed}`;
+    if (!force && key === this._leverModeKey) return;
+    this._leverModeKey = key;
+    el.textContent = thrust ? '出力' : '速度';
+    el.classList.toggle('thrust', thrust);
+    el.classList.toggle('fixed', fixed);
+    el.title = fixed ? 'この艦は最高速度が無制限なので、レバーは機関の出力の割合です'
+      : thrust ? 'レバー = 機関の出力の割合（押すと「速度」へ）' : 'レバー = 最高速度に対する速さの割合（押すと「出力」へ）';
+  },
+
   update() {
     if (!State.settings.showDebugHud || !this._debugEl) return;
 

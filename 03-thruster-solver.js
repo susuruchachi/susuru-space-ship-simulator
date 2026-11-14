@@ -825,6 +825,10 @@ const ThrusterSolver = {
     // v85: 母港以外で重力があるときは、スロットル = 推力の割合（速度を保つ補助は使わない。
     // 補助が速度を0へ戻そうとすると、重力で回っている軌道が壊れるため）
     const newtonian = typeof Navigation !== 'undefined' && Navigation.newtonianFlight && Navigation.newtonianFlight();
+    // v89: レバーの意味（'speed' 速度 / 'thrust' 出力）。母港の外の「速度」モードは、速度の基準ができてから
+    const refV = newtonian && typeof ShipController !== 'undefined' ? ShipController.refV : null;
+    const speedMode = !!ship && !input.thrustIsForce && !(typeof State !== 'undefined' && State.settings && State.settings.leverMode === 'thrust') && (!newtonian || !!refV);
+    const relVel = ship ? (refV ? { x: ship.velocity.x - refV.x, y: ship.velocity.y - refV.y, z: ship.velocity.z - refV.z } : ship.velocity) : null;
     // v88: 母港からの出港（16-navigation.js departureInput）: 決めた速さで前進する（スロットルの位置は使わない）
     const holdFwd = ship && Number.isFinite(input.holdForwardSpeed) ? input.holdForwardSpeed : null;
     if (holdFwd !== null) {
@@ -832,12 +836,15 @@ const ThrusterSolver = {
       const zError = -holdFwd - localVelForZ.z;
       const fullErr = this._deadbeatFullError(ship, { x: 0, y: 0, z: Math.sign(zError) || 1 }, 5, dt);
       desiredForce.z = Math.sign(zError) * Math.min(1, Math.abs(zError) / fullErr);
-    } else if (ship && (!Number.isFinite(ship.maxSpeed) || newtonian)) {
+    } else if (ship && (!Number.isFinite(ship.maxSpeed) || !speedMode)) {
       // v85: 最高速度が無制限の艦は、スロットル = 推力の割合（離せば慣性で進み続ける）
+      // v89: レバーの「出力」モード（HUD のレバーの上のボタン）も同じ
       desiredForce.z = clamp(-input.thrustForward * boostMult, -1, 1);
     } else if (ship) {
+      // v89: レバーの「速度」モード: スロットル = 最高速度に対する前進の速さの割合。母港の外では、速度の基準
+      //   （重力に任せて落ちていく点・地表の速度。05-ship-controller.js refV）に対する速さで合わせる（軌道は壊さない）
       const targetZSpeed = -input.thrustForward * ship.maxSpeed * boostMult;
-      const localVelForZ = rotateVecByQuat(ship.velocity, conjugateQuat(ship.quaternion));
+      const localVelForZ = rotateVecByQuat(relVel, conjugateQuat(ship.quaternion));
       const zError = targetZSpeed - localVelForZ.z;
       const fullErr = this._deadbeatFullError(ship, { x: 0, y: 0, z: Math.sign(zError) || 1 }, this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR, dt);
       const thrustStrength = Math.min(1, Math.abs(zError) / fullErr);
@@ -854,8 +861,9 @@ const ThrusterSolver = {
     const hasStrafeXInput = Math.abs(input.thrustStrafeX) >= this.STRAFE_INPUT_DEADZONE;
     const hasStrafeYInput = Math.abs(input.thrustStrafeY) >= this.STRAFE_INPUT_DEADZONE;
 
-    if (retroDampingOn && ship && !newtonian && (!hasStrafeXInput || !hasStrafeYInput)) {
-      const localVel = rotateVecByQuat(ship.velocity, conjugateQuat(ship.quaternion));
+    // v89: 母港の外でも、レバーが「速度」モードなら、速度の基準に対する横滑りを打ち消す
+    if (retroDampingOn && ship && (!newtonian || (speedMode && refV)) && (!hasStrafeXInput || !hasStrafeYInput)) {
+      const localVel = rotateVecByQuat(relVel, conjugateQuat(ship.quaternion));
 
       if (!hasStrafeXInput && Math.abs(localVel.x) > this.STRAFE_DAMPING_MIN_SPEED) {
         const fullX = this._deadbeatFullError(ship, { x: -Math.sign(localVel.x), y: 0, z: 0 }, this.STRAFE_DAMPING_FULL_BRAKE_SPEED, dt);

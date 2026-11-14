@@ -879,7 +879,7 @@ const Navigation = {
     }
     const t = this._approachTarget(ship);
     if (!t) { this.approach = null; return input; }
-    const out = { ...input, thrustForward: 0, boost: false, rotateRoll: 0, steerHold: true };
+    const out = { ...input, thrustForward: 0, boost: false, rotateRoll: 0, steerHold: true, thrustIsForce: true }; // v89: 速度は stepApproach が合わせる
     const d = Math.hypot(t.p.x - ship.position.x, t.p.y - ship.position.y, t.p.z - ship.position.z);
     if (d > 30) {
       const steer = this._steerToward(ship, t.pointU);
