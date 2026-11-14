@@ -29,6 +29,26 @@ const ShipController = {
   // 進めなくなるため（60fps・50fpsの端末では従来どおり1フレーム1ステップ）。
   MAX_PHYSICS_STEP: 1 / 50,
 
+  // v89: 速度の基準 refV（今のフレームの座標）。母港の外（重力で動くとき）の「速さ」は、この基準に対して測る:
+  //   宇宙では、重力に任せて落ちていく点の速度（はじめは艦の速度。そのあとは重力のぶんだけ変わる）。
+  //   大気の中・地表の近くでは、地表（と空気）と一緒に動く速度。
+  //   レバーの「速度」モード（目標の速さ）と、演習中の最高速度（29-weapons.js）はこの基準で測る。
+  //   母港のフレーム・ワープ中は使わない（null）。フレームを乗り換えたら同じように写す（16-navigation.js switchFrame）
+  refV: null,
+  _updateRefV(ship, g, h) {
+    const nav = typeof Navigation !== 'undefined' ? Navigation : null;
+    if (!nav || !nav.newtonianFlight || !nav.newtonianFlight()) { this.refV = null; return; }
+    const pf = typeof Planetfall !== 'undefined' ? Planetfall.active : null;
+    if (pf && pf.vs && (pf.contact || pf.alt < pf.top)) { this.refV = { x: pf.vs.x, y: pf.vs.y, z: pf.vs.z }; return; }
+    if (!this.refV) { this.refV = { x: ship.velocity.x, y: ship.velocity.y, z: ship.velocity.z }; return; }
+    if (g) { this.refV.x += g.x * h; this.refV.y += g.y * h; this.refV.z += g.z * h; }
+  },
+  // 基準に対する速度（基準が無ければ、フレームに対する速度）
+  relVelocity(ship) {
+    const r = this.refV, v = ship.velocity;
+    return r ? { x: v.x - r.x, y: v.y - r.y, z: v.z - r.z } : { x: v.x, y: v.y, z: v.z };
+  },
+
   // 毎フレーム呼び出し
   update(dt) {
     const ship = State.ship;
@@ -57,8 +77,10 @@ const ShipController = {
         const stepInput = ship.gravityDrive ? GravityDrive.adjustInput(ship, input) : input;
         FlightPhysics.step(ship, stepInput, h);
         // v85: 天体の重力（16-navigation.js gravityAccel）。ドッキングして固定中は加えない
+        let gNow = null;
         if (typeof Navigation !== 'undefined' && Navigation.gravityAccel && !(ship.autoDockingEnabled && ship._dockingPhase === 'docked')) {
           const g = Navigation.gravityAccel(ship);
+          gNow = g;
           if (g) {
             ship.velocity.x += g.x * h;
             ship.velocity.y += g.y * h;
@@ -66,8 +88,10 @@ const ShipController = {
             ship.gravityAccel = g;
           }
         }
+        // v89: 速度の基準（重力に任せて落ちていく点の速度）を進める
+        this._updateRefV(ship, gNow, h);
         // v89: 演習中は、最高速度を決めている艦は最高速度を超えない（29-weapons.js combatSpeedCap）
-        if (typeof Weapons !== 'undefined' && Weapons.combatSpeedCap) Weapons.combatSpeedCap(ship, ship.gravityAccel, h);
+        if (typeof Weapons !== 'undefined' && Weapons.combatSpeedCap) Weapons.combatSpeedCap(ship, h);
         // v87: 自動航行の通常航行での進入（到着点で止まり切れる速さへ合わせる）
         if (typeof Navigation !== 'undefined' && Navigation.approach) {
           Navigation.stepApproach(ship, h);
@@ -254,7 +278,7 @@ const GravityDrive = {
   },
   // 速度の基準（演習中だけ。ふだんは 0 = フレームに対する速度）
   _refV() {
-    const r = typeof Weapons !== 'undefined' ? Weapons._capRef : null;
+    const r = typeof ShipController !== 'undefined' ? ShipController.refV : null;
     return r ? { x: r.x, y: r.y, z: r.z } : { x: 0, y: 0, z: 0 };
   },
 

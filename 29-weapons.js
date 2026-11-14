@@ -978,7 +978,6 @@ const Weapons = {
     const vc = gm > 0 ? Math.sqrt(gm / dist) : 0;
     ship.velocity = { x: t.x * vc, y: t.y * vc, z: t.z * vc };
     if (ship.boundaryPoint) ship.boundaryPoint = { x: 0, y: 0, z: 0 };
-    this._capRef = null; // 最高速度の基準は、この海域の速度から
     this._arena = { bodyId: body.id, label };
     this._flashStatus(`演習海域: ${label}`);
   },
@@ -2055,16 +2054,20 @@ const Weapons = {
     const k = Math.min(1, (Math.min(a, d / 1.0) * h) / d);
     v.x += dx * k; v.y += dy * k; v.z += dz * k;
   },
-  combatSpeedCap(ship, g, h) {
+  // 速度の基準（05-ship-controller.js refV。重力に任せて落ちていく点・地表の速度）。無ければ null
+  get _capRef() {
+    const r = typeof ShipController !== 'undefined' ? ShipController.refV : null;
+    return r ? new THREE.Vector3(r.x, r.y, r.z) : null;
+  },
+  //   v89: 基準は ShipController.refV（演習の波の合間にも作り直さない。以前は敵が全部いなくなるたびに作り直していたため、
+  //   波が来るたびに最高速度ぶんずつ速くなり、数百〜数千 IKn まで加速していた）
+  combatSpeedCap(ship, h) {
     this.maneuverStep(ship, h);
-    const on = this._practiceOn() && Number.isFinite(ship.maxSpeed) && ship.maxSpeed > 0
-      && typeof Navigation !== 'undefined' && Navigation.newtonianFlight && Navigation.newtonianFlight()
-      && !(Navigation.approach || Navigation.departure) && !(typeof Planetfall !== 'undefined' && Planetfall.active && Planetfall.active.contact);
-    if (!on) { this._capRef = null; return; }
+    const R = typeof ShipController !== 'undefined' ? ShipController.refV : null;
+    const on = !!(this.practice && R) && Number.isFinite(ship.maxSpeed) && ship.maxSpeed > 0
+      && !(Navigation.approach || Navigation.departure);
+    if (!on) return;
     const v = ship.velocity;
-    if (!this._capRef) this._capRef = new THREE.Vector3(v.x, v.y, v.z);
-    const R = this._capRef;
-    if (g) { R.x += g.x * h; R.y += g.y * h; R.z += g.z * h; }
     const rx = v.x - R.x, ry = v.y - R.y, rz = v.z - R.z;
     const sp = Math.hypot(rx, ry, rz);
     ship.isAtMaxSpeed = sp >= ship.maxSpeed * 0.999;
@@ -2076,8 +2079,9 @@ const Weapons = {
   // 演習中の速さ（最高速度と比べる速さ）。演習中でなければ null
   combatSpeed() {
     const ship = State.ship;
-    if (!this._capRef || !ship) return null;
-    return Math.hypot(ship.velocity.x - this._capRef.x, ship.velocity.y - this._capRef.y, ship.velocity.z - this._capRef.z);
+    const R = typeof ShipController !== 'undefined' ? ShipController.refV : null;
+    if (!this.practice || !R || !ship) return null;
+    return Math.hypot(ship.velocity.x - R.x, ship.velocity.y - R.y, ship.velocity.z - R.z);
   },
   maneuverInput(ship, input, dt) {
     const out = this._maneuverInputCore(ship, input, dt);
@@ -3223,15 +3227,7 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
       if (t.rv) { const r = Astro.mat3MulVec(newF.rotT, Astro.mat3MulVec(oldF.rot, t.rv)); t.rv.set(r.x, r.y, r.z); }
       t.mesh.position.copy(np);
     }
-    // 巡航の速度・最高速度の基準も新しいフレームへ（艦の位置で）
-    if (this._capRef) {
-      const sp = State.ship.position;
-      const pOld = nav.universeToLocal(nav.localToUniverse({ x: sp.x, y: sp.y, z: sp.z }, newF), oldF);
-      const vu = Astro.mat3MulVec(oldF.rot, this._capRef);
-      const vo = nav._framePointVelocity(oldF, pOld), vn = nav._framePointVelocity(newF, sp);
-      const v = Astro.mat3MulVec(newF.rotT, { x: vu.x + vo.x - vn.x, y: vu.y + vo.y - vn.y, z: vu.z + vo.z - vn.z });
-      this._capRef.set(v.x, v.y, v.z);
-    }
+    // 巡航の速度も新しいフレームへ（艦の位置で）
     if (this._cruiseV) {
       const sp = State.ship.position;
       const pOld = nav.universeToLocal(nav.localToUniverse({ x: sp.x, y: sp.y, z: sp.z }, newF), oldF);

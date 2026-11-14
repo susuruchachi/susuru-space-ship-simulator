@@ -198,7 +198,7 @@ const Planetfall = {
     }
     this._wasContact = contact;
     const vH = Math.hypot(rel.x - up.x * vVert, rel.y - up.y * vVert, rel.z - up.z * vVert);
-    this.active = { body, alt, up, upU, vVert: contact ? 0 : vVert, vHoriz: vH, state, sea: surf.sea, color: surf.color, rho, air, contact, top, h0 };
+    this.active = { body, alt, up, upU, vVert: contact ? 0 : vVert, vHoriz: vH, state, sea: surf.sea, color: surf.color, rho, air, contact, top, h0, vs };
     this._setVisuals(this.active);
   },
 

@@ -450,6 +450,16 @@ const Navigation = {
         const vn = this._framePointVelocity(newFrame, p);
         v = Astro.mat3MulVec(newFrame.rotT, { x: vu.x + vo.x - vn.x, y: vu.y + vo.y - vn.y, z: vu.z + vo.z - vn.z });
       }
+      // v89: 速度の基準（05-ship-controller.js refV）も同じように写す。速度を運ばない乗り換えでは、作り直す
+      if (typeof ShipController !== 'undefined' && ShipController.refV) {
+        const r = ShipController.refV;
+        if (carry) {
+          const ru = Astro.mat3MulVec(old.rot, r);
+          const vo = this._framePointVelocity(old, ship.position);
+          const vn = this._framePointVelocity(newFrame, p);
+          ShipController.refV = Astro.mat3MulVec(newFrame.rotT, { x: ru.x + vo.x - vn.x, y: ru.y + vo.y - vn.y, z: ru.z + vo.z - vn.z });
+        } else ShipController.refV = null;
+      }
       ship.position = { x: p.x, y: p.y, z: p.z };
       ship.quaternion = { x: qL.x, y: qL.y, z: qL.z, w: qL.w };
       ship.velocity = v;
