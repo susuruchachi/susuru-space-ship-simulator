@@ -58,21 +58,63 @@ const EngineFx = {
     this._plumeRoot = new THREE.Group();
     scene.add(this._plumeRoot);
 
-    // v85: 重力場機関の艦が浮いている密度境界面（艦のまわりに淡く光る面と波紋）
-    this._boundary = new THREE.Mesh(new THREE.CircleGeometry(1, 96), new THREE.ShaderMaterial({
-      uniforms: { uTime: { value: 0 }, uLevel: { value: 0 } },
+    // v85: 重力場機関の艦が浮いている密度境界面
+    // v89: 波紋の輪から、水を進む船のような引き波（艦首から後ろへ V 字に開く八の字の波＋その内側の横波、
+    //   船体の両脇の白波）にした。動いていないときは、船体のまわりに小さなさざ波だけ
+    this._boundary = new THREE.Mesh(new THREE.PlaneGeometry(2, 2, 1, 1), new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 }, uLevel: { value: 0 }, uDir: { value: new THREE.Vector2(0, 1) }, uWake: { value: 0 },
+        uHalf: { value: new THREE.Vector2(0.1, 0.3) }, uCen: { value: new THREE.Vector2(0, 0) }, uPhase: { value: 0 },
+      },
       vertexShader: `
         varying vec2 vP;
         void main() { vP = position.xy; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
       `,
       fragmentShader: `
-        uniform float uTime, uLevel;
+        uniform float uTime, uLevel, uWake, uPhase;
+        uniform vec2 uDir, uHalf, uCen;
         varying vec2 vP;
+        // 船体の形（楕円）からの距離（船体の長さを1とする）
+        float hullDist(vec2 p) {
+          vec2 q = (p - uCen) / uHalf;
+          return (length(q) - 1.0) * min(uHalf.x, uHalf.y);
+        }
         void main() {
           float r = length(vP);
-          float fade = smoothstep(1.0, 0.25, r);
-          float ripple = 0.5 + 0.5 * sin(r * 26.0 - uTime * 3.0);
-          float a = fade * (0.12 + 0.18 * ripple) * uLevel;
+          float edge = smoothstep(1.0, 0.82, r);           // 面のふちで消える
+          vec2 d = uDir, n = vec2(-d.y, d.x);
+          float L = uHalf.y * 2.0;                          // 船体の長さ（面の座標）
+          float ext = 1.0 / length(d / uHalf);              // 進む向きの、船体の端までの長さ（横へ進むときは短い）
+          vec2 bow = uCen + d * ext * 0.95;                 // 先頭（進む向きの端）
+          vec2 p = vP - bow;
+          float s = -dot(p, d) / L;                         // 艦首から後ろへの距離（船体の長さ単位）
+          float t = abs(dot(p, n)) / L;                     // 横への距離
+          float h = hullDist(vP);
+          float a = 0.0;
+          // 面そのもの: 船体のまわりに淡く光る（動いていなくても、浮いている面がわかるように）
+          a += 0.10 * exp(-max(h, 0.0) / (L * 0.45));
+          // 船体のまわりのさざ波（細かく、すぐ消える）
+          float near = exp(-max(h, 0.0) / (L * 0.08));
+          a += near * (0.12 + 0.10 * sin(h / (L * 0.014) - uTime * 4.0)) * step(0.0, h);
+          if (uWake > 0.001 && s > -0.05) {
+            float ss = max(s, 0.0);
+            float arm = ss * 0.3536 + 0.025;               // 八の字の波の開き（ケルビンの角 19.5°）
+            float decay = exp(-ss * 0.5);
+            // 八の字の波（V の腕に沿って並ぶ、斜めの短い波）
+            float armBand = exp(-pow((t - arm) / (0.025 + ss * 0.05), 2.0));
+            float chev = 0.5 + 0.5 * sin((ss * 0.94 + t * 2.6) * 30.0 - uPhase);
+            a += armBand * (0.35 + 0.9 * chev * chev) * decay * uWake;
+            // V の内側の横波（進む向きに直角の弧）
+            float inside = smoothstep(arm + 0.01, arm - 0.05, t);
+            float trans = 0.5 + 0.5 * sin((ss + t * t * 1.5) * 22.0 - uPhase);
+            a += inside * trans * trans * 0.4 * exp(-ss * 0.8) * (1.0 - 0.6 * armBand) * uWake;
+            // 船体の両脇と艦尾の白波（泡）
+            float foam = exp(-pow(max(h, 0.0) / (L * 0.04), 1.2)) * step(0.0, h);
+            float stern = exp(-pow(t / (uHalf.x / L * 1.4 + ss * 0.07), 2.0)) * exp(-pow((s - 1.2) / 1.0, 2.0)) * step(0.85, s);
+            float noise = 0.6 + 0.4 * sin(vP.x * 157.0 + uTime * 5.0) * sin(vP.y * 131.0 - uTime * 4.0);
+            a += (foam * 0.8 + stern * 0.7) * noise * uWake;
+          }
+          a *= edge * uLevel;
           gl_FragColor = vec4(vec3(0.55, 0.85, 1.0) * a, a);
         }
       `,
@@ -81,6 +123,22 @@ const EngineFx = {
     this._boundary.frustumCulled = false;
     this._boundary.visible = false;
     scene.add(this._boundary);
+  },
+
+  // v89: 艦の形の大きさ（艦の座標: 幅 x・高さ y・長さ z と中心）。メッシュが替わったら測り直す
+  shipBox(ship) {
+    const m = ship && ship.mesh;
+    if (!m) return null;
+    if (this._boxCache && this._boxCache.mesh === m && this._boxCache.n === m.children.length) return this._boxCache.box;
+    const pos = m.position.clone(), quat = m.quaternion.clone();
+    m.position.set(0, 0, 0); m.quaternion.identity(); m.updateMatrixWorld(true);
+    const b = new THREE.Box3();
+    m.traverse((o) => { if (o.isMesh && o.geometry && o.visible !== false && !o.userData.noBox) { if (!o.geometry.boundingBox) o.geometry.computeBoundingBox(); b.union(o.geometry.boundingBox.clone().applyMatrix4(o.matrixWorld)); } });
+    m.position.copy(pos); m.quaternion.copy(quat); m.updateMatrixWorld(true);
+    const size = ship.size || 10;
+    const box = b.isEmpty() ? { size: new THREE.Vector3(size * 0.15, size * 0.15, size), center: new THREE.Vector3() } : { size: b.getSize(new THREE.Vector3()), center: b.getCenter(new THREE.Vector3()) };
+    this._boxCache = { mesh: m, n: m.children.length, box };
+    return box;
   },
 
   _boundary: null,
@@ -92,15 +150,45 @@ const EngineFx = {
     const q = ship.boundaryQuat || ship.quaternion;
     const off = rotateVecByQuat({ x: 0, y: ship.boundaryHeight || 0, z: 0 }, q);
     b.position.set(ship.position.x + off.x, ship.position.y + off.y, ship.position.z + off.z);
-    // 円は XY 平面なので、境界面（艦の上下に垂直な面）へ倒す
-    b.quaternion.set(q.x, q.y, q.z, q.w).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2));
-    b.scale.setScalar((ship.size || 10) * 0.9);
-    b.material.uniforms.uTime.value = this._time;
+    // 面は XY 平面なので、境界面（艦の上下に垂直な面）へ倒す（面の +Y = 艦首の向き）
+    const qb = new THREE.Quaternion(q.x, q.y, q.z, q.w);
+    b.quaternion.copy(qb).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2));
+    const box = this.shipBox(ship);
+    const Lh = Math.max(1, box.size.z * 0.5), Wh = Math.max(0.5, box.size.x * 0.5);
+    // 面の大きさ: 引き波が船体の長さの 3 倍ほど後ろまで見える
+    const R = Lh * 7;
+    b.scale.setScalar(R);
+    const u = b.material.uniforms;
+    u.uTime.value = this._time;
+    // 船体の形（面の座標。半径 R を 1 とする）。艦の中心は面の中心からずれていることがある
+    const qInv = qb.clone().invert();
+    const shipQ = new THREE.Quaternion(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w);
+    const cW = box.center.clone().applyQuaternion(shipQ).applyQuaternion(qInv); // 境界面の座標（x 右・z 後ろ）
+    u.uCen.value.set(cW.x / R, -cW.z / R);
+    u.uHalf.value.set(Wh / R, Lh / R);
+    // 進む向き（速度の基準に対する速度を、境界面へ写す）と、引き波の強さ
+    const rv = typeof ShipController !== 'undefined' && ShipController.relVelocity ? ShipController.relVelocity(ship) : ship.velocity;
+    const vb = new THREE.Vector3(rv.x, rv.y, rv.z).applyQuaternion(qInv);
+    const vp = Math.hypot(vb.x, vb.z);
+    if (vp > 1e-3) {
+      const dx = vb.x / vp, dy = -vb.z / vp;
+      const cur = u.uDir.value;
+      // 向きはなめらかに変える（急に向きを変えても、波がちらつかないように）
+      const k = Math.min(1, (this._dtLast || 0.016) * 3);
+      cur.set(cur.x + (dx - cur.x) * k, cur.y + (dy - cur.y) * k);
+      if (cur.lengthSq() < 1e-6) cur.set(dx, dy);
+      cur.normalize();
+    }
+    // 船体の長さの半分ほどの速さ（毎秒）で、はっきりした引き波になる
+    const w = 1 - Math.exp(-vp / Math.max(1, Lh));
+    u.uWake.value += (w - u.uWake.value) * Math.min(1, (this._dtLast || 0.016) * 2);
+    // 波が後ろへ流れる速さ（見た目のため、速いときも上限あり）
+    u.uPhase.value = (u.uPhase.value + (this._dtLast || 0.016) * (2.0 + 6.0 * u.uWake.value)) % 6283.0;
     // 主エンジンの出力が高いほど少し明るく
     let out = 0, n = 0;
     const ratios = ship.fxOutputRatios || ship.thrusterOutputRatios;
     for (const t of ship.thrusters) if (t.kind === 'main') { out += ratios[t.id] || 0; n++; }
-    b.material.uniforms.uLevel.value = 0.6 + 0.8 * (n ? out / n : 0);
+    u.uLevel.value = 0.7 + 0.5 * (n ? out / n : 0);
   },
 
   _plumeRoot: null,
@@ -245,6 +333,7 @@ const EngineFx = {
     }
 
     this._time += dt;
+    this._dtLast = dt;
     this._syncPlumes(ship);
     this._updateBoundary(ship);
     this._plumeRoot.position.set(ship.position.x, ship.position.y, ship.position.z);
