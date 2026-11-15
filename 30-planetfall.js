@@ -317,28 +317,162 @@ void main() {
   //   60 km より下でいちばん明るい。艦の前（進む向き）をおおう光の殻と、後ろへ流れる炎の尾、艦を照らす赤い光
   // ---------------------------------------------------------
   _plasmaI: 0,
+  PLASMA_GRID: 40,     // 光の殻の格子の数（1辺）
+  PLASMA_POINTS: 7000, // 艦の形を測る点の数（上限）
+  // 艦の表面の点（艦の座標）。メッシュが替わったら取り直す
+  _shipPoints(ship) {
+    const m = ship.mesh;
+    const c = this._ptsCache;
+    if (c && c.mesh === m && c.n === m.children.length) return c.pts;
+    const pos = m.position.clone(), quat = m.quaternion.clone();
+    m.position.set(0, 0, 0); m.quaternion.identity(); m.updateMatrixWorld(true);
+    let total = 0;
+    m.traverse((o) => { if (o.isMesh && o.geometry && o.geometry.attributes.position && !o.userData.noBox) total += o.geometry.attributes.position.count; });
+    const step = Math.max(1, Math.ceil(total / this.PLASMA_POINTS));
+    const out = [];
+    const v = new THREE.Vector3();
+    m.traverse((o) => {
+      if (!o.isMesh || !o.geometry || !o.geometry.attributes.position || o.userData.noBox) return;
+      const p = o.geometry.attributes.position;
+      // スキンの部品は、ボーンが元の姿勢のときの位置で
+      const M = o.isSkinnedMesh && o.skeleton && o.skeleton.bones.length
+        ? new THREE.Matrix4().copy(o.skeleton.bones[0].matrixWorld).multiply(o.skeleton.boneInverses[0]).multiply(o.bindMatrix)
+        : o.matrixWorld;
+      // 小さな部品も最低いくつかは拾う
+      const st = Math.max(1, Math.min(step, Math.floor(p.count / 12) || 1));
+      for (let i = 0; i < p.count; i += st) { v.fromBufferAttribute(p, i).applyMatrix4(M); out.push(v.x, v.y, v.z); }
+    });
+    m.position.copy(pos); m.quaternion.copy(quat); m.updateMatrixWorld(true);
+    const pts = new Float32Array(out);
+    this._ptsCache = { mesh: m, n: m.children.length, pts };
+    return pts;
+  },
+  // 光の殻の面を作る。m: 進む向き（フレームの座標）、gq: 殻の向き（+Z = 進む向き）。返り値: 輪郭の半径・前後の長さ
+  _plasmaSurface(ship, shell, gq, I) {
+    const G = this.PLASMA_GRID;
+    const pts = this._shipPoints(ship);
+    const sq = new THREE.Quaternion(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w);
+    // 艦の座標 → 殻の座標の回転
+    const e = new THREE.Matrix4().makeRotationFromQuaternion(gq.clone().invert().multiply(sq)).elements;
+    const n = pts.length / 3;
+    const X = this._plX && this._plX.length === n ? this._plX : (this._plX = new Float32Array(n));
+    const Y = this._plY && this._plY.length === n ? this._plY : (this._plY = new Float32Array(n));
+    const Z = this._plZ && this._plZ.length === n ? this._plZ : (this._plZ = new Float32Array(n));
+    let rad = 0, zMax = -Infinity, zMin = Infinity;
+    for (let i = 0; i < n; i++) {
+      const x = pts[i * 3], y = pts[i * 3 + 1], z = pts[i * 3 + 2];
+      const px = e[0] * x + e[4] * y + e[8] * z, py = e[1] * x + e[5] * y + e[9] * z, pz = e[2] * x + e[6] * y + e[10] * z;
+      X[i] = px; Y[i] = py; Z[i] = pz;
+      const r = Math.hypot(px, py);
+      if (r > rad) rad = r;
+      if (pz > zMax) zMax = pz;
+      if (pz < zMin) zMin = pz;
+    }
+    if (!(rad > 0)) return null;
+    const depth = Math.max(1e-3, zMax - zMin);
+    const R = rad * 1.45 + depth * 0.05;          // 格子の半分の幅（輪郭の外へ、流れ落ちる分の余白）
+    const cell = (2 * R) / (G - 1);
+    const H = this._plH && this._plH.length === G * G ? this._plH : (this._plH = new Float32Array(G * G));
+    H.fill(-Infinity);
+    // 格子ごとの、いちばん前の点（となりの格子にも少しかける = 細い部品も拾う）
+    for (let i = 0; i < n; i++) {
+      const gx = (X[i] + R) / cell, gy = (Y[i] + R) / cell;
+      const i0 = Math.floor(gx), j0 = Math.floor(gy);
+      for (let dj = 0; dj <= 1; dj++) for (let di = 0; di <= 1; di++) {
+        const ii = i0 + di, jj = j0 + dj;
+        if (ii < 0 || jj < 0 || ii >= G || jj >= G) continue;
+        const k = jj * G + ii;
+        if (Z[i] > H[k]) H[k] = Z[i];
+      }
+    }
+    // 輪郭の外・へこんだところは、となりから後ろへ流れ落ちる（衝撃波の面は、突き出たところから斜め後ろへ広がる）
+    const slope = 1.7 * cell, slopeD = slope * 1.4142;
+    const relax = (k, kn, s) => { const v = H[kn] - s; if (v > H[k]) H[k] = v; };
+    for (let pass = 0; pass < 2; pass++) {
+      for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) {
+        const k = j * G + i;
+        if (i > 0) relax(k, k - 1, slope);
+        if (j > 0) relax(k, k - G, slope);
+        if (i > 0 && j > 0) relax(k, k - G - 1, slopeD);
+        if (i < G - 1 && j > 0) relax(k, k - G + 1, slopeD);
+      }
+      for (let j = G - 1; j >= 0; j--) for (let i = G - 1; i >= 0; i--) {
+        const k = j * G + i;
+        if (i < G - 1) relax(k, k + 1, slope);
+        if (j < G - 1) relax(k, k + G, slope);
+        if (i < G - 1 && j < G - 1) relax(k, k + G + 1, slopeD);
+        if (i > 0 && j < G - 1) relax(k, k + G - 1, slopeD);
+      }
+    }
+    // なめらかに（角を丸める）
+    const T = this._plT && this._plT.length === G * G ? this._plT : (this._plT = new Float32Array(G * G));
+    for (let pass = 0; pass < 2; pass++) {
+      for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) {
+        let sum = 0, w = 0;
+        for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+          const ii = i + di, jj = j + dj;
+          if (ii < 0 || jj < 0 || ii >= G || jj >= G) continue;
+          const ww = di === 0 && dj === 0 ? 4 : di === 0 || dj === 0 ? 2 : 1;
+          sum += H[jj * G + ii] * ww; w += ww;
+        }
+        T[j * G + i] = sum / w;
+      }
+      H.set(T);
+    }
+    // 面の頂点・明るさ
+    const pos = shell.geometry.attributes.position, aI = shell.geometry.attributes.aI;
+    const standoff = cell * (0.9 + 0.6 * I) + depth * 0.02;
+    for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) {
+      const k = j * G + i;
+      const x = -R + i * cell, y = -R + j * cell, h = H[k];
+      pos.setXYZ(k, x, y, h + standoff);
+      // 面の向き: 進む向きに正面を向いているところ（よどみ点）ほど熱く明るい。斜めに流れ落ちるところは暗い赤
+      const hx = (H[j * G + Math.min(G - 1, i + 1)] - H[j * G + Math.max(0, i - 1)]) / (2 * cell);
+      const hy = (H[Math.min(G - 1, j + 1) * G + i] - H[Math.max(0, j - 1) * G + i]) / (2 * cell);
+      const facing = 1 / Math.sqrt(1 + hx * hx + hy * hy);
+      // 艦のいちばん前から後ろへ離れるほど薄く。格子のふちでは消える
+      const back = (zMax - h) / (depth + rad);
+      const fade = Math.exp(-back * 1.6);
+      const er = Math.max(Math.abs(x), Math.abs(y)) / R;
+      const edge = 1 - Math.min(1, Math.max(0, (er - 0.72) / 0.28));
+      const hot = Math.pow(facing, 3);
+      aI.setXY(k, (0.22 + 0.9 * hot) * fade * edge, hot * fade);
+    }
+    pos.needsUpdate = true; aI.needsUpdate = true;
+    shell.material.uniforms.uCell.value = cell;
+    return { rad, depth, zMax, zMin };
+  },
   _ensurePlasma() {
     if (this._plasma || !this._scene) return;
     const g = new THREE.Group();
+    // v89: 光の殻は、艦の形に合わせる。進む向きから見た艦の「前の面」（進む向きに直角な格子ごとの、いちばん前の点）を
+    //   少し前へ離した面で、艦の輪郭の外では後ろへ流れるように下がる。横向き・斜めに進めば広い面になり、
+    //   艦橋・砲塔のように突き出たところは、そこだけ前へ張り出す（_plasmaSurface）
+    const G = this.PLASMA_GRID;
+    const sgeo = new THREE.BufferGeometry();
+    sgeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(G * G * 3), 3));
+    sgeo.setAttribute('aI', new THREE.BufferAttribute(new Float32Array(G * G * 2), 2)); // 明るさ・正面の度合い
+    const idx = [];
+    for (let j = 0; j < G - 1; j++) for (let i = 0; i < G - 1; i++) { const v = j * G + i; idx.push(v, v + 1, v + G, v + 1, v + G + 1, v + G); }
+    sgeo.setIndex(idx);
     const shellMat = new THREE.ShaderMaterial({
-      uniforms: { uI: { value: 0 }, uTime: { value: 0 } },
-      vertexShader: `varying vec3 vN; varying vec3 vL; varying vec3 vV;
-void main() { vL = position; vN = normalize(normalMatrix * normal); vec4 mv = modelViewMatrix * vec4(position, 1.0); vV = normalize(-mv.xyz); gl_Position = projectionMatrix * mv; }`,
-      fragmentShader: `uniform float uI; uniform float uTime; varying vec3 vN; varying vec3 vL; varying vec3 vV;
+      uniforms: { uI: { value: 0 }, uTime: { value: 0 }, uCell: { value: 1 } },
+      vertexShader: `attribute vec2 aI; varying vec2 vI; varying vec3 vL;
+void main() { vI = aI; vL = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+      fragmentShader: `uniform float uI; uniform float uTime; uniform float uCell; varying vec2 vI; varying vec3 vL;
 void main() {
-  float fz = normalize(vL).z;                        // +1 = 進む向きの正面
-  float front = smoothstep(-0.35, 1.0, fz);
-  float core = pow(max(fz, 0.0), 6.0);
-  float rim = 1.0 - abs(dot(normalize(vN), normalize(vV)));
-  float fl = 0.75 + 0.25 * sin(vL.x * 9.0 + uTime * 23.0) * sin(vL.y * 11.0 - uTime * 17.0);
-  vec3 col = mix(vec3(0.85, 0.08, 0.02), vec3(1.0, 0.42, 0.08), front);
-  col = mix(col, vec3(1.0, 0.85, 0.6), core * 0.8);
-  float a = uI * fl * (front * front * (0.35 + 0.65 * rim) + core * 0.9);
+  vec3 q = vL / uCell;
+  // 炎のゆらぎ（後ろへ流れる筋）
+  float fl = 0.72 + 0.28 * sin(q.x * 1.7 + q.z * 0.9 - uTime * 21.0) * sin(q.y * 1.9 - q.z * 0.7 + uTime * 16.0);
+  float hot = vI.y;
+  vec3 col = mix(vec3(0.85, 0.07, 0.02), vec3(1.0, 0.42, 0.08), smoothstep(0.1, 0.8, hot));
+  col = mix(col, vec3(1.0, 0.86, 0.62), smoothstep(0.75, 1.0, hot) * 0.85);
+  float a = uI * vI.x * fl;
   gl_FragColor = vec4(col * a, a);
 }`,
       transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
     });
-    const shell = new THREE.Mesh(new THREE.SphereGeometry(1, 40, 28), shellMat);
+    const shell = new THREE.Mesh(sgeo, shellMat);
     // 炎の尾: 後ろへ（-Z）流れる、先の細い筒
     const tailGeo = new THREE.CylinderGeometry(0.25, 1, 1, 32, 12, true);
     tailGeo.rotateX(Math.PI / 2); // 筒の軸を Z へ（+Z 側が根元）
@@ -401,14 +535,15 @@ void main() {
     const lat = 0.5 * Math.max(W * Math.sqrt(1 - ml.x * ml.x), H * Math.sqrt(1 - ml.y * ml.y), L * Math.sqrt(1 - ml.z * ml.z));
     const c = box ? box.center.clone().applyQuaternion(sq) : new THREE.Vector3();
     c.add(new THREE.Vector3(ship.position.x, ship.position.y, ship.position.z));
-    P.g.position.copy(c);
     P.g.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), m);
-    const grow = 1 + 0.25 * I; // 強いほど殻が厚い
-    P.shell.scale.set(lat * 1.15 * grow, lat * 1.15 * grow, ext * 1.12 * grow);
-    P.shell.position.set(0, 0, ext * 0.08);
-    const tailLen = ext * (2.5 + 5 * I);
-    P.tail.scale.set(lat * 1.05, lat * 1.05, tailLen);
-    P.tail.position.set(0, 0, -ext * 0.3);
+    // 殻は、艦の重心を原点に（艦の形の点は艦の座標）
+    P.g.position.set(ship.position.x, ship.position.y, ship.position.z);
+    const surf = this._plasmaSurface(ship, P.shell, P.g.quaternion, I);
+    P.shell.scale.set(1, 1, 1); P.shell.position.set(0, 0, 0);
+    const rad = surf ? surf.rad : lat, zMin = surf ? surf.zMin : -ext, depth = surf ? surf.depth : ext * 2;
+    const tailLen = (depth * 0.5 + rad) * (2.0 + 4.5 * I);
+    P.tail.scale.set(rad * 1.05, rad * 1.05, tailLen);
+    P.tail.position.set(0, 0, zMin + depth * 0.35);
     const t = (this._plasmaT = ((this._plasmaT || 0) + (dt || 0.016)) % 1000);
     P.shellMat.uniforms.uI.value = Math.min(1.2, I); P.shellMat.uniforms.uTime.value = t;
     P.tailMat.uniforms.uI.value = Math.min(1.2, I) * 0.8; P.tailMat.uniforms.uTime.value = t;
