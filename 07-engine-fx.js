@@ -59,70 +59,9 @@ const EngineFx = {
     scene.add(this._plumeRoot);
 
     // v85: 重力場機関の艦が浮いている密度境界面
-    // v89: 波紋の輪から、水を進む船のような引き波（艦首から後ろへ V 字に開く八の字の波＋その内側の横波、
-    //   船体の両脇の白波）にした。動いていないときは、船体のまわりに小さなさざ波だけ
-    this._boundary = new THREE.Mesh(new THREE.PlaneGeometry(2, 2, 1, 1), new THREE.ShaderMaterial({
-      uniforms: {
-        uTime: { value: 0 }, uLevel: { value: 0 }, uDir: { value: new THREE.Vector2(0, 1) }, uWake: { value: 0 },
-        uHalf: { value: new THREE.Vector2(0.1, 0.3) }, uCen: { value: new THREE.Vector2(0, 0) }, uPhase: { value: 0 },
-      },
-      vertexShader: `
-        varying vec2 vP;
-        void main() { vP = position.xy; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
-      `,
-      fragmentShader: `
-        uniform float uTime, uLevel, uWake, uPhase;
-        uniform vec2 uDir, uHalf, uCen;
-        varying vec2 vP;
-        // 船体の形（楕円）からの距離（船体の長さを1とする）
-        float hullDist(vec2 p) {
-          vec2 q = (p - uCen) / uHalf;
-          return (length(q) - 1.0) * min(uHalf.x, uHalf.y);
-        }
-        void main() {
-          float r = length(vP);
-          float edge = smoothstep(1.0, 0.82, r);           // 面のふちで消える
-          vec2 d = uDir, n = vec2(-d.y, d.x);
-          float L = uHalf.y * 2.0;                          // 船体の長さ（面の座標）
-          float ext = 1.0 / length(d / uHalf);              // 進む向きの、船体の端までの長さ（横へ進むときは短い）
-          vec2 bow = uCen + d * ext * 0.95;                 // 先頭（進む向きの端）
-          vec2 p = vP - bow;
-          float s = -dot(p, d) / L;                         // 艦首から後ろへの距離（船体の長さ単位）
-          float t = abs(dot(p, n)) / L;                     // 横への距離
-          float h = hullDist(vP);
-          float a = 0.0;
-          // 面そのもの: 船体のまわりに淡く光る（動いていなくても、浮いている面がわかるように）
-          a += 0.10 * exp(-max(h, 0.0) / (L * 0.45));
-          // 船体のまわりのさざ波（細かく、すぐ消える）
-          float near = exp(-max(h, 0.0) / (L * 0.08));
-          a += near * (0.12 + 0.10 * sin(h / (L * 0.014) - uTime * 4.0)) * step(0.0, h);
-          if (uWake > 0.001 && s > -0.05) {
-            float ss = max(s, 0.0);
-            float arm = ss * 0.3536 + 0.025;               // 八の字の波の開き（ケルビンの角 19.5°）
-            float decay = exp(-ss * 0.5);
-            // 八の字の波（V の腕に沿って並ぶ、斜めの短い波）
-            float armBand = exp(-pow((t - arm) / (0.025 + ss * 0.05), 2.0));
-            float chev = 0.5 + 0.5 * sin((ss * 0.94 + t * 2.6) * 30.0 - uPhase);
-            a += armBand * (0.35 + 0.9 * chev * chev) * decay * uWake;
-            // V の内側の横波（進む向きに直角の弧）
-            float inside = smoothstep(arm + 0.01, arm - 0.05, t);
-            float trans = 0.5 + 0.5 * sin((ss + t * t * 1.5) * 22.0 - uPhase);
-            a += inside * trans * trans * 0.4 * exp(-ss * 0.8) * (1.0 - 0.6 * armBand) * uWake;
-            // 船体の両脇と艦尾の白波（泡）
-            float foam = exp(-pow(max(h, 0.0) / (L * 0.04), 1.2)) * step(0.0, h);
-            float stern = exp(-pow(t / (uHalf.x / L * 1.4 + ss * 0.07), 2.0)) * exp(-pow((s - 1.2) / 1.0, 2.0)) * step(0.85, s);
-            float noise = 0.6 + 0.4 * sin(vP.x * 157.0 + uTime * 5.0) * sin(vP.y * 131.0 - uTime * 4.0);
-            a += (foam * 0.8 + stern * 0.7) * noise * uWake;
-          }
-          a *= edge * uLevel;
-          gl_FragColor = vec4(vec3(0.55, 0.85, 1.0) * a, a);
-        }
-      `,
-      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-    }));
-    this._boundary.frustumCulled = false;
-    this._boundary.visible = false;
-    scene.add(this._boundary);
+    // v89: 面全体を光らせるのをやめ（面のあるところ・ないところで濃さが違って見えていた）、
+    //   水を進む船のような引き波だけを描く（_buildWake / _updateBoundary）
+    this._buildWake(scene);
   },
 
   // v89: 艦の形の大きさ（艦の座標: 幅 x・高さ y・長さ z と中心）。メッシュが替わったら測り直す
@@ -141,54 +80,319 @@ const EngineFx = {
     return box;
   },
 
+  // ---------------------------------------------------------
+  // v89: 境界面の引き波
+  //   艦が通った跡（艦からの相対位置で覚える。まわりの速さ = 速度の基準に対して止まっている）に沿って、盛り上がった波の帯を作る:
+  //     先頭（進む向きの端）から左右へ開く波（外側の大きな波と、その内側の小さな波）、後ろの端から開く波、真後ろの泡の筋。
+  //   波は、出たところから進んだ距離に比例して横へ広がる（ケルビンの角 19.5°）ので、速さによらず同じ V 字になる。
+  //   跡は艦と一緒に回らない: 前進から後進へ切り替えると、前の波はその場に残って消えていき、新しい波が新しい先頭から出る。
+  //   帯は本当に盛り上がった形（境界面の上向きへ持ち上げた頂点）で、光の当たる側が明るく、反対側が暗い。
+  //   船体のまわりには、喫水線（境界面で切った船体の輪郭）に沿う白波。進む向きの側が高く盛り上がる
+  // ---------------------------------------------------------
+  WAKE_N: 64,          // 跡の点の数（帯1本あたり）
+  WAKE_ACROSS: 5,      // 帯の幅方向の頂点の数
+  WAKE_LEN: 4.5,       // 跡の長さ（船体の長さの何倍まで）
+  WAKE_LIFE: 12,       // 跡が消えるまでの時間 [s]（止まったあと）
+  WAKE_OUTLINE_N: 40,  // 喫水線の輪郭の点の数（片舷）
+  _wake: null,
   _boundary: null,
-  _updateBoundary(ship) {
-    const b = this._boundary;
-    if (!b) return;
-    b.visible = !!ship.gravityDrive;
-    if (!b.visible) return;
-    const q = ship.boundaryQuat || ship.quaternion;
-    const off = rotateVecByQuat({ x: 0, y: ship.boundaryHeight || 0, z: 0 }, q);
-    b.position.set(ship.position.x + off.x, ship.position.y + off.y, ship.position.z + off.z);
-    // 面は XY 平面なので、境界面（艦の上下に垂直な面）へ倒す（面の +Y = 艦首の向き）
-    const qb = new THREE.Quaternion(q.x, q.y, q.z, q.w);
-    b.quaternion.copy(qb).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2));
+  _buildWake(scene) {
+    const N = this.WAKE_N + 1, A = this.WAKE_ACROSS;
+    // 帯: [先頭の外の波 左・右, 先頭の内の波 左・右, 後ろの波 左・右, 真後ろの泡]
+    const R = 7;
+    const mk = (rows, across, strips) => {
+      const nv = rows * across * strips;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(nv * 3), 3));
+      geo.setAttribute('aI', new THREE.BufferAttribute(new Float32Array(nv), 1));
+      geo.setAttribute('aU', new THREE.BufferAttribute(new Float32Array(nv * 3), 3));
+      const idx = [];
+      for (let r = 0; r < strips; r++) for (let i = 0; i < rows - 1; i++) for (let a = 0; a < across - 1; a++) {
+        const v0 = (r * rows + i) * across + a, v1 = v0 + 1, v2 = v0 + across, v3 = v2 + 1;
+        idx.push(v0, v2, v1, v1, v2, v3);
+      }
+      geo.setIndex(idx);
+      return geo;
+    };
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: `attribute float aI; attribute vec3 aU; varying float vI; varying vec3 vU;
+void main() { vI = aI; vU = aU; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+      fragmentShader: `uniform float uTime; varying float vI; varying vec3 vU;
+void main() {
+  // vU: x = 幅方向（-1 内側〜+1 外側）、y = 出たところからの距離（船体の長さ単位）、z = 種類（0 波の帯 / 1 真後ろ / 2 喫水線）
+  float edge = 1.0 - smoothstep(0.5, 1.0, abs(vU.x));
+  float a = vI * edge;
+  float foam = 0.0;
+  if (vU.z < 0.5) {
+    // 波の帯: 腕に沿って、斜めの短い波の山が並ぶ（後ろへ流れる）
+    float crest = 0.5 + 0.5 * sin((vU.y * 5.5 - vU.x * 0.9) * 6.2832 - uTime * 2.2);
+    a *= 0.35 + 0.65 * crest * crest;
+    foam = (1.0 - smoothstep(0.0, 0.35, abs(vU.x))) * crest * crest;
+  } else if (vU.z < 1.5) {
+    // 真後ろ: 進む向きに直角の弧の波と、中心線の泡の筋
+    float arcs = 0.5 + 0.5 * sin((vU.y + vU.x * vU.x * 0.35) * 4.0 * 6.2832 - uTime * 2.2);
+    float churn = (1.0 - smoothstep(0.0, 0.3, abs(vU.x))) * (0.6 + 0.4 * sin(vU.y * 90.0 + uTime * 9.0) * sin(vU.x * 40.0 - uTime * 6.0)) * exp(-vU.y * 1.2);
+    a *= 0.25 + 0.75 * arcs * arcs * (1.0 - 0.5 * abs(vU.x)) + churn * 1.6;
+    foam = churn;
+  } else {
+    foam = 0.6 + 0.4 * sin(vU.y * 9.0 + uTime * 6.0);
+  }
+  vec3 col = mix(vec3(0.30, 0.62, 0.95), vec3(0.80, 0.95, 1.0), clamp(vI * 1.4, 0.0, 1.0)) + vec3(0.3) * foam * vI;
+  gl_FragColor = vec4(col * a, a);
+}`,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    });
+    const g = new THREE.Group();
+    const ribbons = new THREE.Mesh(mk(N, A, R), mat);
+    const M = this.WAKE_OUTLINE_N * 2 + 1; // 輪郭を一周（閉じる）
+    const line = new THREE.Mesh(mk(M, 3, 1), mat);
+    for (const m of [ribbons, line]) { m.frustumCulled = false; m.renderOrder = 2; g.add(m); }
+    g.visible = false;
+    scene.add(g);
+    this._boundary = g;
+    this._wake = { ribbons, line, mat, samples: [], lastEmit: null, R, N, M };
+  },
+
+  // 喫水線（境界面の高さで切った船体の輪郭）: 艦の前後の位置ごとの、左・右の端（艦の座標）。メッシュ・高さが変わったら測り直す
+  _waterline(ship) {
+    const m = ship.mesh, yb = ship.boundaryHeight || 0;
+    const c = this._wlCache;
+    if (c && c.mesh === m && c.n === m.children.length && Math.abs(c.yb - yb) < 1e-6) return c.wl;
     const box = this.shipBox(ship);
-    const Lh = Math.max(1, box.size.z * 0.5), Wh = Math.max(0.5, box.size.x * 0.5);
-    // 面の大きさ: 引き波が船体の長さの 3 倍ほど後ろまで見える
-    const R = Lh * 7;
-    b.scale.setScalar(R);
-    const u = b.material.uniforms;
-    u.uTime.value = this._time;
-    // 船体の形（面の座標。半径 R を 1 とする）。艦の中心は面の中心からずれていることがある
-    const qInv = qb.clone().invert();
-    const shipQ = new THREE.Quaternion(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w);
-    const cW = box.center.clone().applyQuaternion(shipQ).applyQuaternion(qInv); // 境界面の座標（x 右・z 後ろ）
-    u.uCen.value.set(cW.x / R, -cW.z / R);
-    u.uHalf.value.set(Wh / R, Lh / R);
-    // 進む向き（速度の基準に対する速度を、境界面へ写す）と、引き波の強さ
-    const rv = typeof ShipController !== 'undefined' && ShipController.relVelocity ? ShipController.relVelocity(ship) : ship.velocity;
-    const vb = new THREE.Vector3(rv.x, rv.y, rv.z).applyQuaternion(qInv);
-    const vp = Math.hypot(vb.x, vb.z);
-    if (vp > 1e-3) {
-      const dx = vb.x / vp, dy = -vb.z / vp;
-      const cur = u.uDir.value;
-      // 向きはなめらかに変える（急に向きを変えても、波がちらつかないように）
-      const k = Math.min(1, (this._dtLast || 0.016) * 3);
-      cur.set(cur.x + (dx - cur.x) * k, cur.y + (dy - cur.y) * k);
-      if (cur.lengthSq() < 1e-6) cur.set(dx, dy);
-      cur.normalize();
+    const K = this.WAKE_OUTLINE_N;
+    const z0 = box.center.z - box.size.z / 2, z1 = box.center.z + box.size.z / 2, dz = (z1 - z0) / K || 1;
+    const run = (cut) => {
+      const L = new Float32Array(K + 1).fill(Infinity), Rr = new Float32Array(K + 1).fill(-Infinity);
+      const put = (x, z) => { const k = Math.round((z - z0) / dz); if (k < 0 || k > K) return; if (x < L[k]) L[k] = x; if (x > Rr[k]) Rr[k] = x; };
+      const seg = (ax, az, bx, bz) => { const n = Math.max(1, Math.ceil(Math.abs(bz - az) / dz * 2)); for (let i = 0; i <= n; i++) put(ax + (bx - ax) * i / n, az + (bz - az) * i / n); };
+      const pos = m.position.clone(), quat = m.quaternion.clone();
+      m.position.set(0, 0, 0); m.quaternion.identity(); m.updateMatrixWorld(true);
+      const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3();
+      m.traverse((o) => {
+        if (!o.isMesh || !o.geometry || !o.geometry.attributes.position || o.userData.noBox) return;
+        const p = o.geometry.attributes.position, ix = o.geometry.index, M4 = o.matrixWorld;
+        const nt = ix ? ix.count / 3 : p.count / 3;
+        // 細かいモデルは間引く（輪郭には十分）
+        const step = Math.max(1, Math.floor(nt / 250000));
+        for (let t = 0; t < nt; t += step) {
+          const i0 = ix ? ix.getX(t * 3) : t * 3, i1 = ix ? ix.getX(t * 3 + 1) : t * 3 + 1, i2 = ix ? ix.getX(t * 3 + 2) : t * 3 + 2;
+          A.fromBufferAttribute(p, i0).applyMatrix4(M4); B.fromBufferAttribute(p, i1).applyMatrix4(M4); C.fromBufferAttribute(p, i2).applyMatrix4(M4);
+          if (!cut) { put(A.x, A.z); put(B.x, B.z); put(C.x, C.z); continue; }
+          const da = A.y - yb, db = B.y - yb, dc = C.y - yb;
+          if ((da > 0 && db > 0 && dc > 0) || (da < 0 && db < 0 && dc < 0)) continue;
+          // 三角形と面の交わる線分
+          const pts = [];
+          const edge = (P, Q, dp, dq) => { if ((dp > 0) !== (dq > 0) && dp !== dq) { const k = dp / (dp - dq); pts.push(P.x + (Q.x - P.x) * k, P.z + (Q.z - P.z) * k); } };
+          edge(A, B, da, db); edge(B, C, db, dc); edge(C, A, dc, da);
+          if (pts.length >= 4) seg(pts[0], pts[1], pts[2], pts[3]);
+        }
+      });
+      m.position.copy(pos); m.quaternion.copy(quat); m.updateMatrixWorld(true);
+      return { L, R: Rr };
+    };
+    let o = run(true);
+    let hit = 0;
+    for (let k = 0; k <= K; k++) if (o.R[k] > o.L[k]) hit++;
+    if (hit < K * 0.3) o = run(false); // 面が船体を切っていない（船体より上・下）: 上から見た輪郭を使う
+    // 穴を埋め、なめらかにして、輪郭の点（右舷を後ろ→前、左舷を前→後ろ。艦の座標 x,z）にする
+    const cx = box.center.x;
+    const hw = (k) => (o.R[k] > o.L[k] ? [o.L[k], o.R[k]] : null);
+    let first = -1, last = -1;
+    for (let k = 0; k <= K; k++) if (hw(k)) { if (first < 0) first = k; last = k; }
+    const pts = [];
+    if (first < 0) { first = 0; last = K; }
+    const span = Math.max(1, last - first);
+    const at = (u) => { // u: 0（前の端 = z 最小）〜 1（後ろの端）
+      const kf = first + u * span;
+      let k0 = Math.floor(kf), k1 = Math.min(last, k0 + 1);
+      while (k0 > first && !hw(k0)) k0--; while (k1 < last && !hw(k1)) k1++;
+      const a = hw(k0) || [cx, cx], b = hw(k1) || a;
+      const f = k1 > k0 ? (kf - k0) / (k1 - k0) : 0;
+      return { l: a[0] + (b[0] - a[0]) * f, r: a[1] + (b[1] - a[1]) * f, z: z0 + kf * dz };
+    };
+    const K2 = this.WAKE_OUTLINE_N;
+    const right = [], left = [];
+    for (let i = 0; i < K2; i++) {
+      // 端のほうを細かく（船首・船尾の丸み）
+      const u = 0.5 - 0.5 * Math.cos(Math.PI * (i + 0.5) / K2);
+      const q = at(u);
+      // 両端は中心線へすぼめる（輪郭を閉じる）
+      const e = Math.min(1, Math.min(u, 1 - u) * 30);
+      const mid = (q.l + q.r) / 2;
+      right.push({ x: mid + (q.r - mid) * e, z: q.z });
+      left.push({ x: mid + (q.l - mid) * e, z: q.z });
     }
-    // 船体の長さの半分ほどの速さ（毎秒）で、はっきりした引き波になる
-    const w = 1 - Math.exp(-vp / Math.max(1, Lh));
-    u.uWake.value += (w - u.uWake.value) * Math.min(1, (this._dtLast || 0.016) * 2);
-    // 波が後ろへ流れる速さ（見た目のため、速いときも上限あり）
-    u.uPhase.value = (u.uPhase.value + (this._dtLast || 0.016) * (2.0 + 6.0 * u.uWake.value)) % 6283.0;
-    // 主エンジンの出力が高いほど少し明るく
-    let out = 0, n = 0;
-    const ratios = ship.fxOutputRatios || ship.thrusterOutputRatios;
-    for (const t of ship.thrusters) if (t.kind === 'main') { out += ratios[t.id] || 0; n++; }
-    u.uLevel.value = 0.7 + 0.5 * (n ? out / n : 0);
+    for (let i = 0; i < K2; i++) pts.push(right[i]);
+    for (let i = K2 - 1; i >= 0; i--) pts.push(left[i]);
+    const wl = { pts, yb, beam: Math.max(...right.map((p, i) => p.x - left[i].x)) };
+    this._wlCache = { mesh: m, n: m.children.length, yb, wl };
+    return wl;
+  },
+
+  _updateBoundary(ship) {
+    const g = this._boundary, W = this._wake;
+    if (!g || !W) return;
+    const warping = typeof Navigation !== 'undefined' && Navigation.isWarping && Navigation.isWarping();
+    g.visible = !!ship.gravityDrive && !!ship.mesh && !warping;
+    if (!g.visible) { W.samples.length = 0; W.lastEmit = null; return; }
+    const dt = this._dtLast || 0.016;
+    const q = ship.boundaryQuat || ship.quaternion;
+    const qb = new THREE.Quaternion(q.x, q.y, q.z, q.w), qInv = qb.clone().invert();
+    const off = rotateVecByQuat({ x: 0, y: ship.boundaryHeight || 0, z: 0 }, q);
+    g.position.set(ship.position.x + off.x, ship.position.y + off.y, ship.position.z + off.z);
+    g.quaternion.copy(qb);
+    const box = this.shipBox(ship);
+    const L = Math.max(2, box.size.z);
+    const wl = this._waterline(ship);
+    const shipQ = new THREE.Quaternion(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w);
+    // 喫水線の輪郭を、境界面の座標（x 右・z 後ろ・y 上）へ
+    const tmp = new THREE.Vector3();
+    const outline = wl.pts.map((p) => { tmp.set(p.x, wl.yb, p.z).applyQuaternion(shipQ).applyQuaternion(qInv); return { x: tmp.x, z: tmp.z }; });
+    // 進む速さ・向き（速度の基準に対して。境界面に沿う成分）
+    const rv = typeof ShipController !== 'undefined' && ShipController.relVelocity ? ShipController.relVelocity(ship) : ship.velocity;
+    const v3 = new THREE.Vector3(rv.x, rv.y, rv.z);
+    const vl = v3.clone().applyQuaternion(qInv);
+    const vp = Math.hypot(vl.x, vl.z);
+    const str = 1 - Math.exp(-vp / (0.15 * L));
+    const dirL = vp > 1e-3 ? { x: vl.x / vp, z: vl.z / vp } : (W.dirL || { x: 0, z: -1 });
+    W.dirL = dirL;
+    const dirW = new THREE.Vector3(dirL.x, 0, dirL.z).applyQuaternion(qb); // フレームの座標
+    // 輪郭の、進む向きの前の端・後ろの端までの長さ
+    let extF = 0, extB = 0;
+    for (const p of outline) { const d = p.x * dirL.x + p.z * dirL.z; if (d > extF) extF = d; if (-d > extB) extB = -d; }
+    // --- 跡を進める（跡は、まわりに対して止まっている = 艦から見ると後ろへ流れる）---
+    const ds = (L * this.WAKE_LEN) / this.WAKE_N;
+    const move = v3.clone().multiplyScalar(-dt);
+    const smax = L * this.WAKE_LEN;
+    for (const sm of W.samples) { sm.rel.add(move); sm.s += vp * dt; sm.t += dt; }
+    W.samples = W.samples.filter((sm) => sm.s < smax && sm.t < this.WAKE_LIFE);
+    if (W.lastEmit) W.lastEmit.add(move);
+    if (vp > 0.02 * L) {
+      if (!W.lastEmit) W.lastEmit = new THREE.Vector3();
+      let gap = W.lastEmit.length();
+      if (gap >= ds) {
+        const back = W.lastEmit.clone().normalize();
+        let n = Math.floor(gap / ds);
+        if (n > this.WAKE_N) { n = this.WAKE_N; gap = n * ds; } // とても速いとき: 後ろの決まった長さだけ並べる
+        const add = [];
+        for (let j = 1; j <= n; j++) {
+          const d = gap - j * ds;
+          add.push({ rel: back.clone().multiplyScalar(d), dir: dirW.clone(), s: d, t: 0, str, extF, extB });
+        }
+        add.reverse(); // 新しい順（艦に近い順）
+        W.samples = add.concat(W.samples).slice(0, this.WAKE_N);
+        W.lastEmit = W.samples[0].rel.clone();
+      }
+    } else if (!W.samples.length) W.lastEmit = null;
+    // --- 帯を作る ---
+    const N = W.N, A = this.WAKE_ACROSS;
+    const pos = W.ribbons.geometry.attributes.position, aI = W.ribbons.geometry.attributes.aI, aU = W.ribbons.geometry.attributes.aU;
+    // 光の向き（境界面の座標）。面の下から照らされていても、上からの光として扱う
+    let lightL = new THREE.Vector3(0.4, 0.8, -0.4).normalize();
+    if (typeof SolarSystem !== 'undefined' && typeof Navigation !== 'undefined' && Navigation.frame && SolarSystem.byId && SolarSystem.byId.sun) {
+      const u = Navigation.shipUniverse(), star = SolarSystem.byId.sun;
+      const d = Astro.mat3MulVec(Navigation.frame.rotT, { x: star.pos.x - u.x, y: star.pos.y - u.y, z: star.pos.z - u.z });
+      const l = new THREE.Vector3(d.x, d.y, d.z).normalize().applyQuaternion(qInv);
+      l.y = Math.max(0.35, Math.abs(l.y)); lightL = l.normalize();
+    }
+    // 跡の点（今の艦の位置を先頭に）を、境界面の座標へ
+    const pts = [{ x: 0, z: 0, dx: dirL.x, dz: dirL.z, s: 0, f: str, extF, extB }];
+    for (const sm of W.samples) {
+      tmp.copy(sm.rel).applyQuaternion(qInv);
+      const px = tmp.x, pz = tmp.z;
+      tmp.copy(sm.dir).applyQuaternion(qInv);
+      const dl = Math.hypot(tmp.x, tmp.z) || 1;
+      const fade = sm.str * Math.pow(Math.max(0, 1 - sm.s / smax), 1.3) * Math.max(0, 1 - sm.t / this.WAKE_LIFE);
+      pts.push({ x: px, z: pz, dx: tmp.x / dl, dz: tmp.z / dl, s: sm.s, f: fade, extF: sm.extF, extB: sm.extB });
+    }
+    // 向きが大きく変わったところ（前進 ⇄ 後進の切り替えなど）・間のあいたところでは、帯をつなげない（そこで消す）
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i];
+      if (a.dx * b.dx + a.dz * b.dz < 0.75 || Math.hypot(a.x - b.x, a.z - b.z) > ds * 3.5) { a.cut = true; b.cut = true; }
+    }
+    for (const p of pts) if (p.cut) p.f = 0;
+    const prof = [0, 0.7, 1, 0.7, 0]; // 幅方向の高さ（真ん中が頂）
+    const slope = [0.6, 1, 0, -1, -0.6]; // 内側（跡の中心線の側）から外側へ: 上り → 頂 → 下り
+    const beam = Math.max(wl.beam, L * 0.04);
+    // 帯の種類: side（±1 = 右・左、0 = 真ん中）、開き（進んだ距離に対する横の広がり）、どちらの端から出るか、高さ・明るさ
+    const kinds = [
+      { side: 1, k: 0.3536, end: 1, amp: 1.0, w0: 0.030, w1: 0.085 }, { side: -1, k: 0.3536, end: 1, amp: 1.0, w0: 0.030, w1: 0.085 },
+      { side: 1, k: 0.19, end: 1, amp: 0.5, w0: 0.020, w1: 0.050 }, { side: -1, k: 0.19, end: 1, amp: 0.5, w0: 0.020, w1: 0.050 },
+      { side: 1, k: 0.17, end: -1, amp: 0.6, w0: 0.024, w1: 0.055, lat0: 0.35 }, { side: -1, k: 0.17, end: -1, amp: 0.6, w0: 0.024, w1: 0.055, lat0: 0.35 },
+      { side: 0, k: 0, end: -1, amp: 0.45, flat: true },
+    ];
+    const ampH = L * 0.03; // 波の高さ（いちばん大きな波）
+    let vi = 0;
+    for (let r = 0; r < kinds.length; r++) {
+      const K = kinds[r];
+      for (let i = 0; i < N; i++) {
+        const p = pts[Math.min(i, pts.length - 1)];
+        const dead = i >= pts.length;
+        const nx = -p.dz, nz = p.dx; // 進む向きに直角（右）
+        const ext = K.end > 0 ? p.extF : -p.extB;
+        // 出たところ（先頭 or 後ろの端）から、横へ広がった位置
+        const lat = K.side * (K.k * p.s + (K.lat0 || 0) * beam * 0.5);
+        const cx = p.x + p.dx * ext + nx * lat, cz = p.z + p.dz * ext + nz * lat;
+        const hw = K.flat ? beam * 0.45 + 0.28 * p.s : L * (K.w0 + K.w1 * p.s / L);
+        // 先頭の波は、出てすぐは船体に沿って立ち上がる（出た直後は低い）
+        const rise = K.flat ? Math.min(1, p.s / (L * 0.15)) : Math.min(1, 0.35 + p.s / (L * 0.12));
+        const f = dead ? 0 : p.f * K.amp * rise;
+        // 腕に沿って、波の山と谷（山のところが高い。後ろへ流れる）
+        const hump = K.flat ? 1 : 0.45 + 0.55 * Math.pow(0.5 + 0.5 * Math.sin((p.s / L) * 5.5 * 6.2832 - this._time * 2.2), 2);
+        const h = ampH * f * hump;
+        const tilt = Math.min(1.4, (h / Math.max(1e-6, hw)) * 2.2);
+        for (let a = 0; a < A; a++) {
+          const u = (a / (A - 1)) * 2 - 1; // -1 = 内側 / +1 = 外側
+          const sgn = K.side === 0 ? 1 : K.side;
+          const ox = nx * sgn * u * hw, oz = nz * sgn * u * hw;
+          const y = K.flat ? h * 0.3 * prof[a] : h * prof[a];
+          pos.setXYZ(vi, cx + ox, y, cz + oz);
+          // 盛り上がりの向き（内側の斜面は内へ、外側の斜面は外へ傾く）から、光の当たり方
+          const tl = K.flat ? 0 : slope[a] * tilt;
+          const Nx = -nx * sgn * tl, Nz = -nz * sgn * tl;
+          const nl = 1 / Math.hypot(Nx, 1, Nz);
+          const lit = Math.max(0, (Nx * lightL.x + lightL.y + Nz * lightL.z) * nl);
+          const base = K.flat ? 0.3 : 0.12 + 0.9 * lit * lit;
+          aI.setX(vi, f * base * (a === 0 || a === A - 1 ? 0 : 1) * 1.8);
+          aU.setXYZ(vi, u, p.s / L, K.flat ? 1 : 0);
+          vi++;
+        }
+      }
+    }
+    pos.needsUpdate = true; aI.needsUpdate = true; aU.needsUpdate = true;
+    // --- 喫水線に沿う白波 ---
+    {
+      const lp = W.line.geometry.attributes.position, li = W.line.geometry.attributes.aI, lu = W.line.geometry.attributes.aU;
+      const M = W.M, n = outline.length;
+      let cxm = 0, czm = 0;
+      for (const p of outline) { cxm += p.x; czm += p.z; }
+      cxm /= n; czm /= n;
+      const w = L * 0.009;
+      let k = 0;
+      for (let i = 0; i < M; i++) {
+        const p = outline[i % n], pa = outline[(i + n - 1) % n], pb = outline[(i + 1) % n];
+        // 外向き（輪郭の接線に直角で、中心から離れる向き）
+        let tx = pb.x - pa.x, tz = pb.z - pa.z;
+        const tlen = Math.hypot(tx, tz) || 1; tx /= tlen; tz /= tlen;
+        let ox = tz, oz = -tx;
+        if (ox * (p.x - cxm) + oz * (p.z - czm) < 0) { ox = -ox; oz = -oz; }
+        // 進む向きの側（波を押しのける側）ほど高く・明るい。後ろの側は低い
+        const facing = ox * dirL.x + oz * dirL.z;
+        const pile = 0.25 + str * (0.55 + 0.9 * Math.max(0, facing) - 0.3 * Math.max(0, -facing));
+        const h = ampH * 0.9 * str * Math.max(0, 0.25 + facing);
+        for (let a = 0; a < 3; a++) {
+          const u = a - 1; // -1 = 船体の側 / +1 = 外
+          lp.setXYZ(k, p.x + ox * w * (u + 0.6), a === 1 ? h : 0, p.z + oz * w * (u + 0.6));
+          const lit = a === 1 ? 1 : 0;
+          li.setX(k, pile * lit * 0.5);
+          lu.setXYZ(k, u * 0.9, i * 0.37, 2);
+          k++;
+        }
+      }
+      lp.needsUpdate = true; li.needsUpdate = true; lu.needsUpdate = true;
+    }
+    W.mat.uniforms.uTime.value = this._time;
   },
 
   _plumeRoot: null,
