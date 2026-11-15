@@ -198,7 +198,7 @@ const Planetfall = {
     }
     this._wasContact = contact;
     const vH = Math.hypot(rel.x - up.x * vVert, rel.y - up.y * vVert, rel.z - up.z * vVert);
-    this.active = { body, alt, up, upU, vVert: contact ? 0 : vVert, vHoriz: vH, state, sea: surf.sea, color: surf.color, rho, air, contact, top, h0, vs };
+    this.active = { body, alt, up, upU, vVert: contact ? 0 : vVert, vHoriz: vH, state, sea: surf.sea, color: surf.color, rho, air, contact, top, h0, vs, rel };
     this._setVisuals(this.active);
   },
 
@@ -311,10 +311,117 @@ void main() {
     this._vis = a;
   },
 
+  // ---------------------------------------------------------
+  // v89: 大気圏突入の炎（空気との摩擦・圧縮で、前の面が赤く光る）
+  //   強さは、空気の濃さ ρ と、空気に対する速さ v から（熱の流れ ∝ √ρ · v³）。地球なら秒速 7 km で高度 80 km あたりから光り始め、
+  //   60 km より下でいちばん明るい。艦の前（進む向き）をおおう光の殻と、後ろへ流れる炎の尾、艦を照らす赤い光
+  // ---------------------------------------------------------
+  _plasmaI: 0,
+  _ensurePlasma() {
+    if (this._plasma || !this._scene) return;
+    const g = new THREE.Group();
+    const shellMat = new THREE.ShaderMaterial({
+      uniforms: { uI: { value: 0 }, uTime: { value: 0 } },
+      vertexShader: `varying vec3 vN; varying vec3 vL; varying vec3 vV;
+void main() { vL = position; vN = normalize(normalMatrix * normal); vec4 mv = modelViewMatrix * vec4(position, 1.0); vV = normalize(-mv.xyz); gl_Position = projectionMatrix * mv; }`,
+      fragmentShader: `uniform float uI; uniform float uTime; varying vec3 vN; varying vec3 vL; varying vec3 vV;
+void main() {
+  float fz = normalize(vL).z;                        // +1 = 進む向きの正面
+  float front = smoothstep(-0.35, 1.0, fz);
+  float core = pow(max(fz, 0.0), 6.0);
+  float rim = 1.0 - abs(dot(normalize(vN), normalize(vV)));
+  float fl = 0.75 + 0.25 * sin(vL.x * 9.0 + uTime * 23.0) * sin(vL.y * 11.0 - uTime * 17.0);
+  vec3 col = mix(vec3(0.85, 0.08, 0.02), vec3(1.0, 0.42, 0.08), front);
+  col = mix(col, vec3(1.0, 0.85, 0.6), core * 0.8);
+  float a = uI * fl * (front * front * (0.35 + 0.65 * rim) + core * 0.9);
+  gl_FragColor = vec4(col * a, a);
+}`,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    });
+    const shell = new THREE.Mesh(new THREE.SphereGeometry(1, 40, 28), shellMat);
+    // 炎の尾: 後ろへ（-Z）流れる、先の細い筒
+    const tailGeo = new THREE.CylinderGeometry(0.25, 1, 1, 32, 12, true);
+    tailGeo.rotateX(Math.PI / 2); // 筒の軸を Z へ（+Z 側が根元）
+    tailGeo.translate(0, 0, -0.5);
+    const tailMat = new THREE.ShaderMaterial({
+      uniforms: { uI: { value: 0 }, uTime: { value: 0 } },
+      vertexShader: `varying vec3 vL; varying vec3 vN; varying vec3 vV;
+void main() { vL = position; vN = normalize(normalMatrix * normal); vec4 mv = modelViewMatrix * vec4(position, 1.0); vV = normalize(-mv.xyz); gl_Position = projectionMatrix * mv; }`,
+      fragmentShader: `uniform float uI; uniform float uTime; varying vec3 vL; varying vec3 vN; varying vec3 vV;
+void main() {
+  float u = clamp(-vL.z, 0.0, 1.0);                  // 0 = 根元、1 = 尾の先
+  float rim = 1.0 - abs(dot(normalize(vN), normalize(vV)));
+  float body = pow(1.0 - rim, 1.5);                  // 筒の真ん中ほど濃い（輪郭は薄く）
+  float ang = atan(vL.y, vL.x);
+  float streak = 0.55 + 0.45 * sin(ang * 7.0 + u * 9.0 - uTime * 30.0) * sin(ang * 3.0 - u * 5.0 + uTime * 11.0);
+  float a = uI * pow(1.0 - u, 1.6) * body * streak * 0.8;
+  vec3 col = mix(vec3(1.0, 0.45, 0.1), vec3(0.7, 0.05, 0.02), u);
+  gl_FragColor = vec4(col * a, a);
+}`,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    });
+    const tail = new THREE.Mesh(tailGeo, tailMat);
+    g.add(shell); g.add(tail);
+    g.traverse((o) => { o.frustumCulled = false; o.renderOrder = 8; });
+    g.visible = false;
+    this._scene.add(g);
+    // 艦を照らす赤い光（いつもある。光らないときは強さ 0 にするだけ = シェーダーを作り直さない）
+    const light = new THREE.PointLight(0xff5a1e, 0, 1, 1.5);
+    this._scene.add(light);
+    this._plasma = { g, shell, tail, light, shellMat, tailMat };
+  },
+  _updatePlasma(ship, dt) {
+    const a = this.active;
+    let target = 0;
+    if (a && a.rel && a.rho > 0 && ship && !(typeof Navigation !== 'undefined' && Navigation.isWarping())) {
+      const v = Math.hypot(a.rel.x, a.rel.y, a.rel.z);
+      const q = Math.sqrt(a.rho) * v * v * v;
+      target = q > 0 ? clamp((Math.log10(q) - 9.0) / 0.9, 0, 1.2) : 0;
+      if (a.contact) target = 0;
+    }
+    const k = 1 - Math.exp(-(dt || 0.016) / 0.6);
+    this._plasmaI += (target - this._plasmaI) * k;
+    const I = this._plasmaI;
+    if (I < 0.01 && !this._plasma) return;
+    this._ensurePlasma();
+    const P = this._plasma;
+    if (!P) return;
+    P.g.visible = I >= 0.01;
+    P.light.intensity = I >= 0.01 ? I * 2.5 : 0;
+    if (!P.g.visible || !a || !a.rel) return;
+    // 進む向き（空気に対して）と、艦の大きさ（進む向きの長さ・横の広がり）
+    const m = new THREE.Vector3(a.rel.x, a.rel.y, a.rel.z);
+    if (m.lengthSq() < 1e-6) return;
+    m.normalize();
+    const box = typeof EngineFx !== 'undefined' && EngineFx.shipBox ? EngineFx.shipBox(ship) : null;
+    const sq = new THREE.Quaternion(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w);
+    const W = box ? box.size.x : 20, H = box ? box.size.y : 20, L = box ? box.size.z : 80;
+    const ml = m.clone().applyQuaternion(sq.clone().invert()); // 艦の座標での進む向き
+    const ext = Math.abs(ml.x) * W * 0.5 + Math.abs(ml.y) * H * 0.5 + Math.abs(ml.z) * L * 0.5; // 進む向きの、中心から端まで
+    const lat = 0.5 * Math.max(W * Math.sqrt(1 - ml.x * ml.x), H * Math.sqrt(1 - ml.y * ml.y), L * Math.sqrt(1 - ml.z * ml.z));
+    const c = box ? box.center.clone().applyQuaternion(sq) : new THREE.Vector3();
+    c.add(new THREE.Vector3(ship.position.x, ship.position.y, ship.position.z));
+    P.g.position.copy(c);
+    P.g.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), m);
+    const grow = 1 + 0.25 * I; // 強いほど殻が厚い
+    P.shell.scale.set(lat * 1.15 * grow, lat * 1.15 * grow, ext * 1.12 * grow);
+    P.shell.position.set(0, 0, ext * 0.08);
+    const tailLen = ext * (2.5 + 5 * I);
+    P.tail.scale.set(lat * 1.05, lat * 1.05, tailLen);
+    P.tail.position.set(0, 0, -ext * 0.3);
+    const t = (this._plasmaT = ((this._plasmaT || 0) + (dt || 0.016)) % 1000);
+    P.shellMat.uniforms.uI.value = Math.min(1.2, I); P.shellMat.uniforms.uTime.value = t;
+    P.tailMat.uniforms.uI.value = Math.min(1.2, I) * 0.8; P.tailMat.uniforms.uTime.value = t;
+    // 赤い光は、艦の前のよどみ点のあたりから
+    P.light.position.copy(c).addScaledVector(m, ext * 1.1);
+    P.light.distance = (ext + lat) * 4;
+  },
+
   // 描く直前（カメラが決まったあと）
   preRender(cam, dt) {
     const a = this._vis;
     const ship = State.ship;
+    this._updatePlasma(ship, dt);
     if (!a || !ship || !this._sky) return;
     const b = a.body;
     const up = new THREE.Vector3(a.up.x, a.up.y, a.up.z);
