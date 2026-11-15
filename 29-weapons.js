@@ -2579,6 +2579,7 @@ const Weapons = {
   DMG_MAX_SPOTS: 20,
   DMG_MAX_ENTRIES: 28, // シェーダーへ渡す数（1つの跡が、船体と砲塔の両方の表面に付くことがあるので、跡の数より多い）
   SMOKE_MAX: 600,
+  SMOKE_DRAG_T: 1.2, // v89: 煙がまわりの速さに合うまでの時間 [s]
   DMG_MAX_SEV: 16, // 折れた砲身の数の上限（超えたら、砲身ごと消す）
   _dmgUniforms() {
     if (this._dmgU) return this._dmgU;
@@ -2991,13 +2992,13 @@ uniform int dmgSevCount;
     const D = this._dmg;
     this._ensureSmoke();
     if (D && D.smokeArr) {
-      const sinv = new THREE.Matrix4().copy(ship.mesh.matrixWorld).invert();
-      const p0 = point.clone().applyMatrix4(sinv);
+      const rel0 = point.clone().sub(new THREE.Vector3(ship.position.x, ship.position.y, ship.position.z));
+      const outW = sp.out.clone().transformDirection(ship.mesh.matrixWorld);
       for (let i = 0; i < 46; i++) {
         if (D.smokeArr.length >= this.SMOKE_MAX) D.smokeArr.shift();
         const jit = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
-        const v = sp.out.clone().multiplyScalar(0.8).add(jit).multiplyScalar(size * (0.03 + Math.random() * 0.09));
-        D.smokeArr.push({ p: p0.clone(), v, t: 0, life: 1.6 + Math.random() * 3.2, r0: size * (0.006 + Math.random() * 0.012), hot: 1.6 });
+        const v = outW.clone().multiplyScalar(0.8).add(jit).multiplyScalar(size * (0.03 + Math.random() * 0.09)).add(new THREE.Vector3(ship.velocity.x, ship.velocity.y, ship.velocity.z));
+        D.smokeArr.push({ rel: rel0.clone(), v, t: 0, life: 1.6 + Math.random() * 3.2, r0: size * (0.006 + Math.random() * 0.012), hot: 1.6 });
       }
     }
   },
@@ -3044,7 +3045,10 @@ uniform int dmgSevCount;
     if (sp.hole) this._checkSevered(sp, size);
     this._emitSmoke(sp, sp.hole ? 4 : 2, size);
   },
-  // 煙: 1つの点の集まり（艦のメッシュの子。艦と一緒に動く）。描画は1回
+  // 煙: 1つの点の集まり。描画は1回
+  //   v89: 煙は艦について動かない。出た瞬間は艦と同じ速度で（少し外へ吹き出し）、そのあとは まわり（宇宙なら重力に任せて
+  //   落ちていく基準・大気の中なら空気。05-ship-controller.js refV）に合わせて遅くなり、艦が進むと後ろへ取り残されて尾を引く。
+  //   位置は艦からの相対位置で持つ（原点の付け替えで跳ばないように）
   _ensureSmoke() {
     const D = this._dmg;
     const ship = State.ship;
@@ -3066,7 +3070,7 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
     const pts = new THREE.Points(geo, mat);
     pts.frustumCulled = false;
     pts.renderOrder = 6;
-    ship.mesh.add(pts);
+    (this._fx || ship.mesh).add(pts);
     D.smokePts = pts;
     D.smokeN = 0;
     D.smokeArr = [];
@@ -3077,14 +3081,17 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
     if (!D || !ship || !ship.mesh) return;
     this._ensureSmoke();
     if (!D.smokeArr) return;
-    const sinv = new THREE.Matrix4().copy(ship.mesh.matrixWorld).invert();
-    const p0 = this._spotWorld(sp).applyMatrix4(sinv);
+    const rel0 = this._spotWorld(sp).sub(new THREE.Vector3(ship.position.x, ship.position.y, ship.position.z));
+    const outW = sp.out.clone().transformDirection(ship.mesh.matrixWorld);
+    const sv = new THREE.Vector3(ship.velocity.x, ship.velocity.y, ship.velocity.z);
     const r = this._spotRadius(sp, size);
     for (let i = 0; i < count; i++) {
       if (D.smokeArr.length >= this.SMOKE_MAX) D.smokeArr.shift();
       const jit = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5);
-      const v = sp.out.clone().multiplyScalar(0.6 + Math.random() * 0.8).addScaledVector(jit, 0.7).multiplyScalar(size * 0.012);
-      D.smokeArr.push({ p: p0.clone().addScaledVector(jit, r * 0.5), v, t: 0, life: 3.5 + Math.random() * 3.5, r0: Math.max(size * 0.006, r * (0.35 + Math.random() * 0.3)), hot: sp.hole ? 0.9 : 0.5 });
+      const v = outW.clone().multiplyScalar(0.6 + Math.random() * 0.8).addScaledVector(jit, 0.7).multiplyScalar(size * 0.012).add(sv);
+      // 少し前の時刻に出たことにして、点の間をばらす（速く動いていても、穴のところから途切れずに尾を引くように）
+      const back = Math.random() * 0.1;
+      D.smokeArr.push({ rel: rel0.clone().addScaledVector(jit, r * 0.5), v, t: 0, back, life: 3.5 + Math.random() * 3.5, r0: Math.max(size * 0.006, r * (0.35 + Math.random() * 0.3)), hot: sp.hole ? 0.9 : 0.5 });
     }
   },
   // 毎フレーム: 冷ます・煙を出す／動かす
@@ -3115,13 +3122,22 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
       const pos = D.smokePts.geometry.attributes.position, dat = D.smokePts.geometry.attributes.aData;
       let k = 0;
       const keep = [];
+      const ship = State.ship;
+      const sv = new THREE.Vector3(ship.velocity.x, ship.velocity.y, ship.velocity.z);
+      const R = typeof ShipController !== 'undefined' && ShipController.refV ? ShipController.refV : { x: 0, y: 0, z: 0 };
+      const ref = new THREE.Vector3(R.x, R.y, R.z);
+      const g = 1 - Math.exp(-dt / this.SMOKE_DRAG_T);
+      const tmp = new THREE.Vector3();
       for (const sm of D.smokeArr) {
         sm.t += dt;
         if (sm.t >= sm.life) continue;
         const u = sm.t / sm.life;
-        sm.p.addScaledVector(sm.v, dt);
-        sm.v.multiplyScalar(1 - Math.min(0.5, dt * 0.25)); // だんだん遅く
-        pos.setXYZ(k, sm.p.x, sm.p.y, sm.p.z);
+        let h = dt;
+        if (sm.back) { h += sm.back; sm.back = 0; }
+        // まわりに合わせて遅くなり（艦について行かない）、艦に対して後ろへ流れる
+        sm.v.lerp(ref, g);
+        sm.rel.addScaledVector(tmp.copy(sm.v).sub(sv), h);
+        pos.setXYZ(k, ship.position.x + sm.rel.x, ship.position.y + sm.rel.y, ship.position.z + sm.rel.z);
         // 広がって薄くなる。出た直後だけ火の色
         dat.setXYZ(k, sm.r0 * (1 + u * 5), 0.5 * Math.min(1, u * 8) * (1 - u), sm.hot * Math.max(0, 1 - u * 6));
         keep.push(sm);
@@ -3216,6 +3232,20 @@ void main() { vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0; float a =
   },
   // 基準のフレームが変わったとき（16-navigation.js switchFrame）: 目標の位置・速度を新しいフレームへ写す
   onFrameSwitch(oldF, newF, nav) {
+    // v89: 煙（艦からの相対位置・速度）も新しいフレームへ
+    const D = this._dmg;
+    if (D && D.smokeArr && D.smokeArr.length && State.ship) {
+      const sp = State.ship.position;
+      const pOld = nav.universeToLocal(nav.localToUniverse({ x: sp.x, y: sp.y, z: sp.z }, newF), oldF); // 艦はもう新しいフレームにいる
+      const vo = nav._framePointVelocity(oldF, pOld), vn = nav._framePointVelocity(newF, sp);
+      for (const sm of D.smokeArr) {
+        const vu = Astro.mat3MulVec(oldF.rot, sm.v);
+        const v = Astro.mat3MulVec(newF.rotT, { x: vu.x + vo.x - vn.x, y: vu.y + vo.y - vn.y, z: vu.z + vo.z - vn.z });
+        sm.v.set(v.x, v.y, v.z);
+        const r = Astro.mat3MulVec(newF.rotT, Astro.mat3MulVec(oldF.rot, sm.rel));
+        sm.rel.set(r.x, r.y, r.z);
+      }
+    }
     const P = this.practice;
     if (!P) return;
     const conv = (p) => { const u = nav.localToUniverse({ x: p.x, y: p.y, z: p.z }, oldF); const l = nav.universeToLocal(u, newF); return new THREE.Vector3(l.x, l.y, l.z); };
