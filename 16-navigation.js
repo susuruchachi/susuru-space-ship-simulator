@@ -788,6 +788,10 @@ const Navigation = {
       const d = Astro.mat3MulVec(this.frame.rotT, { x: arrival.velocity.x - fv.x, y: arrival.velocity.y - fv.y, z: arrival.velocity.z - fv.z });
       v.x += d.x; v.y += d.y; v.z += d.z;
     }
+    // v89: 速度の基準（05-ship-controller.js refV）は、抜けたときの前進の速さを除いた速度から始める。
+    //   基準を「抜けた瞬間の速度」から始めていたため、抜けたときの速さが「速さ 0」扱いになり、
+    //   レバーが「速度」モードの 0% でも、抜けたときの速さのまま進み続けていた
+    if (typeof ShipController !== 'undefined') ShipController.refV = { x: v.x - fwd.x * speed, y: v.y - fwd.y * speed, z: v.z - fwd.z * speed };
     return v;
   },
 
