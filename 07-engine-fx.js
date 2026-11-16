@@ -138,8 +138,8 @@ void main() {
   if (vU.z < 0.5) {
     // 波の帯: 腕に沿って、斜めの短い波の山が並ぶ（後ろへ流れる）
     float crest = 0.5 + 0.5 * sin((vU.y * 5.5 - vU.x * 0.9) * 6.2832 - uTime * 2.2);
-    a *= 0.35 + 0.65 * crest * crest;
-    foam = (1.0 - smoothstep(0.0, 0.35, abs(vU.x))) * crest * crest;
+    a *= 0.55 + 0.45 * crest;
+    foam = (1.0 - smoothstep(0.0, 0.35, abs(vU.x))) * crest * 0.5;
   } else if (vU.z < 1.5) {
     // 真後ろ: 進む向きに直角の弧の波と、中心線の泡の筋
     float arcs = 0.5 + 0.5 * sin((vU.y + vU.x * vU.x * 0.35) * 4.0 * 6.2832 - uTime * 2.2);
@@ -149,7 +149,7 @@ void main() {
   } else {
     foam = 0.6 + 0.4 * sin(vU.y * 9.0 + uTime * 6.0);
   }
-  vec3 col = mix(vec3(0.30, 0.62, 0.95), vec3(0.80, 0.95, 1.0), clamp(vI * 1.4, 0.0, 1.0)) + vec3(0.3) * foam * vI;
+  vec3 col = mix(vec3(0.28, 0.58, 0.92), vec3(0.70, 0.88, 1.0), clamp(vI * 1.2, 0.0, 1.0)) + vec3(0.2) * foam * vI;
   gl_FragColor = vec4(col * a, a);
 }`,
       transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
@@ -358,8 +358,8 @@ void main() {
     // 帯の種類: side（±1 = 右・左、0 = 真ん中）、開き（進んだ距離に対する横の広がり）、どちらの端から出るか、高さ・明るさ
     const kinds = [
       { side: 1, k: 0.3536, end: 1, amp: 1.0, w0: 0.030, w1: 0.085 }, { side: -1, k: 0.3536, end: 1, amp: 1.0, w0: 0.030, w1: 0.085 },
-      { side: 1, k: 0.19, end: 1, amp: 0.5, w0: 0.020, w1: 0.050 }, { side: -1, k: 0.19, end: 1, amp: 0.5, w0: 0.020, w1: 0.050 },
-      { side: 1, k: 0.17, end: -1, amp: 0.6, w0: 0.024, w1: 0.055, lat0: 0.35 }, { side: -1, k: 0.17, end: -1, amp: 0.6, w0: 0.024, w1: 0.055, lat0: 0.35 },
+      { side: 1, k: 0.19, end: 1, amp: 0.0, w0: 0.020, w1: 0.050 }, { side: -1, k: 0.19, end: 1, amp: 0.0, w0: 0.020, w1: 0.050 },
+      { side: 1, k: 0.17, end: -1, amp: 0.3, w0: 0.024, w1: 0.055, lat0: 0.35 }, { side: -1, k: 0.17, end: -1, amp: 0.3, w0: 0.024, w1: 0.055, lat0: 0.35 },
       { side: 0, k: 0, end: -1, amp: 0.45, flat: true },
     ];
     const ampH = L * 0.03; // 波の高さ（いちばん大きな波）
@@ -390,9 +390,9 @@ void main() {
         const rise = K.flat ? Math.min(1, p.s / (L * 0.15)) : Math.min(1, 0.35 + p.s / (L * 0.12));
         const f = dead ? 0 : p.f * K.amp * rise;
         // 腕に沿って、波の山と谷（山のところが高い。後ろへ流れる）
-        const hump = K.flat ? 1 : 0.45 + 0.55 * Math.pow(0.5 + 0.5 * Math.sin((p.s / L) * 5.5 * 6.2832 - this._time * 2.2), 2);
+        const hump = K.flat ? 1 : 0.8 + 0.2 * Math.pow(0.5 + 0.5 * Math.sin((p.s / L) * 5.5 * 6.2832 - this._time * 2.2), 2);
         const h = ampH * f * hump;
-        const tilt = Math.min(1.4, (h / Math.max(1e-6, hw)) * 2.2);
+        const tilt = Math.min(0.8, (h / Math.max(1e-6, hw)) * 1.5);
         for (let a = 0; a < A; a++) {
           const u = (a / (A - 1)) * 2 - 1; // -1 = 内側 / +1 = 外側
           const sgn = K.side === 0 ? 1 : K.side;
@@ -404,8 +404,8 @@ void main() {
           const Nx = -nx * sgn * tl, Nz = -nz * sgn * tl;
           const nl = 1 / Math.hypot(Nx, 1, Nz);
           const lit = Math.max(0, (Nx * lightL.x + lightL.y + Nz * lightL.z) * nl);
-          const base = K.flat ? 0.3 : 0.12 + 0.9 * lit * lit;
-          aI.setX(vi, f * base * (a === 0 || a === A - 1 ? 0 : 1) * 1.8);
+          const base = K.flat ? 0.22 : 0.18 + 0.5 * lit;
+          aI.setX(vi, f * base * (a === 0 || a === A - 1 ? 0 : 1) * 0.95);
           aU.setXYZ(vi, u, p.s / L, K.flat ? 1 : 0);
           vi++;
         }
