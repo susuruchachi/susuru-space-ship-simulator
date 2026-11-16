@@ -429,6 +429,11 @@
   .vres-fare { font-size: 12px; text-align: center; margin-top: 4px; }
   .voyage-ok { display: block; margin: 10px auto 0; padding: 7px 26px; border-radius: 8px; color: #fff; background: rgba(40,110,170,0.7); border: 1px solid rgba(140,210,255,0.7); }
   body.clean-view .voyage-hud, body.map-open .voyage-hud { display: none !important; }
+  /* v89: 時間の倍速のバー（航行のメニューの中） */
+  .space-time-wrap { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: 8px; border: 1px solid rgba(140,210,255,0.35); background: rgba(10,30,50,0.4); font-size: 11px; color: #cfe6f6; }
+  .space-time-wrap.active { border-color: rgba(255,200,110,0.8); color: #ffe2b0; }
+  .space-time { width: 90px; accent-color: #ffcf7a; }
+  .space-time-val { min-width: 34px; white-space: nowrap; }
 
   /* v89: 艦内の視点（31-viewpoints.js） */
   .btn-viewpoint { position: fixed; top: calc(92px + var(--sat, 0px)); right: calc(12px + var(--sar, 0px)); z-index: 5; padding: 7px 12px; border-radius: 8px; font-size: 12px; color: #cfeaff; background: rgba(10,30,50,0.6); border: 1px solid rgba(120,200,255,0.5); }
@@ -1789,23 +1794,34 @@ function animate() {
 function animateFrame() {
   const dt = Math.min(clock.getDelta(), 0.05); // タブ切り替え等の大ジャンプ対策
 
-  // v77: 宇宙の時刻を進め、太陽系の天体の位置・自転を更新してから艦を動かす
-  SimClock.update(dt);
-  SolarSystem.update(SimClock.jd);
-
-  Navigation.updateFrames(); // v85: 母港の軌道の位置・天体の速度
   // v85: 星図で時間を早送り（・一時停止）している間は、艦も同じ速さで動かす
   const shipTimeScale = StarMap.isOpen() ? SimClock.timeScale : 1;
-  if (shipTimeScale === 1) ShipController.update(dt);
-  else ShipController.updateTimeScaled(dt * shipTimeScale);
-  if (shipTimeScale === 1) { Planetfall.update(dt); Planetfall.noteMotion(dt); } // v89: 大気の抵抗・接地（地表のガードより先に）
-  Navigation.postUpdate();
-  // v85: postUpdate は原点の付け替え（母港以外で原点から20km離れるたび）や地表からの
-  // 押し戻しで艦の位置を書き換える。艦のメッシュを合わせ直さないと、その1フレームだけ
-  // 艦が古い位置（20km先）に描かれ、速いほど頻繁に艦が点滅して見えていた
-  if (State.ship) ShipController._syncMesh(State.ship);
+  // v89: 時間の倍速（航行のメニューのバー）。ワープ・内空航行では 16-navigation.js stepWarp が倍速の時間で進む（姿勢はふつうの時間）。
+  //   通常航行では、ふつうの時間の刻みのまま、物理を何回も進める（刻みを大きくすると、操縦・姿勢の制御が行き過ぎて進路がぶれる）
+  const tScale = shipTimeScale === 1 && !(typeof PRACTICE_MODE !== 'undefined' && PRACTICE_MODE) && !Navigation.timeScalePause ? Math.max(1, Navigation.timeScale || 1) : 1;
+  const subN = tScale > 1 && !Navigation.isWarping() ? Math.min(Math.round(tScale), Navigation.TIME_NORMAL_MAX) : 1;
+  for (let si = 0; si < subN; si++) {
+    const warpNow = Navigation.isWarping();
+    const simMul = warpNow && tScale > 1 ? (Navigation.lastTimeMul || 1) : 1;
+    // v77: 宇宙の時刻を進め、太陽系の天体の位置・自転を更新してから艦を動かす
+    SimClock.update(dt * simMul);
+    SolarSystem.update(SimClock.jd);
+    Navigation.updateFrames(); // v85: 母港の軌道の位置・天体の速度
+    if (!(tScale > 1)) Navigation.lastTimeMul = 1;
+    if (shipTimeScale === 1) ShipController.update(dt);
+    else ShipController.updateTimeScaled(dt * shipTimeScale);
+    if (shipTimeScale === 1) { Planetfall.update(dt); Planetfall.noteMotion(dt); } // v89: 大気の抵抗・接地（地表のガードより先に）
+    Navigation.postUpdate();
+    // v85: postUpdate は原点の付け替え（母港以外で原点から20km離れるたび）や地表からの
+    // 押し戻しで艦の位置を書き換える。艦のメッシュを合わせ直さないと、その1フレームだけ
+    // 艦が古い位置（20km先）に描かれ、速いほど頻繁に艦が点滅して見えていた
+    if (State.ship) ShipController._syncMesh(State.ship);
+    // v89: 定期航路（ダイヤ・乗り心地・出来事）。艦の時間で進める（出来事の選ぶ時間は、ふつうの時間）
+    const shipDt = Navigation.isWarping() ? dt * (tScale > 1 ? (Navigation.lastTimeMul || 1) : 1) : dt;
+    Voyage.update(shipDt, dt / subN);
+    if (Navigation.isWarping() && si === 0 && subN > 1) break; // 途中でワープに入ったら、倍速はワープの側で
+  }
   Weapons.update(dt); // v89: 砲塔・射撃レーダーを狙う向きへ、弾・レーザーを動かす
-  Voyage.update(dt); // v89: 定期航路（ダイヤ・乗り心地・出来事）
   EngineFx.update(dt, camera, renderer);
   if (!Weapons.updateCamera(camera) && !Viewpoints.updateCamera(camera, dt)) CameraSystem.update(camera); // v89: 照準の視点・艦内の視点
   Weapons.preRender(camera); // v89: 被弾の跡（船体のシェーダーへ渡す）

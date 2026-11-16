@@ -38,6 +38,11 @@ const ShipController = {
   _updateRefV(ship, g, h) {
     const nav = typeof Navigation !== 'undefined' ? Navigation : null;
     if (!nav || !nav.newtonianFlight || !nav.newtonianFlight()) { this.refV = null; return; }
+    // 自動航行の進入中は、到着点の動き（その点と一緒に止まる）を基準に（重力場機関の艦の竜骨などが、進入の減速と取り合わないように）
+    if (nav.approach && nav._approachTarget) {
+      const t = nav._approachTarget(ship);
+      if (t && t.v) { this.refV = { x: t.v.x, y: t.v.y, z: t.v.z }; return; }
+    }
     const pf = typeof Planetfall !== 'undefined' ? Planetfall.active : null;
     if (pf && pf.vs && (pf.contact || pf.alt < pf.top)) { this.refV = { x: pf.vs.x, y: pf.vs.y, z: pf.vs.z }; return; }
     if (!this.refV) { this.refV = { x: ship.velocity.x, y: ship.velocity.y, z: ship.velocity.z }; return; }

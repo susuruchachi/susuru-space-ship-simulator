@@ -27,6 +27,18 @@ const SpaceHud = {
   // -----------------------------------------------------------
   // 画面上部中央のナビゲーションパネル
   // -----------------------------------------------------------
+  TIME_STEPS: [1, 2, 5, 10, 100, 1000, 10000, 100000],
+  // 時間の倍速の表示（選んだ倍率と、いま実際に効いている倍率）
+  _syncTimeLabel(force) {
+    const v = this._els.timeVal;
+    if (!v) return;
+    const k = Navigation.timeScale || 1;
+    const eff = Navigation.timeScalePause ? 1 : Navigation.isWarping() ? (Navigation.lastTimeMul || 1) : Math.min(k, Navigation.TIME_NORMAL_MAX || 8);
+    const f = (x) => (x >= 1000 ? `${Math.round(x / 1000)}千` : `${Math.round(x)}`);
+    const t = k <= 1 ? '×1' : Math.round(eff) < k ? `×${f(k)}（今 ×${f(eff)}）` : `×${f(k)}`;
+    if (force || v.textContent !== t) v.textContent = t;
+    v.parentElement.classList.toggle('active', k > 1);
+  },
   _buildNavPanel(domRoot) {
     const el = document.createElement('div');
     el.className = 'space-nav-panel';
@@ -51,6 +63,7 @@ const SpaceHud = {
         <button class="btn-space-labels" title="天体名の表示 (L)">🏷</button>
         <button class="btn-space-orbits" title="軌道線の表示">◯</button>
         <button class="btn-space-compact" title="パネルを小さく/大きく">▴</button>
+        <label class="space-time-wrap" title="時間の倍速（ワープ・内空航行で効く。到着点・天体の近くでは自動で遅くなる）"><span class="stw-icon">⏩</span><input type="range" class="space-time" min="0" max="7" step="1" value="0"><span class="space-time-val">×1</span></label>
       </div>
     `;
     domRoot.appendChild(el);
@@ -95,6 +108,21 @@ const SpaceHud = {
       else Navigation.setTarget({ kind: 'body', id: v });
       this._els.select.blur();
     });
+    // v89: 時間の倍速のバー
+    {
+      const r = el.querySelector('.space-time'), val = el.querySelector('.space-time-val');
+      this._els.time = r; this._els.timeVal = val;
+      const apply = () => {
+        const k = this.TIME_STEPS[Number(r.value)] || 1;
+        Navigation.timeScale = k;
+        this._syncTimeLabel(true);
+      };
+      r.addEventListener('input', apply);
+      r.addEventListener('change', () => { apply(); r.blur(); });
+      // 演習中は使わない
+      if (typeof PRACTICE_MODE !== 'undefined' && PRACTICE_MODE) el.querySelector('.space-time-wrap').style.display = 'none';
+      setInterval(() => this._syncTimeLabel(false), 300);
+    }
     el.querySelector('.btn-space-map').addEventListener('click', () => {
       if (typeof StarMap !== 'undefined') StarMap.toggle();
     });

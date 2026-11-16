@@ -13,7 +13,9 @@
 // =============================================================
 
 const VOYAGE_STORAGE_KEY = 'spaceSimVoyage';
-const VOYAGE_DESTS = ['moon', 'mercury', 'venus', 'mars', 'ceres', 'jupiter', 'saturn', 'titan', 'uranus', 'neptune', 'pluto'];
+const VOYAGE_DESTS = ['moon', 'mercury', 'venus', 'mars', 'ceres', 'jupiter', 'saturn', 'titan', 'uranus', 'neptune', 'pluto',
+  // v89: 恒星間・銀河間の航路（28-deep-space.js）
+  'proxima_b', 'trappist1_e', 'teegarden_b', 'andromeda1', 'cradle346', 'tarantula'];
 
 // 出来事。options: label 選ぶ言葉 / note 何が起きるか / hold 足止め [s] / comfort 乗り心地 ± / service もてなし ±
 //   risk: { p 確率, text, comfort, hold } うまくいかなかったとき / rush: ダイヤを早める（急病人）
@@ -117,20 +119,52 @@ const Voyage = {
     let t = 0;
     if (N._nearPort && N._nearPort(ship)) t += N.DEPART_DIST / N.DEPART_SPEED + 4; // 出港（前進で 3 km）
     t += 12; // 機首を目的地へ向ける
-    const inter = ship.interspace && ship.gravityDrive && N.isInterspace !== undefined && ship.interspace.maxSpeed > 0 && ship.interspace.maxCompression > 0;
-    const vMax = inter ? ship.interspace.maxSpeed * ship.interspace.maxCompression : N.WARP_MAX_SPEED;
-    const vPeak = Math.max(N.WARP_MIN_SPEED, Math.min(vMax, D * N.WARP_K_TARGET));
-    t += Math.log10(vPeak / N.WARP_MIN_SPEED) / N.WARP_ACCEL_DECADES + 3; // 加速
-    if (inter) t += (ship.interspace.maxSpeed / SHIP_IKN) / N.IS_ACCEL_IKN * 0.5; // 内空航法: 船速が上がるまで
-    t += D / vPeak; // 巡航
-    // 減速: 速さ = 残りの距離 × K（距離が e 分の 1 になるのに 1/K 秒）
+    // ワープ・内空航行で進むところ: 進んだ距離 x ごとの速さ v(x) を、16-navigation.js stepWarp と同じ決まりで求め、
+    //   ∫ dx / v を数値で足す（恒星から離れるほど速くなる星系の外・銀河の間も、同じ式で見積もれる）
+    //   v(x) = min(機関の上限, 残りの距離 × K)。ワープの上限は、星系の中は WARP_MAX_SPEED、外はいちばん近い恒星までの距離 × WARP_K_STAR
+    const inter = !!(ship.gravityDrive && ship.interspace && ship.interspace.maxSpeed > 0 && ship.interspace.maxCompression > 0);
+    const vIS = inter ? ship.interspace.maxSpeed * ship.interspace.maxCompression : 0;
     const dDrop = N.dropDistance ? N.dropDistance(ship) : 0;
-    const dEnd = Math.max(dDrop, N.ARRIVAL_DISTANCE);
-    t += Math.log(Math.max(1.0001, (vPeak / N.WARP_K_TARGET) / dEnd)) / N.WARP_K_TARGET;
+    const dEnd = Math.max(dDrop, N.ARRIVAL_DISTANCE, 1);
+    const AU = 1.495978707e11;
+    const sys = this._systemRadius(tg);
+    const r0 = sys.r0, r1 = sys.r1; // 出発地・目的地の、いちばん近い恒星からの距離（おおよそ）
+    const cap = (x) => {
+      if (inter) return vIS;
+      const dStar = Math.min(x + r0, Math.max(0, D - x) + r1);
+      return Math.max(N.WARP_MAX_SPEED, Math.min(N.WARP_DEEP_MAX, dStar * N.WARP_K_STAR));
+    };
+    const vAt = (x) => Math.max(N.WARP_MIN_SPEED * 0.2, Math.min(cap(x), (D - x) * N.WARP_K_TARGET));
+    // 両端を細かく（対数で）区切る
+    const xs = [0];
+    const M = 240, lo = Math.max(1, D * 1e-15);
+    for (let i = 0; i <= M; i++) xs.push(Math.min(D / 2, lo * Math.pow(D / 2 / lo, i / M)));
+    for (let i = M; i >= 0; i--) { const r = Math.min(D / 2, lo * Math.pow(D / 2 / lo, i / M)); xs.push(D - Math.max(r, dEnd)); }
+    let vPeak = N.WARP_MIN_SPEED;
+    for (let i = 1; i < xs.length; i++) {
+      const a = xs[i - 1], b = xs[i];
+      if (!(b > a)) continue;
+      const va = vAt(a), vb = vAt(b);
+      vPeak = Math.max(vPeak, va, vb);
+      t += (b - a) * 0.5 * (1 / va + 1 / vb);
+    }
+    t += Math.log10(Math.max(1, vPeak / N.WARP_MIN_SPEED)) / N.WARP_ACCEL_DECADES + 3; // 加速（速さは対数で上がる）
+    if (inter) t += (ship.interspace.maxSpeed / SHIP_IKN) / N.IS_ACCEL_IKN; // 内空航法: 船速が上がるまで
     // 通常航行での進入（止まり切れる速さで）
     if (dDrop > 0) { const vN = Math.min(N.normalMaxSpeed(ship), Math.sqrt(2 * N.brakeAccel(ship) * dDrop)); t += (2 * dDrop) / Math.max(1, vN) + 6; }
     else t += 6;
     return t;
+  },
+  // 出発地・目的地の、いちばん近い恒星からのおおよその距離 [m]（星系の外での、ワープの速さの見積もり用）
+  _systemRadius(tg) {
+    const AU = 1.495978707e11;
+    const starDist = (p) => {
+      let d = Infinity;
+      for (const b of SolarSystem.bodies) if (b.type === 'star') d = Math.min(d, Math.hypot(p.x - b.pos.x, p.y - b.pos.y, p.z - b.pos.z));
+      return Number.isFinite(d) ? d : AU;
+    };
+    const a = Navigation.targetArrival(tg);
+    return { r0: Math.max(AU * 0.01, starDist(Navigation.shipUniverse())), r1: Math.max(AU * 0.01, a ? starDist(a.point) : AU) };
   },
   // ダイヤ [s]（見積もりに余裕を足す）
   schedule(tg, ship) { return Math.ceil((this.estimate(tg, ship) * 1.15 + 15) / 5) * 5; },
@@ -174,10 +208,12 @@ const Voyage = {
   },
 
   // 毎フレーム（index.html animateFrame）
-  update(dt) {
+  update(dt, realDt) {
     const V = this.active;
     const ship = State.ship;
+    if (typeof Navigation !== 'undefined') Navigation.timeScalePause = !!(V && V.card); // 出来事を選んでいるあいだは倍速を止める
     if (!V || !ship || !(dt > 0)) return;
+    const rdt = realDt > 0 ? realDt : dt;
     const N = Navigation;
     // 目的地を変えたら中止
     const t = N.target;
@@ -193,7 +229,7 @@ const Voyage = {
     const auto = !!(N.departure || N.approach || N.arrivalHold || (N.isWarping() && N.warp.autopilot) || ship.autoDockingEnabled);
     const k = (V.rush ? 1.6 : 1) * (auto ? 0 : 1); // 急病人を運んでいるときは、揺れが響く
     const w = Math.hypot(ship.angularVelocity.x, ship.angularVelocity.y, ship.angularVelocity.z);
-    if (w > this.TURN_OK) V.comfort -= (w - this.TURN_OK) * dt * 7 * k;
+    if (w > this.TURN_OK) V.comfort -= (w - this.TURN_OK) * rdt * 7 * k;
     // 噴射で進む艦は、強い加速も（重力場機関の艦は、場が加速を打ち消すので感じない）。ワープ中・フレームの付け替えのときは見ない
     if (!ship.gravityDrive && !N.isWarping() && V.prevV && V.prevFrame === N.frame) {
       const g = ship.gravityAccel || { x: 0, y: 0, z: 0 };
@@ -208,7 +244,7 @@ const Voyage = {
     V.comfort = clamp(V.comfort, 0, 100);
     // --- 出来事 ---
     if (V.card) {
-      V.card.left -= dt;
+      V.card.left -= rdt;
       if (V.card.left <= 0) { const i = V.card.ev.options.findIndex((o) => o.safe); this.choose(i >= 0 ? i : 0, true); }
     } else if (V.events.length && V.t >= V.events[0].at && V.hold <= 0 && !N.approach) {
       const e = V.events.shift(); V.card = { ev: e.ev, left: this.CHOICE_TIME }; this._showCard();
@@ -276,7 +312,14 @@ const Voyage = {
   // ---------------------------------------------------------
   // 画面
   // ---------------------------------------------------------
-  _fmt(s) { s = Math.max(0, Math.round(s)); const m = Math.floor(s / 60); return `${m}:${String(s % 60).padStart(2, '0')}`; },
+  // 時間の表示: 1時間未満は 分:秒、それより長ければ 時間:分:秒、1日以上は 日と時間
+  _fmt(s) {
+    s = Math.max(0, Math.round(s));
+    if (s < 3600) { const m = Math.floor(s / 60); return `${m}:${String(s % 60).padStart(2, '0')}`; }
+    if (s < 86400) { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return `${h}:${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; }
+    const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+    return `${d}日${h}時間${m}分`;
+  },
   _buildUi() {
     const mk = (cls, parent) => { const el = document.createElement('div'); el.className = cls; el.style.display = 'none'; (parent || document.body).appendChild(el); return el; };
     this._hud = mk('voyage-hud');

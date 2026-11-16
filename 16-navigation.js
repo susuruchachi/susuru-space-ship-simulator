@@ -47,6 +47,10 @@ const Navigation = {
   // v87: 自動航行の終わり。実効の速さが通常航行の最高速まで落ちたらワープ・内空航行を抜け、
   // 通常航行で到着点まで減速して進む（stepApproach）。{ target, rel?, lagrange?, label }
   approach: null,
+  timeScale: 1,      // v89: 時間の倍速（HUD のバー）。ワープ・内空航行のときに効く
+  timeScalePause: false, // v89: 航海の出来事を選んでいるあいだは倍速を止める（32-voyage.js）
+  TIME_NORMAL_MAX: 8, // v89: 通常航行のときの倍速の上限（物理を細かく刻んで進めるので、重くならないように）
+  lastTimeMul: 1,    // v89: このフレームで実際に使った倍率（到着点・天体の近くでは下がる）
   voyageSpeedCap: Infinity, // v89: 航海の出来事の足止め（32-voyage.js）のあいだの、ワープ・内空航行の速さの上限 [m/s]
   APPROACH_BRAKE_MARGIN: 0.7, // 減速に使う加速度 = 艦が出せる減速 × この値（余裕）
   APPROACH_MAX_DROP_DIST: 2e6, // 通常航行で減速する距離の上限 [m]（2000 km。弱い艦は、ここから最高速より遅く入る）
@@ -994,6 +998,24 @@ const Navigation = {
     w.maxCompression = this.isInterspace() ? ship.interspace.maxCompression : 0;
     const vMaxDrive = this.isInterspace() ? ship.interspace.maxSpeed * w.maxCompression : vMaxHere;
     let vLimit = Math.min(vMaxDrive, surf * this.WARP_K_SURFACE * (1 + 8 * outward * outward));
+    // v89: 時間の倍速（timeScale）: 姿勢（回転）はふつうの時間で動かし、速さ・進む距離・到着の判定だけを倍速の時間（dtS）で進める
+    //   （姿勢まで大きな時間の刻みで動かすと、向きの制御が行き過ぎて進路がぶれる）。天体・到着点の近くでは、1回の刻みで
+    //   進む距離が残りの 2 割を超えないように倍率を下げる（行き過ぎない・ちゃんと止まれる）
+    let mulEff = this.timeScalePause ? 1 : Math.max(1, this.timeScale || 1);
+    if (mulEff > 1) {
+      // この刻みで出しうる速さ（いまの速さか、ここで上がりうる速さの上限の大きいほう。倍速の刻みでは、速さは1回で目標まで変わる）
+      let vCan = vLimit;
+      let dA = Infinity;
+      if (w.autopilot && this.target) {
+        const a0 = this.targetArrival();
+        if (a0) { dA = Math.hypot(a0.point.x - shipU.x, a0.point.y - shipU.y, a0.point.z - shipU.z); vCan = Math.min(vCan, dA * this.WARP_K_TARGET); }
+      } else vCan = Math.min(vCan, vMaxDrive);
+      const sp = Math.max(w.speed, vCan, this.WARP_MIN_SPEED);
+      mulEff = Math.min(mulEff, Math.max(1, (0.2 * surf) / (sp * dt)));
+      if (Number.isFinite(dA)) mulEff = Math.min(mulEff, Math.max(1, (0.2 * dA) / (sp * dt)));
+    }
+    this.lastTimeMul = mulEff;
+    const dtS = dt * mulEff;
     if (this.voyageSpeedCap < vLimit) vLimit = Math.max(this.WARP_MIN_SPEED, this.voyageSpeedCap); // v89: 航海の出来事の足止め
 
     // 目標速度
@@ -1021,7 +1043,7 @@ const Navigation = {
       // 到着
       // v85: ラグランジュ点は動いている（月の L 点で秒速約1km）ので、ゆっくり追いかけても
       // 追いつかない。数km まで近づいたら、その点に合わせて到着する
-      if (distA < Math.max(arrival.lagrange ? 5000 : this.ARRIVAL_DISTANCE, w.speed * dt * 1.5)) {
+      if (distA < Math.max(arrival.lagrange ? 5000 : this.ARRIVAL_DISTANCE, w.speed * dtS * 1.5)) {
         this._arrive(arrival);
         return;
       }
@@ -1047,14 +1069,14 @@ const Navigation = {
     w.near = near ? near.body.ja : '';
 
     if (this.isInterspace()) {
-      this._stepInterspaceSpeed(ship, w, vTarget, vLimit, dt);
+      this._stepInterspaceSpeed(ship, w, vTarget, vLimit, dtS);
     } else {
     // 対数スケールで滑らかに加減速
     const cur = Math.max(w.speed, 1);
     const tgt = Math.max(vTarget, 1);
     const logDiff = Math.log10(tgt) - Math.log10(cur);
-    const maxUp = this.WARP_ACCEL_DECADES * dt;
-    const maxDown = this.WARP_DECEL_DECADES * dt;
+    const maxUp = this.WARP_ACCEL_DECADES * dtS;
+    const maxDown = this.WARP_DECEL_DECADES * dtS;
     const step = Math.max(-maxDown, Math.min(maxUp, logDiff));
     w.speed = vTarget <= 0 && cur < 50 ? 0 : Math.pow(10, Math.log10(cur) + step);
     // 表面への接近は常に上限で抑える（減速が間に合わない分）
@@ -1065,16 +1087,16 @@ const Navigation = {
     // （ワープの速さは「到着点に対して」の速さになり、近づくとちゃんと止まれる）
     if (arrival && arrival.velocity) {
       const fv = this._framePointVelocity(this.frame, ship.position);
-      this.frame.offset.x += (arrival.velocity.x - fv.x) * dt;
-      this.frame.offset.y += (arrival.velocity.y - fv.y) * dt;
-      this.frame.offset.z += (arrival.velocity.z - fv.z) * dt;
+      this.frame.offset.x += (arrival.velocity.x - fv.x) * dtS;
+      this.frame.offset.y += (arrival.velocity.y - fv.y) * dtS;
+      this.frame.offset.z += (arrival.velocity.z - fv.z) * dtS;
     }
 
     // 機首方向（ローカル -Z）へ移動。ワープ中のフレームは軸=宇宙座標なので、
     // ローカルの移動量 = 宇宙座標の移動量。原点を艦に合わせて動かし続ける。
     const fwd = rotateVecByQuat({ x: 0, y: 0, z: -1 }, ship.quaternion);
     const fwdU = Astro.mat3MulVec(this.frame.rot, fwd);
-    const ds = w.speed * dt;
+    const ds = w.speed * dtS;
     this.frame.offset.x += fwdU.x * ds;
     this.frame.offset.y += fwdU.y * ds;
     this.frame.offset.z += fwdU.z * ds;
