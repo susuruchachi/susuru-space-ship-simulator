@@ -47,6 +47,7 @@ const Navigation = {
   // v87: 自動航行の終わり。実効の速さが通常航行の最高速まで落ちたらワープ・内空航行を抜け、
   // 通常航行で到着点まで減速して進む（stepApproach）。{ target, rel?, lagrange?, label }
   approach: null,
+  voyageSpeedCap: Infinity, // v89: 航海の出来事の足止め（32-voyage.js）のあいだの、ワープ・内空航行の速さの上限 [m/s]
   APPROACH_BRAKE_MARGIN: 0.7, // 減速に使う加速度 = 艦が出せる減速 × この値（余裕）
   APPROACH_MAX_DROP_DIST: 2e6, // 通常航行で減速する距離の上限 [m]（2000 km。弱い艦は、ここから最高速より遅く入る）
   APPROACH_MAX_TIME: 90,       // v88: 通常航行での進入にかける時間の上限の目安 [s]（減速の弱い艦は、もっと手前まで内空航行・ワープで行く）
@@ -993,6 +994,7 @@ const Navigation = {
     w.maxCompression = this.isInterspace() ? ship.interspace.maxCompression : 0;
     const vMaxDrive = this.isInterspace() ? ship.interspace.maxSpeed * w.maxCompression : vMaxHere;
     let vLimit = Math.min(vMaxDrive, surf * this.WARP_K_SURFACE * (1 + 8 * outward * outward));
+    if (this.voyageSpeedCap < vLimit) vLimit = Math.max(this.WARP_MIN_SPEED, this.voyageSpeedCap); // v89: 航海の出来事の足止め
 
     // 目標速度
     let vTarget;
@@ -1155,6 +1157,7 @@ const Navigation = {
   // 急停止には見えない。角速度はそのまま残して、自然に回し続ける）
   _arrive(arrival) {
     const ship = State.ship;
+    if (typeof Voyage !== 'undefined' && Voyage.onArrive) { try { Voyage.onArrive(); } catch (e) { console.error(e); } } // v89: 定期航路の到着
     this.approach = null;
     this.warp.active = false;
     this.warp.autopilot = false;
