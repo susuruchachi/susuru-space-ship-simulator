@@ -323,7 +323,8 @@ void main() {
   _shipPoints(ship) {
     const m = ship.mesh;
     const c = this._ptsCache;
-    if (c && c.mesh === m && c.n === m.children.length) return c.pts;
+    const key = typeof EngineFx !== 'undefined' && EngineFx.meshKey ? EngineFx.meshKey(ship) : m.children.length;
+    if (c && c.mesh === m && c.n === key) return c.pts;
     const pos = m.position.clone(), quat = m.quaternion.clone();
     m.position.set(0, 0, 0); m.quaternion.identity(); m.updateMatrixWorld(true);
     let total = 0;
@@ -344,7 +345,7 @@ void main() {
     });
     m.position.copy(pos); m.quaternion.copy(quat); m.updateMatrixWorld(true);
     const pts = new Float32Array(out);
-    this._ptsCache = { mesh: m, n: m.children.length, pts };
+    this._ptsCache = { mesh: m, n: key, pts };
     return pts;
   },
   // 光の殻の面を作る。m: 進む向き（フレームの座標）、gq: 殻の向き（+Z = 進む向き）。返り値: 輪郭の半径・前後の長さ
