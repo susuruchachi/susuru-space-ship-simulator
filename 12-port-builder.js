@@ -505,6 +505,47 @@
     );
     modelCorrectionGroup.scale.setScalar(modelAdjust.scale);
     modelCorrectionGroup.position.set(modelAdjust.offset.x, modelAdjust.offset.y, modelAdjust.offset.z);
+    scheduleCollisionDebug();
+  }
+
+  // -----------------------------------------------------------
+  // v79: 当たり判定の確認表示（ゲーム中に艦と当たる形）。ゲームと同じく
+  // ポートの座標系（ゲートの位置・向き）で、モデルから作る。
+  // スライダー操作中は少し待ってからまとめて作り直す。
+  // -----------------------------------------------------------
+  let collisionDebugOn = false;
+  let collisionDebugObj = null;
+  let collisionDebugTimer = null;
+  function scheduleCollisionDebug() {
+    if (!collisionDebugOn) return;
+    if (collisionDebugTimer) clearTimeout(collisionDebugTimer);
+    collisionDebugTimer = setTimeout(refreshCollisionDebug, 250);
+  }
+  function refreshCollisionDebug() {
+    collisionDebugTimer = null;
+    if (collisionDebugObj) {
+      if (collisionDebugObj.parent) collisionDebugObj.parent.remove(collisionDebugObj);
+      collisionDebugObj.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+      collisionDebugObj = null;
+    }
+    if (!collisionDebugOn || !modelRoot || !gateMesh) return;
+    // v84: ゲームと同じ細かさ（艦は分からないので、マスの総数の上限で決まる）。Web Worker で計算
+    setModelStatus('当たり判定を計算しています…', false);
+    const forRoot = modelRoot, forGate = gateMesh;
+    computeCollisionShapeAsync(modelRoot, gateMesh, portCollisionShapeOptions(null)).then((shape) => {
+      if (!collisionDebugOn || modelRoot !== forRoot || gateMesh !== forGate || collisionDebugObj) return;
+      collisionDebugObj = buildCollisionShapeDebugObject(shape, 0xff8833);
+      gateMesh.add(collisionDebugObj);
+      if (shape) setModelStatus(`当たり判定: 直方体${shape.boxes.length}個（格子の1マス ${shape.cell.toFixed(2)} m）`, false);
+    });
+  }
+  const collisionDebugBtn = document.getElementById('collisionDebugBtn');
+  if (collisionDebugBtn) {
+    collisionDebugBtn.addEventListener('click', () => {
+      collisionDebugOn = !collisionDebugOn;
+      collisionDebugBtn.classList.toggle('active', collisionDebugOn);
+      refreshCollisionDebug();
+    });
   }
 
   function syncModelRotUiFromState() {
@@ -936,6 +977,7 @@
     modelRoot = root;
     modelCorrectionGroup.add(modelRoot);
     applyModelAdjustToGroup();
+    scheduleCollisionDebug();
 
     modelEmptyState.classList.add('hidden');
     modelAdjustSection.style.display = '';

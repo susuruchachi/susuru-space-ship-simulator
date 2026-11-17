@@ -9,10 +9,12 @@ const HUD = {
 
   init(domRoot) {
     this._buildTouchControls(domRoot);
-    this._buildDebugPanel(domRoot);
-    this._buildSettingsLink(domRoot);
+    // v89: 上の航法メニューと視点のボタン以外（デバッグ情報・表示の切り替え・ログ・設定）は、
+    // 左上の小さなボタンで開く1つのサイドメニューにしまう（画面のボタン同士が重なりすぎていたため）
+    const menu = this._buildSideMenu(domRoot);
+    this._buildSettingsLink(menu.querySelector('.side-menu-display'), menu.querySelector('.side-menu-panel'));
+    this._buildDebugPanel(menu.querySelector('.side-menu-debug'), menu.querySelector('.side-menu-log'));
     this._buildCameraControls(domRoot);
-    this._buildSideMenu(domRoot);
   },
 
   _buildTouchControls(domRoot) {
@@ -28,8 +30,23 @@ const HUD = {
       <button class="btn-roll-left">ROLL-</button>
       <button class="btn-roll-right">ROLL+</button>
       <button class="btn-boost">BOOST</button>
+      <button type="button" class="btn-lever-mode"></button>
     `;
     domRoot.appendChild(wrap);
+    // v89: レバーの意味の切り替え（速度 ⇄ 出力）
+    const lm = wrap.querySelector('.btn-lever-mode');
+    this._leverModeBtn = lm;
+    lm.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const ship = State.ship;
+      if (!(ship && !Number.isFinite(ship.maxSpeed))) { // 最高速度が無制限の艦は出力だけ
+        State.settings.leverMode = State.settings.leverMode === 'thrust' ? 'speed' : 'thrust';
+        if (typeof savePersistedSettings === 'function') savePersistedSettings({ leverMode: State.settings.leverMode });
+      }
+      this._syncLeverMode(true);
+    });
+    this._syncLeverMode(true);
+    setInterval(() => this._syncLeverMode(false), 500);
 
     // ボタン系はタッチ押下状態を dataset.pressed で管理
     // （InputSystem._isPressed() が参照する）
@@ -49,12 +66,13 @@ const HUD = {
     }
   },
 
-  _buildDebugPanel(domRoot) {
+  // v89: デバッグ情報はサイドメニューの中に出す（logRoot にログのボタン）
+  _buildDebugPanel(domRoot, logRoot) {
     const el = document.createElement('div');
     el.className = 'hud-debug-panel';
     domRoot.appendChild(el);
     this._debugEl = el;
-    this._buildDockingLogButton(domRoot);
+    this._buildDockingLogButton(logRoot || domRoot);
   },
 
   // -----------------------------------------------------------
@@ -65,7 +83,6 @@ const HUD = {
   _buildDockingLogButton(domRoot) {
     const wrap = document.createElement('div');
     wrap.className = 'hud-docking-log-controls';
-    wrap.style.cssText = 'position:fixed; top:8px; right:8px; z-index:9999; display:flex; gap:6px;';
     wrap.innerHTML = `
       <button class="btn-docking-log-dl" style="font-size:12px; padding:4px 8px;">ログDL</button>
       <button class="btn-docking-log-clear" style="font-size:12px; padding:4px 8px;">ログ消去</button>
@@ -112,28 +129,39 @@ const HUD = {
   // 「進入軸の下」という位置関係を作れないため、上段（設定＋進入軸の
   // 横並び）と下段（航路/航跡トグル、進入軸ボタンの真下に配置）の
   // 2段構成に変更する。
-  _buildSettingsLink(domRoot) {
-    const col = document.createElement('div');
-    col.className = 'hud-top-right-col';
-    domRoot.appendChild(col);
-
-    const topRow = document.createElement('div');
-    topRow.className = 'hud-top-right-row';
-    col.appendChild(topRow);
+  // v89: 進入軸・航路/航跡・デバッグ情報の表示の切り替えはサイドメニューの「表示」に、設定へのリンクはサイドメニューの最後に
+  _buildSettingsLink(displayRoot, panel) {
+    this._buildApproachGuidesToggle(displayRoot);
+    this._buildRouteLineToggle(displayRoot);
+    this._buildDebugHudToggle(displayRoot);
 
     const link = document.createElement('a');
     link.className = 'hud-settings-link';
     link.href = 'settings.html';
     link.textContent = '⚙ 設定';
-    topRow.appendChild(link);
+    panel.appendChild(link);
+  },
 
-    this._buildApproachGuidesToggle(topRow);
-
-    const bottomRow = document.createElement('div');
-    bottomRow.className = 'hud-top-right-row hud-top-right-row-secondary';
-    col.appendChild(bottomRow);
-
-    this._buildRouteLineToggle(bottomRow);
+  // v89: デバッグ情報の表示・非表示（設定の「デバッグHUD」と同じ値）
+  _buildDebugHudToggle(domRoot) {
+    const btn = document.createElement('button');
+    btn.className = 'btn-approach-guides-toggle';
+    domRoot.appendChild(btn);
+    const refresh = () => {
+      const on = !!State.settings.showDebugHud;
+      btn.textContent = on ? '🛠 デバッグ情報: ON' : '🛠 デバッグ情報: OFF';
+      btn.classList.toggle('is-off', !on);
+      if (this._debugEl) this._debugEl.style.display = on ? '' : 'none';
+      const t = document.querySelector('.side-menu-debug-title');
+      if (t) t.style.display = on ? '' : 'none';
+    };
+    btn.addEventListener('click', () => {
+      State.settings.showDebugHud = !State.settings.showDebugHud;
+      savePersistedSettings({ showDebugHud: State.settings.showDebugHud });
+      refresh();
+    });
+    this._refreshDebugToggle = refresh;
+    setTimeout(refresh, 0);
   },
 
   // -----------------------------------------------------------
@@ -267,13 +295,27 @@ const HUD = {
     const wrap = document.createElement('div');
     wrap.className = 'hud-side-menu';
     wrap.innerHTML = `
-      <button class="side-menu-tab">☰</button>
+      <button class="side-menu-tab" title="メニュー">☰</button>
       <div class="side-menu-panel">
+        <div class="side-menu-section-title">モード</div>
+        <a class="hud-settings-link side-menu-mode-link"></a>
+
+        <div class="side-menu-section-title side-menu-practice-only">演習の状況</div>
+        <div class="side-menu-practice-info side-menu-practice-only"></div>
+
+        <div class="side-menu-section-title side-menu-practice-only">損傷と応急修理</div>
+        <div class="side-menu-damage side-menu-practice-only"></div>
+
+        <div class="side-menu-section-title">表示</div>
+        <div class="side-menu-display"></div>
+        <div class="side-menu-section-title side-menu-debug-title">デバッグ情報</div>
+        <div class="side-menu-debug"></div>
+
         <div class="side-menu-section-title">飛行支援</div>
         <button class="hud-damping-toggle">自動制動(回転): OFF</button>
         <button class="hud-retro-damping-toggle">自動制動(逆噴射): OFF</button>
 
-        <div class="side-menu-section-title">目的地</div>
+        <div class="side-menu-section-title side-menu-destination">目的地</div>
         <div class="docking-coord-row">
           <label>X</label><input type="number" class="docking-coord-x" step="any">
         </div>
@@ -295,6 +337,9 @@ const HUD = {
         <button class="btn-docking-set-coords">🎯 この座標を目的地に設定</button>
         <button class="btn-docking-save">📍 現在地を目的地として保存</button>
         <button class="btn-docking-toggle">自動操船: OFF</button>
+
+        <div class="side-menu-section-title">ログ（自動ドッキング）</div>
+        <div class="side-menu-log"></div>
       </div>
     `;
     domRoot.appendChild(wrap);
@@ -310,6 +355,14 @@ const HUD = {
     this._bindDampingToggle(wrap);
     this._bindRetroDampingToggle(wrap);
     this._bindDockingControls(wrap);
+    // v89: 演習モード（?mode=practice）と通常のプレイの切り替え
+    const modeLink = wrap.querySelector('.side-menu-mode-link');
+    const practice = new URLSearchParams(location.search).get('mode') === 'practice';
+    const url = new URL(location.href);
+    if (practice) url.searchParams.delete('mode'); else url.searchParams.set('mode', 'practice');
+    modeLink.href = url.pathname + url.search;
+    modeLink.textContent = practice ? '🚀 通常のプレイへ' : '🎯 演習モードへ（敵と撃ち合う）';
+    return wrap;
   },
 
   // -----------------------------------------------------------
@@ -414,6 +467,8 @@ const HUD = {
         rollEl.value = euler.roll.toFixed(1);
       }
     };
+    // v83: ワープで母港に到着したときなど、ほかの場所から自動操船を切り替えたら表示を合わせる
+    this._refreshDockingUi = refresh;
 
     setCoordsBtn.addEventListener('click', () => {
       const ship = State.ship;
@@ -454,6 +509,10 @@ const HUD = {
     saveBtn.addEventListener('click', () => {
       const ship = State.ship;
       if (!ship) return;
+      if (typeof Navigation !== 'undefined' && !Navigation.isHome()) {
+        alert('入港目的地は母港（地球周回軌道）の座標系でのみ保存できます。');
+        return;
+      }
 
       // v61: 「現在地を目的地として保存」は、素朴には艦の現在の重心
       // 位置・姿勢をそのまま保存すればよいが、艦に接舷面(dockingFace)が
@@ -470,7 +529,7 @@ const HUD = {
       let target;
       if (ship.dockingFace) {
         const halfExtents = ship.dockingFaceBoxHalfExtents || { x: 0, y: 0, z: 0 };
-        const faceLocal = computeDockingFaceLocalTransform(ship.dockingFace, halfExtents);
+        const faceLocal = computeDockingFaceLocalTransform(ship.dockingFace, halfExtents, ship.dockingFaceBoxCenter);
         const faceWorldOffset = rotateVecByQuat(faceLocal.position, ship.quaternion);
         target = {
           position: {
@@ -499,6 +558,11 @@ const HUD = {
     toggleBtn.addEventListener('click', () => {
       const ship = State.ship;
       if (!ship || !State.dockingTarget) return; // 目的地未設定時は切り替えない
+      // v77: ドッキングポートは母港の座標系にあるので、母港を離れている間は使えない
+      if (typeof Navigation !== 'undefined' && !Navigation.isHome()) {
+        alert('自動操船（入港）は母港（地球周回軌道）にいるときだけ使えます。先に「母港」を目的地にして自動航行で戻ってください。');
+        return;
+      }
       ship.autoDockingEnabled = !ship.autoDockingEnabled;
       refresh();
     });
@@ -523,6 +587,23 @@ const HUD = {
   },
 
   // 毎フレーム呼び出し
+  // v89: レバーの意味のボタンの表示（緑「速度」/ 橙「出力」）。最高速度が無制限の艦は、いつも出力
+  _syncLeverMode(force) {
+    const el = this._leverModeBtn;
+    if (!el) return;
+    const ship = State.ship;
+    const fixed = !!(ship && !Number.isFinite(ship.maxSpeed));
+    const thrust = fixed || State.settings.leverMode === 'thrust';
+    const key = `${thrust}|${fixed}`;
+    if (!force && key === this._leverModeKey) return;
+    this._leverModeKey = key;
+    el.textContent = thrust ? '出力' : '速度';
+    el.classList.toggle('thrust', thrust);
+    el.classList.toggle('fixed', fixed);
+    el.title = fixed ? 'この艦は最高速度が無制限なので、レバーは機関の出力の割合です'
+      : thrust ? 'レバー = 機関の出力の割合（押すと「速度」へ）' : 'レバー = 最高速度に対する速さの割合（押すと「出力」へ）';
+  },
+
   update() {
     if (!State.settings.showDebugHud || !this._debugEl) return;
 
@@ -562,14 +643,14 @@ const HUD = {
 
       const phaseLabels = {
         cruise: '自由巡航中',
-        approach: 'アプローチ中',
+        approach: 'アプローチ中（進入路の入口へ）',
         adjust: '軸合わせ調整中',
         brake300: '停止中（距離300・軸合わせ）',
-        final_approach: '最終アプローチ（姿勢調整）',
+        final_approach: '最終アプローチ（進入路を進んでいます）',
         brake250: '停止中（距離250・姿勢調整）',
-        tunnel: '最終進入（トンネル内・姿勢固定）',
+        tunnel: '最終進入（トンネル内）',
         overshoot: 'オーバーシュート通過中',
-        return_to_axis: '進入軸へ回り込み中',
+        return_to_axis: '港を避けて進入軸へ回り込み中',
         docked: '到着（固定）',
       };
       const phaseLabel = phaseLabels[ship._dockingPhase] || ship._dockingPhase || '-';
@@ -579,7 +660,7 @@ const HUD = {
 
     this._debugEl.innerHTML = `
       <div>艦種: ${ship.label}</div>
-      <div>速度: ${speed.toFixed(1)} / ${ship.maxSpeed} ${ship.isAtMaxSpeed ? '(MAX)' : ''}</div>
+      <div>速度: ${speed.toFixed(1)} / ${Number.isFinite(ship.maxSpeed) ? ship.maxSpeed : '無制限'} ${ship.isAtMaxSpeed ? '(MAX)' : ''}</div>
       <div>速度上限モード: ${speedCapMode}</div>
       <div>スロットル: ${throttlePercent}%</div>
       <div>主機出力: ${(mainRatio * 100).toFixed(0)}%</div>
@@ -589,6 +670,41 @@ const HUD = {
       <div>姿勢角: pitch ${euler.pitch.toFixed(1)}° / yaw ${euler.yaw.toFixed(1)}° / roll ${euler.roll.toFixed(1)}°</div>
       <div>角速度: pitch ${angVel.x.toFixed(2)} / yaw ${angVel.y.toFixed(2)} / roll ${angVel.z.toFixed(2)} rad/s</div>
       ${dockingLine}
+      ${this._navDebugLines(ship)}
     `;
+  },
+
+  // v88: 航法（ワープ・内空航行・自動航行・出港・進入）の中身。速さが出ない・時間がかかるときの確かめ用
+  _navDebugLines(ship) {
+    if (typeof Navigation === 'undefined' || typeof SpaceHud === 'undefined') return '';
+    const N = Navigation, w = N.warp;
+    const fs = (v) => (Number.isFinite(v) ? SpaceHud.formatSpeed(Math.max(0, v)) : '-');
+    const fd = (m) => (Number.isFinite(m) ? SpaceHud.formatDistance(m) : '-');
+    const lines = [];
+    let mode = '通常航行';
+    if (N.departure) mode = `出港中（${N.departure.autopilot ? '自動航行' : N.driveName()}の前）`;
+    else if (w.active) mode = `${N.driveName()}・${w.autopilot ? '自動航行' : '手動'}`;
+    else if (N.approach) mode = '自動航行の進入（通常航行）';
+    lines.push(`航法: ${mode}${N.target ? ` ・ 目的地 ${N.targetLabel()}` : ''}`);
+    if (N.departure) lines.push(`出港: ${Math.round(N.departure.moved || 0).toLocaleString('ja-JP')} / ${N.DEPART_DIST.toLocaleString('ja-JP')} m ・ ${N.departure.t.toFixed(0)}秒`);
+    if (w.active) {
+      lines.push(`実効速度: ${fs(w.speed)} ・ 目標 ${fs(w.vTarget)}`);
+      lines.push(`上限: ${fs(w.vLimit)}（${w.limitBy || '-'}）・ 機関の上限 ${fs(w.vMaxDrive)}`);
+      if (N.isInterspace()) {
+        const is = ship.interspace;
+        lines.push(`船速: ${SpaceHud.formatIKn(w.shipSpeed || 0)} / ${SpaceHud.formatIKn(is.maxSpeed)} ・ 圧縮比 ×${SpaceHud.formatJaNumber(w.compression || 1)} / ×${SpaceHud.formatJaNumber(is.maxCompression)}`);
+      }
+      if (w.autopilot) {
+        const vC = w.vCruise;
+        lines.push(`到着点まで: ${fd(w.targetDistance)} ・ 巡航 ${fs(vC)} ・ 機首のずれ ${Number.isFinite(w.alignDeg) ? w.alignDeg.toFixed(1) : '-'}°`);
+        if (vC > 0 && Number.isFinite(w.targetDistance)) lines.push(`距離 ÷ 巡航: ${SpaceHud.formatDuration(w.targetDistance / vC)}`);
+      } else {
+        const lever = typeof InputSystem !== 'undefined' && InputSystem._throttleLever;
+        lines.push(`ワープのスロットル: ${Math.round((w.throttle || 0) * 100)}%${lever ? ` ・ レバー ${Math.round((lever.ratio || 0) * 100)}%${N._leverTouched ? '（レバーで操作中）' : ''}` : ''}`);
+      }
+    }
+    if (N.approach) lines.push(`進入: 減速 ${N.brakeAccel(ship).toFixed(2)} m/s² ・ 通常航行の最高速 ${fs(N.normalMaxSpeed(ship))}`);
+    if (w.status) lines.push(`状態: ${w.status}`);
+    return lines.map((l) => `<div>${l.replace(/[<>&]/g, '')}</div>`).join('');
   },
 };

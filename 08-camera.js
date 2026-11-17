@@ -48,12 +48,31 @@ const CameraSystem = {
 
   // ドラッグ感度・制限
   DRAG_SENSITIVITY: 0.006,
-  PINCH_SENSITIVITY: 0.05,
   PAN_SENSITIVITY: 0.0015, // ドラッグ1pxかつdistance=1あたりのワールド移動量。distanceに比例させ、ズーム倍率が変わっても画面上の動きの体感速度を揃える
   MIN_ELEVATION: -1.4, // 真下近くまで（真下=-PI/2=-1.57は特異点なので少し手前で止める）
   MAX_ELEVATION: 1.4,
-  MIN_DISTANCE: 8,
+  MIN_DISTANCE: 1.5, // v89: 自由視点でもっと寄れるように（以前は 8 = 艦の大きさと同じ）
   MAX_DISTANCE: 300,
+
+  // v78: 艦の大きさ（最大寸法[m]）に応じた倍率。自作の艦は10m〜5000mまで
+  // 変えられるため、追従カメラの位置・自由視点の距離の範囲をこれで拡大する。
+  // ロケット級（約8m）以下は1（従来どおり）。
+  _shipScale: 1,
+  // v83: 追従視点のズーム倍率（1 = 従来の距離。ピンチ・ホイールで変える）
+  _chaseZoom: 1,
+  CHASE_ZOOM_MIN: 0.3,
+  CHASE_ZOOM_MAX: 8,
+
+  setShipSize(sizeM) {
+    const k = Math.max(1, (sizeM || 8) / 8);
+    const ratio = k / this._shipScale;
+    this._shipScale = k;
+    // v89: 艦の大きさの6%まで寄れる（以前は艦の大きさと同じ距離まで）。小さな艦でも 1.5m まで
+    this.MIN_DISTANCE = Math.max(1.5, (sizeM || 8) * 0.06);
+    this.MAX_DISTANCE = 300 * k;
+    this._orbit.distance = clamp(this._orbit.distance * ratio, this.MIN_DISTANCE, this.MAX_DISTANCE);
+    this._panOffsetLocal = vecScale(this._panOffsetLocal, ratio);
+  },
 
   // -----------------------------------------------------------
   // 初期化: ドラッグ操作のイベントバインド
@@ -61,6 +80,7 @@ const CameraSystem = {
   // -----------------------------------------------------------
   init(canvasEl) {
     this._bindDrag(canvasEl);
+    if (typeof preventPageGestureZoom === 'function') preventPageGestureZoom();
   },
 
   // -----------------------------------------------------------
@@ -72,6 +92,7 @@ const CameraSystem = {
   _bindDrag(canvasEl) {
     const onDragStart = (x, y, panMode) => {
       if (State.settings.cameraMode !== 'orbit') return;
+      if (typeof Weapons !== 'undefined' && Weapons.view) return; // v89: 照準の視点のドラッグは狙う向きを回す
       this._dragState.active = true;
       this._dragState.panMode = !!panMode;
       this._dragState.lastX = x;
@@ -114,8 +135,23 @@ const CameraSystem = {
       y: (touches[0].clientY + touches[1].clientY) / 2,
     });
 
+    // v83: ズームは掛け算（指の間隔が2倍になれば距離が半分）。以前は指の移動
+    // ピクセル数 × 0.05m を距離に足していたため、大きな艦（距離の範囲が数km）では
+    // いくらピンチしてもほとんど変わらなかった。追従視点でもズームできるようにした。
+    const zoomBy = (factor) => {
+      if (!(factor > 0) || !Number.isFinite(factor)) return;
+      // v89: 照準の視点では、測距儀の倍率を変える（29-weapons.js）
+      if (typeof Weapons !== 'undefined' && Weapons.view) { Weapons.zoomBy(factor); return; }
+      // v89: 艦内の視点では、双眼鏡の倍率を変える（31-viewpoints.js）
+      if (typeof Viewpoints !== 'undefined' && Viewpoints.active) { Viewpoints.zoomBy(factor); return; }
+      if (State.settings.cameraMode === 'orbit') {
+        this._orbit.distance = clamp(this._orbit.distance * factor, this.MIN_DISTANCE, this.MAX_DISTANCE);
+      } else {
+        this._chaseZoom = clamp(this._chaseZoom * factor, this.CHASE_ZOOM_MIN, this.CHASE_ZOOM_MAX);
+      }
+    };
+
     const onPinchMove = (touches) => {
-      if (State.settings.cameraMode !== 'orbit') return;
       const dist = pinchDistance(touches);
       const mid = pinchMidpoint(touches);
       if (!this._pinchState.active) {
@@ -125,14 +161,9 @@ const CameraSystem = {
         this._pinchState.lastMidY = mid.y;
         return;
       }
-      const delta = dist - this._pinchState.lastDist;
-      this._pinchState.lastDist = dist;
       // 指を広げる(dist増)→ズームイン(distance減)
-      this._orbit.distance = clamp(
-        this._orbit.distance - delta * this.PINCH_SENSITIVITY,
-        this.MIN_DISTANCE,
-        this.MAX_DISTANCE
-      );
+      zoomBy(this._pinchState.lastDist / Math.max(1, dist));
+      this._pinchState.lastDist = dist;
       // v72: 二本指スワイプ（2本の指の中点の移動）でパンできるように。
       // ピンチ（指の間隔の変化）とスワイプ（中点の移動）は同時に
       // 発生しうる一般的なジェスチャーなので、両方を同フレームで処理する。
@@ -140,7 +171,7 @@ const CameraSystem = {
       const midDy = mid.y - this._pinchState.lastMidY;
       this._pinchState.lastMidX = mid.x;
       this._pinchState.lastMidY = mid.y;
-      this._applyScreenPan(midDx, midDy);
+      if (State.settings.cameraMode === 'orbit') this._applyScreenPan(midDx, midDy);
     };
 
     const onPinchEnd = () => {
@@ -160,17 +191,21 @@ const CameraSystem = {
     // 1本指=回転ドラッグ、2本指=ピンチズームとして両方自前で処理する
     // （touch-action:noneでブラウザ標準ピンチも無効化されているため、
     //   ズームは自前実装しないと一切効かなくなる）。
+    // v83: 指の数は、この画面（canvas）に触れた指だけで数える（targetTouches）。
+    // 以前は画面全体の指（touches）で数えていたため、操縦スティックに指を置いたまま
+    // 別の指で画面に触れるとピンチ扱いになっていた。
     canvasEl.addEventListener('touchstart', (e) => {
       e.preventDefault();
-      if (e.touches.length === 1) {
+      const tt = e.targetTouches;
+      if (tt.length === 1) {
         this._pinchState.active = false;
-        const t = e.touches[0];
+        const t = tt[0];
         onDragStart(t.clientX, t.clientY);
-      } else if (e.touches.length === 2) {
+      } else if (tt.length === 2) {
         this._dragState.active = false; // ピンチ開始時はドラッグ回転を止める
         this._pinchState.active = true;
-        this._pinchState.lastDist = pinchDistance(e.touches);
-        const mid = pinchMidpoint(e.touches);
+        this._pinchState.lastDist = pinchDistance(tt);
+        const mid = pinchMidpoint(tt);
         this._pinchState.lastMidX = mid.x;
         this._pinchState.lastMidY = mid.y;
       }
@@ -178,11 +213,12 @@ const CameraSystem = {
 
     canvasEl.addEventListener('touchmove', (e) => {
       e.preventDefault();
-      if (e.touches.length === 1 && !this._pinchState.active) {
-        const t = e.touches[0];
+      const tt = e.targetTouches;
+      if (tt.length === 1 && !this._pinchState.active) {
+        const t = tt[0];
         onDragMove(t.clientX, t.clientY);
-      } else if (e.touches.length === 2) {
-        onPinchMove(e.touches);
+      } else if (tt.length === 2) {
+        onPinchMove(tt);
       }
     }, { passive: false });
 
@@ -190,8 +226,8 @@ const CameraSystem = {
       onDragEnd();
       onPinchEnd();
       // 2本→1本に減った場合、残った指でドラッグ再開できるようにする
-      if (e.touches.length === 1) {
-        const t = e.touches[0];
+      if (e.targetTouches.length === 1) {
+        const t = e.targetTouches[0];
         onDragStart(t.clientX, t.clientY);
       }
     });
@@ -202,13 +238,8 @@ const CameraSystem = {
 
     // ホイールでズーム（distance調整）。PC環境向け。スマホは2本指ピンチで対応。
     canvasEl.addEventListener('wheel', (e) => {
-      if (State.settings.cameraMode !== 'orbit') return;
       e.preventDefault();
-      this._orbit.distance = clamp(
-        this._orbit.distance + e.deltaY * 0.05,
-        this.MIN_DISTANCE,
-        this.MAX_DISTANCE
-      );
+      zoomBy(Math.exp(clamp(e.deltaY, -200, 200) * 0.0015));
     }, { passive: false });
   },
 
@@ -297,12 +328,13 @@ const CameraSystem = {
   // -----------------------------------------------------------
   setOrbitPreset(preset) {
     const presets = {
-      back: { azimuth: 0, elevation: 0.2 },
-      front: { azimuth: Math.PI, elevation: 0.2 },
-      left: { azimuth: -Math.PI / 2, elevation: 0.15 },
-      right: { azimuth: Math.PI / 2, elevation: 0.15 },
-      top: { azimuth: 0, elevation: this.MAX_ELEVATION },
-      bottom: { azimuth: 0, elevation: this.MIN_ELEVATION },
+      // v89: 選んだ向きのぴったり真横・真上から見る（以前は少し上から見ていた）
+      back: { azimuth: 0, elevation: 0 },
+      front: { azimuth: Math.PI, elevation: 0 },
+      left: { azimuth: -Math.PI / 2, elevation: 0 },
+      right: { azimuth: Math.PI / 2, elevation: 0 },
+      top: { azimuth: 0, elevation: Math.PI / 2 },
+      bottom: { azimuth: 0, elevation: -Math.PI / 2 },
     };
     const p = presets[preset];
     if (!p) return;
@@ -323,8 +355,9 @@ const CameraSystem = {
   resetView() {
     this._orbit.azimuth = 0;
     this._orbit.elevation = 0.2;
-    this._orbit.distance = 30;
+    this._orbit.distance = 30 * this._shipScale;
     this._panOffsetLocal = { x: 0, y: 0, z: 0 };
+    this._chaseZoom = 1;
   },
 
   // -----------------------------------------------------------
@@ -357,20 +390,54 @@ const CameraSystem = {
   // （バグ報告：「視点が船のロールに追従しない」）。
   // -----------------------------------------------------------
   _updateChase(camera, ship) {
-    const camOffset = rotateVecByQuat({ x: 0, y: 6, z: 24 }, ship.quaternion);
+    const k = this._shipScale * this._chaseZoom;
+    // v89: 重力場機関の艦は、カメラの向きが艦の回転に少し遅れてついていき、境界面の上の回転の中心を見る
+    const cq = this._viewQuat(ship);
+    const tg = this._viewTarget(ship);
+    const camOffset = rotateVecByQuat({ x: 0, y: 6 * k, z: 24 * k }, cq);
     camera.position.set(
-      ship.position.x + camOffset.x,
-      ship.position.y + camOffset.y,
-      ship.position.z + camOffset.z
+      tg.x + camOffset.x,
+      tg.y + camOffset.y,
+      tg.z + camOffset.z
     );
 
     // 船のローカル上方向（+Y）をワールド座標に変換し、カメラのupに
     // 明示的に設定してからlookAtする。これによりlookAt()が
     // 「船が今向いている上方向」を基準に視界を組み立てるようになり、
     // 船がロールすればカメラの傾きも一緒に回転する。
-    const upWorld = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
+    const upWorld = rotateVecByQuat({ x: 0, y: 1, z: 0 }, cq);
     camera.up.set(upWorld.x, upWorld.y, upWorld.z);
-    camera.lookAt(ship.position.x, ship.position.y, ship.position.z);
+    camera.lookAt(tg.x, tg.y, tg.z);
+  },
+
+  // -----------------------------------------------------------
+  // v89: 重力場機関の艦のカメラ
+  //   艦に固定したカメラだと、艦が回っても画面の艦は動かず、まわりの景色がカメラ（艦のずっと上・後ろ）を
+  //   中心に回って見え、「回転の軸がずっと上にある」ように感じられた。重力場機関の艦は、
+  //   ・カメラが見る点を、重心ではなく境界面の上の回転の中心（重心の真上・真下の境界面の高さの点）にし、
+  //   ・カメラの向きは艦の向きに少し遅れてついていく（宇宙の座標でなめらかにする。フレームが変わっても跳ばない）
+  //   ので、回し始めに艦が境界面の上の点を中心に回るのが見えてから、カメラが追いつく。
+  // -----------------------------------------------------------
+  GD_CAM_LAG: 0.35, // [s]
+  _camQU: null,
+  _camLastT: 0,
+  _viewQuat(ship) {
+    const now = performance.now();
+    const dt = this._camLastT ? Math.min(0.2, (now - this._camLastT) / 1000) : 0;
+    this._camLastT = now;
+    if (!ship.gravityDrive || ship.autoDockingEnabled) { this._camQU = null; return ship.quaternion; }
+    const fq = typeof Navigation !== 'undefined' && Navigation.frame && Navigation.frame.quat ? Navigation.frame.quat : null;
+    const qs = new THREE.Quaternion(ship.quaternion.x, ship.quaternion.y, ship.quaternion.z, ship.quaternion.w);
+    const qU = fq ? fq.clone().multiply(qs) : qs;
+    if (!this._camQU || this._camQU.angleTo(qU) > 1.2) this._camQU = qU.clone();
+    else this._camQU.slerp(qU, 1 - Math.exp(-dt / this.GD_CAM_LAG));
+    const ql = fq ? fq.clone().invert().multiply(this._camQU) : this._camQU.clone();
+    return { x: ql.x, y: ql.y, z: ql.z, w: ql.w };
+  },
+  _viewTarget(ship) {
+    if (!ship.gravityDrive || ship.autoDockingEnabled || !ship.boundaryHeight) return ship.position;
+    const o = rotateVecByQuat({ x: 0, y: ship.boundaryHeight, z: 0 }, ship.quaternion);
+    return { x: ship.position.x + o.x, y: ship.position.y + o.y, z: ship.position.z + o.z };
   },
 
   // -----------------------------------------------------------
@@ -390,15 +457,17 @@ const CameraSystem = {
       z: horizontalDist * Math.cos(azimuth),
     };
 
-    const worldOffset = rotateVecByQuat(localOffset, ship.quaternion);
+    const cq = this._viewQuat(ship);
+    const tg0 = this._viewTarget(ship);
+    const worldOffset = rotateVecByQuat(localOffset, cq);
     // v72: パンオフセット（船のローカル座標系で保持）をワールドへ
     // 変換し、注視点・カメラ位置の両方に同じだけ加える。カメラ位置に
     // も同じ量を足すことで、パンしても船との距離(distance)や見る
     // 角度自体は変わらず、視界全体が平行にずれる。
-    const panWorld = rotateVecByQuat(this._panOffsetLocal, ship.quaternion);
-    const targetX = ship.position.x + panWorld.x;
-    const targetY = ship.position.y + panWorld.y;
-    const targetZ = ship.position.z + panWorld.z;
+    const panWorld = rotateVecByQuat(this._panOffsetLocal, cq);
+    const targetX = tg0.x + panWorld.x;
+    const targetY = tg0.y + panWorld.y;
+    const targetZ = tg0.z + panWorld.z;
 
     camera.position.set(
       targetX + worldOffset.x,
@@ -408,7 +477,9 @@ const CameraSystem = {
 
     // orbitモードでも船のロールに応じてupを追従させる（真上/真下
     // 付近を除き、chaseと同じ理屈で自然な傾きになる）
-    const upWorld = rotateVecByQuat({ x: 0, y: 1, z: 0 }, ship.quaternion);
+    // v89: 真上・真下から見るときは、艦の上向きが視線と重なるので、艦首を画面の上にする
+    const upLocal = Math.abs(Math.cos(elevation)) < 0.05 ? { x: 0, y: 0, z: -1 } : { x: 0, y: 1, z: 0 };
+    const upWorld = rotateVecByQuat(upLocal, cq);
     camera.up.set(upWorld.x, upWorld.y, upWorld.z);
     camera.lookAt(targetX, targetY, targetZ);
   },

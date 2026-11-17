@@ -2,8 +2,18 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>宇宙船シミュレーター v73</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<!-- v86: Webアプリ（PWA） -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#03070f">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="宇宙船シム">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<script src="pwa.js"></script>
+<title>宇宙船シミュレーター</title>
 <style>
   html, body {
     margin: 0;
@@ -20,6 +30,7 @@
     position: fixed;
     inset: 0;
     pointer-events: none;
+    z-index: 3; /* v89: 姿勢の図（.wpn-inset, z-index 2）より上。サイドメニュー・レバー・スティックのタッチを図に取られないように */
   }
   /* #hud-root > * は直下の子要素に一律pointer-events:autoを
      付ける意図だったが、.hud-touch-controls（全画面inset:0の
@@ -112,6 +123,31 @@
     top: 50%;
     transform: translateY(-50%);
   }
+  /* v88: 0% の止まりどころ（中央の帯）。0% のときはハンドルの色を変える */
+  .throttle-lever::after {
+    content: '';
+    position: absolute;
+    left: 2px;
+    right: 2px;
+    top: 44%;
+    height: 12%;
+    border-radius: 4px;
+    background: rgba(255,255,255,0.06);
+    pointer-events: none;
+  }
+  .throttle-lever.at-zero .throttle-lever-handle {
+    background: rgba(255,255,255,0.35);
+    border-color: rgba(255,255,255,0.85);
+  }
+  /* v89: レバーの意味の切り替え（レバーのすぐ上の小さなボタン）。緑 = 速度（最高速度に対する割合）、橙 = 出力（機関の出力の割合） */
+  .btn-lever-mode {
+    position: fixed; left: 32px; bottom: 210px; width: 56px; height: 18px; padding: 0;
+    border-radius: 6px; font-size: 10px; line-height: 16px; font-weight: 600; letter-spacing: 0.05em;
+    color: #082a12; background: #5fe08a; border: 1px solid #b6ffd0; touch-action: manipulation; z-index: 3;
+  }
+  .btn-lever-mode.thrust { color: #2a1404; background: #ffa94a; border-color: #ffd9a8; }
+  .btn-lever-mode.fixed { opacity: 0.55; }
+  body.clean-view .btn-lever-mode, body.map-open .btn-lever-mode { display: none; }
   .throttle-lever-label {
     position: absolute;
     left: 0;
@@ -154,6 +190,8 @@
     letter-spacing: 0.1em;
     touch-action: none;
   }
+
+  .hud-docking-log-controls { position: fixed; top: 8px; right: 8px; z-index: 9999; display: flex; gap: 6px; }
 
   .hud-debug-panel {
     position: fixed;
@@ -223,8 +261,342 @@
     color: rgba(255,255,255,0.5);
   }
 
+  /* v89: 武装（29-weapons.js）: 照準・撃て・照準やめ のボタンと照準の印 */
+  .weapon-controls {
+    position: fixed;
+    right: 140px;
+    bottom: 32px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    width: 108px;
+  }
+  .wpn-status { font-size: 10px; line-height: 1.35; color: #ffd9a0; text-align: center; text-shadow: 0 1px 2px #000; background: rgba(0,0,0,0.35); border-radius: 6px; padding: 2px 4px; }
+  .wpn-status:empty { display: none; }
+  .weapon-controls .wpn-btn, .weapon-controls select { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .weapon-controls select { width: 100%; box-sizing: border-box; height: 30px; }
+  .wpn-practice { font-size: 12px; }
+  .wpn-hp-text { white-space: nowrap; }
+  .wpn-btn {
+    height: 36px;
+    border-radius: 8px;
+    background: rgba(255,90,60,0.16);
+    border: 1px solid rgba(255,130,100,0.5);
+    color: #ffd0c0;
+    font-size: 13px;
+  }
+  .wpn-btn.active { background: rgba(255,90,60,0.45); color: #fff; }
+  .wpn-btn:disabled { opacity: 0.4; }
+  .wpn-fire { background: rgba(255,60,40,0.32); font-weight: bold; }
+  .wpn-groups { display: flex; flex-direction: column; gap: 4px; }
+  .wpn-auto { height: auto; min-height: 30px; padding: 2px 4px; font-size: 11px; line-height: 1.2; display: flex; flex-direction: column; align-items: center;
+    background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.3); color: #cfd6de; }
+  .wpn-auto .wpn-auto-name { font-weight: bold; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wpn-auto .wpn-auto-state { font-size: 10px; opacity: 0.85; }
+  .wpn-auto.active { background: rgba(60,200,90,0.32); border-color: rgba(120,255,150,0.8); color: #eaffef; }
+  .wpn-stop { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.3); color: #ddd; }
+  .wpn-reticle {
+    position: fixed;
+    width: 44px;
+    height: 44px;
+    margin: -22px 0 0 -22px;
+    border: 2px solid rgba(255,90,60,0.85);
+    border-radius: 50%;
+    pointer-events: none;
+    box-shadow: 0 0 6px rgba(255,90,60,0.6);
+  }
+  /* v89: 照準で目標を追尾しているあいだはオレンジ */
+  .wpn-reticle.tracking { border-color: rgba(255,160,40,0.95); box-shadow: 0 0 8px rgba(255,160,40,0.75); }
+  .wpn-reticle.tracking::before, .wpn-reticle.tracking::after { background: rgba(255,160,40,0.95); }
+  .wpn-reticle::before, .wpn-reticle::after {
+    content: '';
+    position: absolute;
+    background: rgba(255,90,60,0.85);
+  }
+  .wpn-reticle::before { left: 50%; top: -10px; bottom: -10px; width: 2px; margin-left: -1px; }
+  .wpn-reticle::after { top: 50%; left: -10px; right: -10px; height: 2px; margin-top: -1px; }
+  /* v89: 照準の案内は小さく。操作の説明は数秒で消え、倍率だけ残る */
+  .wpn-hint {
+    position: fixed;
+    top: calc(104px + var(--sat, 0px));
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 11px;
+    color: #ffd0c0;
+    background: rgba(40,10,5,0.55);
+    padding: 3px 10px;
+    border-radius: 12px;
+    pointer-events: none;
+    max-width: min(70vw, 560px);
+    text-align: center;
+  }
+  .wpn-hint-text { transition: opacity 0.6s; }
+  .wpn-hint.brief .wpn-hint-text { display: none; }
+  @media (max-height: 500px) { .wpn-hint { top: calc(64px + var(--sat, 0px)); } }
+  /* v89: 演習の設定は「演習 ▸」で開く小さな箱に（武装の列の左に出る） */
+  .wpn-prow { position: relative; }
+  .wpn-prow .wpn-ptoggle { width: 100%; height: 28px; font-size: 11px; background: rgba(255,140,40,0.16); border-color: rgba(255,170,80,0.55); color: #ffd9a0; }
+  .wpn-pmenu { display: none; position: absolute; right: calc(100% + 6px); bottom: 0; width: 150px; flex-direction: column; gap: 4px; padding: 6px; border-radius: 8px; background: rgba(10,14,22,0.92); border: 1px solid rgba(255,170,80,0.5); box-shadow: 0 4px 14px rgba(0,0,0,0.5); }
+  .wpn-pmenu.open { display: flex; }
+  .wpn-pmenu select, .wpn-pmenu .wpn-btn { width: 100%; }
+  /* 画面の大きさで、ボタンの高さ・文字を変える */
+  .weapon-controls .wpn-btn { height: clamp(26px, 4.6vh, 36px); font-size: clamp(11px, 1.7vh, 13px); }
+  .weapon-controls .wpn-auto { min-height: clamp(26px, 4.4vh, 30px); }
+  @media (max-height: 620px) {
+    /* 背の低い画面: 武装の列を2列にして、上へ伸びすぎないように */
+    .weapon-controls { display: grid; grid-template-columns: 1fr 1fr; width: 188px; gap: 4px; }
+    .weapon-controls .wpn-status, .weapon-controls .wpn-hp { grid-column: 1 / -1; }
+    .weapon-controls .wpn-groups { grid-column: 1 / -1; flex-direction: row; }
+    .weapon-controls .wpn-groups > * { flex: 1; }
+    .weapon-controls .wpn-status { font-size: 9px; max-height: 2.8em; overflow: hidden; }
+  }
+  @media (max-width: 700px), (max-height: 500px) {
+    .weapon-controls { right: 108px; bottom: 24px; gap: 4px; }
+    .weapon-controls select { height: 26px; }
+    .wpn-btn { height: 32px; font-size: 12px; }
+  }
+  body.clean-view .wpn-reticle, body.clean-view .wpn-hint { display: none !important; }
+  .wpn-zoom { font-weight: bold; color: #fff; }
+  /* v89: 演習の目標の目印（照準の視点）。橙 = 止まっている、水色 = 動いている、赤い枠 = 照準の目標 */
+  .wpn-tmarks { position: fixed; inset: 0; pointer-events: none; }
+  .wpn-tmark { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border: 1.5px solid #ffae40; box-sizing: border-box; }
+  .wpn-tmark.moving { border-color: #6fe0ff; }
+  .wpn-tmark.locked { width: 26px; height: 26px; margin: -13px 0 0 -13px; border: 2px solid #ff4a3a; box-shadow: 0 0 6px rgba(255,74,58,0.7); }
+  .wpn-tmarks .space-target-marker { position: absolute; left: 0; top: 0; }
+  .wpn-tmarks .space-target-arrow { position: absolute; left: 0; top: 0; }
+  .wpn-hp { position: relative; height: 14px; border-radius: 4px; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.3); overflow: hidden; }
+  .wpn-hp-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 100%; background: #3dff6e; opacity: 0.7; }
+  .wpn-hp-text { position: relative; display: block; text-align: center; font-size: 10px; line-height: 14px; color: #fff; text-shadow: 0 1px 2px #000; }
+  .wpn-maneuver.active { background: rgba(80,180,255,0.35); border-color: rgba(140,210,255,0.9); color: #fff; }
+  .practice-badge { position: fixed; top: calc(var(--sat, 0px) + 54px); right: calc(var(--sar, 0px) + 8px); z-index: 30; padding: 5px 10px; border-radius: 8px; font-size: 12px; color: #ffd08a; background: rgba(60,30,0,0.6); border: 1px solid rgba(255,170,80,0.6); pointer-events: auto; }
+  body:not(.mode-practice) .side-menu-practice-only { display: none !important; }
+  .side-menu-practice-info { font-size: 11px; line-height: 1.5; color: #dfe8f2; }
+  .side-menu-practice-info .pi-line { margin: 2px 0; }
+  .side-menu-practice-info .pi-table { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 10.5px; }
+  .side-menu-practice-info .pi-table th { text-align: left; font-weight: normal; color: #9fb3c8; border-bottom: 1px solid rgba(255,255,255,0.15); padding: 1px 3px; }
+  .side-menu-practice-info .pi-table td { padding: 1px 3px; white-space: nowrap; }
+  .side-menu-practice-info .pi-dead { opacity: 0.4; }
+  /* v89: BOOST の上の損傷のマーク（縁 = 修理の進み具合） */
+  body.clean-view .dmg-icons, body.map-open .dmg-icons { display: none !important; }
+  .dmg-icons { position: fixed; z-index: 4; display: flex; flex-wrap: wrap-reverse; justify-content: flex-end; gap: 4px; pointer-events: none; }
+  .dmg-icon { pointer-events: auto; width: 26px; height: 26px; padding: 3px; border-radius: 50%; border: none; box-sizing: border-box; cursor: pointer; }
+  .dmg-icon-in { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; border-radius: 50%; color: #fff; font-size: 11px; font-weight: bold; }
+  /* v89: 砲塔の損傷（番号の下） */
+  .wpn-chipcol { width: 26px; }
+  .wpn-chip-dmg { position: relative; width: 100%; height: 13px; font-size: 9px; line-height: 9px; font-weight: bold; text-align: center; white-space: nowrap; text-shadow: 0 1px 2px #000; }
+  .wpn-chip-dmg span { display: block; height: 9px; }
+  .wpn-chip-dmg i { position: absolute; left: 0; bottom: 0; height: 3px; border-radius: 2px; background: #6fd0ff; box-shadow: 0 0 0 1px rgba(0,0,0,0.6); }
+  .wpn-chip-dmg:empty, .wpn-chip-dmg:not(.rep):not(.dmg-jam):not(.dmg-nofire):not(.dmg-dead) { height: 0; }
+  .wpn-chip-dmg.rep { color: #6fd0ff; }
+  .wpn-chip-dmg.dmg-jam { color: #ffb040; }
+  .wpn-chip-dmg.dmg-nofire { color: #ff5a40; }
+  .wpn-chip-dmg.dmg-dead { color: #ff2020; }
+  .wpn-chip.dmg-jam { border-style: dashed; }
+  .wpn-chip.dmg-nofire { border-style: dashed; box-shadow: inset 0 0 0 2px rgba(255,80,60,0.6); }
+  .wpn-chip.dmg-dead { background: rgba(60,0,0,0.85); box-shadow: inset 0 0 0 2px #ff2020; text-decoration: line-through; }
+  /* v89: 定期航路（32-voyage.js） */
+  .voyage-menu { display: flex; flex-direction: column; gap: 4px; margin-bottom: 4px; }
+  .voyage-menu-btn { padding: 6px 8px; border-radius: 6px; font-size: 12px; color: #eaf6ff; background: rgba(40,110,170,0.55); border: 1px solid rgba(140,210,255,0.6); }
+  .voyage-menu-btn:disabled { opacity: 0.5; }
+  .voyage-menu-info { font-size: 10.5px; color: #aac4d8; }
+  .voyage-hud { position: fixed; left: 50%; transform: translateX(-50%); z-index: 9; max-width: min(92vw, 560px); padding: 3px 12px; border-radius: 12px; font-size: 11.5px; color: #e4f6ff; background: rgba(6,30,52,0.72); border: 1px solid rgba(120,200,255,0.5); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+  .voyage-hud.late { color: #ffd2c4; border-color: rgba(255,130,100,0.75); }
+  .voyage-hud.hold { border-color: rgba(255,210,120,0.8); }
+  .voyage-toast { position: fixed; left: 50%; bottom: calc(240px + var(--sab, 0px)); transform: translateX(-50%); z-index: 40; max-width: min(88vw, 520px); padding: 6px 14px; border-radius: 10px; font-size: 12.5px; line-height: 1.45; color: #fff; background: rgba(10,26,44,0.88); border: 1px solid rgba(140,210,255,0.6); text-align: center; pointer-events: none; }
+  .voyage-card { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 45; width: min(90vw, 400px); padding: 12px 14px; border-radius: 12px; color: #eaf6ff; background: rgba(8,22,38,0.94); border: 1px solid rgba(255,200,110,0.75); box-shadow: 0 8px 28px rgba(0,0,0,0.6); display: flex; flex-direction: column; gap: 7px; }
+  .vc-title { font-size: 15px; font-weight: 700; color: #ffd27a; }
+  .vc-text { font-size: 12.5px; line-height: 1.5; }
+  .vc-bar { height: 3px; border-radius: 2px; background: rgba(255,255,255,0.12); overflow: hidden; }
+  .vc-bar i { display: block; height: 100%; width: 100%; background: #ffd27a; }
+  .vc-opt { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 10px; border-radius: 8px; text-align: left; color: #f2f9ff; background: rgba(40,90,140,0.55); border: 1px solid rgba(140,210,255,0.55); touch-action: manipulation; }
+  .vc-opt b { font-size: 13px; } .vc-opt small { font-size: 11px; color: #b8d4e8; }
+  .voyage-panel { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 44; width: min(92vw, 460px); max-height: 80vh; overflow-y: auto; padding: 12px 14px; border-radius: 12px; color: #eaf6ff; background: rgba(8,22,38,0.95); border: 1px solid rgba(140,210,255,0.6); box-shadow: 0 8px 28px rgba(0,0,0,0.6); }
+  .voyage-panel-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+  .voyage-panel-head b { font-size: 15px; } .voyage-panel-head span { flex: 1; font-size: 11.5px; color: #aac4d8; }
+  .voyage-close { width: 28px; height: 28px; border-radius: 6px; color: #fff; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.25); }
+  .voyage-panel-note { font-size: 11px; line-height: 1.5; color: #b8d4e8; margin-bottom: 8px; }
+  .voyage-list { display: flex; flex-direction: column; gap: 5px; }
+  .voyage-route { display: grid; grid-template-columns: 1fr auto; grid-template-rows: auto auto; column-gap: 8px; padding: 7px 10px; border-radius: 8px; text-align: left; color: #f2f9ff; background: rgba(30,70,110,0.5); border: 1px solid rgba(140,210,255,0.4); touch-action: manipulation; }
+  .vr-name { font-size: 13px; font-weight: 600; } .vr-sub { grid-row: 2; font-size: 11px; color: #aac4d8; }
+  .vr-best { grid-row: 1 / span 2; grid-column: 2; align-self: center; font-size: 12px; color: #8aa0b4; }
+  .rank-S { color: #ffd84a !important; } .rank-A { color: #8fe38f !important; } .rank-B { color: #8fd0ff !important; } .rank-C { color: #e0c090 !important; } .rank-D { color: #ff9a8a !important; }
+  .voyage-result { display: flex; flex-direction: column; gap: 6px; }
+  .vres-rank { font-size: 40px; font-weight: 800; text-align: center; line-height: 1.1; } .vres-rank small { display: block; font-size: 12px; font-weight: 400; color: #cfe2f0; }
+  .vres-row { display: grid; grid-template-columns: 64px 1fr 48px; grid-template-rows: auto auto; column-gap: 8px; align-items: center; font-size: 12px; }
+  .vres-row i { height: 7px; border-radius: 4px; background: rgba(255,255,255,0.12); overflow: hidden; } .vres-row em { display: block; height: 100%; background: linear-gradient(90deg, #4fb0ff, #9fe8ff); }
+  .vres-row b { text-align: right; } .vres-row small { grid-column: 1 / span 3; font-size: 10.5px; color: #9fb8cc; }
+  .vres-fare { font-size: 12px; text-align: center; margin-top: 4px; }
+  .voyage-ok { display: block; margin: 10px auto 0; padding: 7px 26px; border-radius: 8px; color: #fff; background: rgba(40,110,170,0.7); border: 1px solid rgba(140,210,255,0.7); }
+  body.clean-view .voyage-hud, body.map-open .voyage-hud { display: none !important; }
+  /* v89: 時間の倍速のバー（航行のメニューの中） */
+  .space-time-wrap { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: 8px; border: 1px solid rgba(140,210,255,0.35); background: rgba(10,30,50,0.4); font-size: 11px; color: #cfe6f6; }
+  .space-time-wrap.active { border-color: rgba(255,200,110,0.8); color: #ffe2b0; }
+  .space-time { width: 90px; accent-color: #ffcf7a; }
+  .space-time-val { min-width: 34px; white-space: nowrap; }
+
+  /* v89: 艦内の視点（31-viewpoints.js） */
+  .btn-viewpoint { position: fixed; top: calc(92px + var(--sat, 0px)); right: calc(12px + var(--sar, 0px)); z-index: 5; padding: 7px 12px; border-radius: 8px; font-size: 12px; color: #cfeaff; background: rgba(10,30,50,0.6); border: 1px solid rgba(120,200,255,0.5); }
+  /* v89: 視点の一覧（押すと出る） */
+  .vp-menu { position: fixed; z-index: 40; display: flex; flex-direction: column; gap: 3px; min-width: 150px; padding: 5px; border-radius: 8px; background: rgba(6,18,30,0.94); border: 1px solid rgba(120,200,255,0.55); box-shadow: 0 6px 18px rgba(0,0,0,0.5); }
+  .vp-item { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 7px 10px; border-radius: 6px; font-size: 12px; color: #d8f0ff; background: rgba(255,255,255,0.04); border: 1px solid transparent; text-align: left; }
+  .vp-item small { font-size: 10px; color: #8fc4e0; }
+  .vp-item.active { background: rgba(40,110,170,0.55); border-color: rgba(140,210,255,0.8); color: #fff; }
+  .btn-viewpoint.open { border-color: rgba(160,225,255,0.95); }
+  .btn-viewpoint.active { background: rgba(30,90,140,0.7); color: #fff; border-color: rgba(160,225,255,0.9); }
+  body.mode-practice .btn-viewpoint { top: calc(128px + var(--sat, 0px)); }
+  body.clean-view .btn-viewpoint, body.map-open .btn-viewpoint, body.clean-view .vp-overlay, body.map-open .vp-overlay, body.clean-view .bridge-console, body.map-open .bridge-console { display: none !important; }
+  .vp-overlay { position: fixed; inset: 0; pointer-events: none; z-index: 1; }
+  .vp-info { position: absolute; left: 50%; bottom: calc(10px + var(--sab, 0px)); transform: translateX(-50%); max-width: 80vw; padding: 3px 12px; border-radius: 12px; font-size: 11px; color: #d8f0ff; background: rgba(0,20,40,0.55); border: 1px solid rgba(120,200,255,0.35); text-align: center; white-space: nowrap; display: flex; align-items: center; gap: 6px; pointer-events: auto; }
+  .vp-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; pointer-events: none; }
+  .vp-tool { flex: 0 0 auto; padding: 4px 10px; border-radius: 10px; font-size: 11px; color: #d8f0ff; background: rgba(10,40,70,0.85); border: 1px solid rgba(120,200,255,0.6); touch-action: manipulation; }
+  .vp-tool.on { color: #1a1206; background: #ffcf7a; border-color: #ffe2b0; font-weight: 600; }
+  .vp-overlay.tracking .vp-info { color: #ffe2b0; border-color: rgba(255,180,90,0.7); }
+  .vp-cross { position: absolute; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; border: 1px solid rgba(180,230,255,0.55); border-radius: 50%; }
+  .vp-cross::before, .vp-cross::after { content: ''; position: absolute; background: rgba(180,230,255,0.55); }
+  .vp-cross::before { left: 50%; top: -7px; bottom: -7px; width: 1px; }
+  .vp-cross::after { top: 50%; left: -7px; right: -7px; height: 1px; }
+  .vp-overlay.tracking .vp-cross { border-color: rgba(255,170,60,0.95); box-shadow: 0 0 6px rgba(255,170,60,0.6); }
+  .vp-overlay.tracking .vp-cross::before, .vp-overlay.tracking .vp-cross::after { background: rgba(255,170,60,0.95); }
+  /* 双眼鏡: 拡大しているときは、丸い視野の外を暗くする */
+  .vp-bino { position: absolute; inset: 0; opacity: 0; transition: opacity 0.3s; background: radial-gradient(circle at 50% 50%, transparent 0, transparent min(44vh, 44vw), rgba(0,0,0,0.82) min(47vh, 47vw), rgba(0,0,0,0.94) 100%); }
+  .vp-overlay.bino .vp-bino { opacity: 1; }
+  /* ===== v89: 船橋の視点の画面（31-viewpoints.js） ===== */
+  .bridge-frame { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2; }
+  .bridge-box { position: fixed; z-index: 6; box-sizing: border-box; padding: 4px 6px 5px; color: #bfe9ff; font-size: 9.5px; line-height: 1.3;
+    background: linear-gradient(180deg, rgba(8,28,44,0.78), rgba(4,14,24,0.66)); border: 1px solid rgba(90,200,255,0.5);
+    box-shadow: inset 0 0 16px rgba(60,170,255,0.14), 0 0 10px rgba(40,140,220,0.2);
+    clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px); pointer-events: auto; }
+  .bb-head { display: flex; align-items: center; gap: 5px; margin-bottom: 2px; padding-bottom: 1px; border-bottom: 1px solid rgba(90,200,255,0.35); font-size: 10px; font-weight: 600; letter-spacing: 0.08em; color: #e6f7ff; white-space: nowrap; overflow: hidden; }
+  .bb-head span { font-size: 8px; letter-spacing: 0.2em; color: rgba(120,210,255,0.7); font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; }
+  .bb-side { margin-left: auto; font-size: 9px; padding: 0 6px; border-radius: 3px; color: #cfeaff; background: rgba(40,110,170,0.5); border: 1px solid rgba(120,200,255,0.6); }
+  .bridge-dmg canvas { display: block; margin: 0 auto; }
+  .bb-legend { display: flex; align-items: center; justify-content: flex-end; gap: 4px; font-size: 9px; color: #8fc4e0; margin-top: 1px; }
+  .bb-legend i, .bb-legend b { display: inline-block; width: 22px; height: 5px; }
+  .bb-legend i { background: linear-gradient(90deg, #ffdc28, #ff9a20); }
+  .bb-legend b { background: linear-gradient(90deg, #ff6a20, #ff1e14); }
+  .bc-row { display: grid; grid-template-columns: 3.2em 1fr auto; align-items: center; gap: 4px; margin: 0; }
+  .bc-row label { color: #8fc4e0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bc-row b { font-weight: 600; color: #f0fbff; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 9px; white-space: nowrap; }
+  .bc-bar { display: block; height: 5px; background: rgba(120,200,255,0.12); border: 1px solid rgba(90,200,255,0.3); position: relative; overflow: hidden; }
+  .bc-bar i { position: absolute; left: 0; top: 0; bottom: 0; background: linear-gradient(90deg, #2aa8ff, #7fe0ff); box-shadow: 0 0 6px rgba(90,200,255,0.8); }
+  .bc-bar.warn i { background: linear-gradient(90deg, #e09a20, #ffd870); }
+  .bc-line { margin: 1px 0; color: #9fd0ea; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bc-line.bad { color: #ff9a80; }
+  /* 狭い画面: 機関出力は「スロットル」と「速度」の2行だけに */
+  .bridge-eng.compact { overflow: hidden; padding-top: 3px; padding-bottom: 3px; }
+  /* 狭いとき: 見出しの英字・凡例を外し、文字をさらに小さく */
+  .bridge-box.small { font-size: 8.5px; padding: 3px 4px 4px; }
+  .bridge-box.small .bb-head { font-size: 9px; }
+  .bridge-box.small .bb-head span, .bridge-box.small .bb-legend, .bridge-box.small .bc-line { display: none; }
+  .bridge-box.small .bc-row { grid-template-columns: 2.6em 1fr auto; gap: 3px; }
+  .bridge-box.small .bc-row b { font-size: 8px; }
+  .bridge-eng.compact .bb-head, .bridge-eng.compact .bc-line, .bridge-eng.compact .bc-row:nth-child(2), .bridge-eng.compact .bc-row:nth-child(3) { display: none; }
+  /* 船橋では、外の視点のボタン・演習の目印・大気圏の帯は出さない（機関の箱に高度を出す）。視点の切り替えは右上へ */
+  body.viewpoint-bridge .hud-camera-controls, body.viewpoint-bridge .practice-badge, body.viewpoint-bridge .planetfall-hud { display: none !important; }
+  body.viewpoint-bridge .btn-viewpoint { top: calc(12px + var(--sat, 0px)); right: calc(12px + var(--sar, 0px) + var(--wcr, 0px)); }
+  body.viewpoint-bridge .side-menu-tab { margin-top: 4px; margin-left: 4px; }
+  /* 航行のメニュー（星図など）は上の真ん中に、幅を控えめにして両側に計器の隙間をつくる */
+  body.viewpoint-bridge .space-nav-panel, body.viewpoint-bridge .space-nav-panel.is-compact { left: 50% !important; right: auto !important; transform: translateX(-50%) !important; top: calc(12px + var(--sat, 0px)) !important; width: min(42vw, 470px) !important; }
+  /* 砲の番号: 装填の棒を横向きに（番号の右に、砲身ごとに細い横棒） */
+  /* v89: どの視点でも、装填の棒は番号の右に横向き */
+  body .wpn-chipcol { flex-direction: row; width: auto; gap: 2px; align-items: center; }
+  body .wpn-bars { flex-direction: column; height: auto; width: 16px; gap: 1px; }
+  body .wpn-bar { width: 16px; height: 4px; }
+  body .wpn-bar-fill { top: 0; bottom: 0; right: auto; height: 100%; width: calc(var(--k, 100) * 1%); }
+  body .wpn-chip-dmg { width: auto; height: auto; }
+  body .wpn-chip-dmg:not(.rep):not(.dmg-jam):not(.dmg-nofire):not(.dmg-dead) { display: none; }
+  body .wpn-chips { gap: 3px 6px; }
+  body.viewpoint-bridge .vp-info { bottom: auto; font-size: 10.5px; box-sizing: border-box; }
+  /* v89: 大気圏・着陸の表示（上のパネルの下） */
+  .planetfall-hud { position: fixed; left: 50%; transform: translateX(-50%); top: calc(150px + var(--sat, 0px)); z-index: 4; max-width: 86vw; padding: 4px 12px; border-radius: 12px; font-size: 12px; color: #d8f0ff; background: rgba(0,20,40,0.55); border: 1px solid rgba(120,200,255,0.4); pointer-events: none; text-align: center; }
+  .planetfall-hud.contact { color: #e8ffd8; border-color: rgba(150,255,150,0.6); background: rgba(10,40,10,0.55); }
+  body.weapon-aim-view .planetfall-hud { top: calc(128px + var(--sat, 0px)); }
+  body.clean-view .planetfall-hud, body.map-open .planetfall-hud { display: none !important; }
+  @media (max-height: 500px) { .planetfall-hud { top: calc(86px + var(--sat, 0px)); font-size: 11px; } }
+  /* v89: 損傷と応急修理 */
+  .side-menu-damage { font-size: 11px; color: #dfe8f2; }
+  .side-menu-damage .dm-none { color: #9fb3c8; }
+  .side-menu-damage .dm-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 4px; }
+  .side-menu-damage button { font-size: 11px; padding: 3px 8px; border-radius: 6px; border: 1px solid rgba(255,200,120,0.6); background: rgba(80,50,10,0.6); color: #ffe2b0; }
+  .side-menu-damage button:disabled { opacity: 0.6; border-color: rgba(120,200,255,0.6); background: rgba(10,50,80,0.6); color: #cfe8ff; }
+  .side-menu-damage .dm-head { flex-wrap: wrap; }
+  .side-menu-damage .dm-auto.on { border-color: rgba(120,220,255,0.8); background: rgba(10,60,90,0.7); color: #d8f2ff; }
+  .side-menu-damage .dm-row { margin: 4px 0 6px; }
+  .side-menu-damage .dm-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .side-menu-damage .dm-bar { position: relative; height: 6px; margin-top: 3px; border-radius: 3px; background: rgba(255,255,255,0.12); overflow: hidden; }
+  .side-menu-damage .dm-fill { position: absolute; left: 0; top: 0; bottom: 0; }
+  .side-menu-damage .dm-rep { position: absolute; left: 0; bottom: 0; height: 2px; background: #6fd0ff; }
+  .side-menu-damage .dm-note { color: #9fb3c8; font-size: 10px; margin-top: 1px; }
+  .side-menu-practice-info .pi-sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+  select.wpn-maneuver { font-size: 11px; padding: 4px 2px; border-radius: 6px; background: rgba(0,0,0,0.55); color: #cfe8ff; border: 1px solid rgba(140,200,255,0.5); }
+  select.wpn-maneuver.active { background: rgba(80,180,255,0.35); border-color: rgba(140,210,255,0.9); color: #fff; }
+  .wpn-inset-scale { position: absolute; left: 4px; bottom: 2px; font-size: 9.5px; color: rgba(190,225,255,0.85); pointer-events: none; text-shadow: 0 0 3px #000; }
+  .wpn-enemylook { font-size: 11px; padding: 4px 2px; border-radius: 6px; background: rgba(0,0,0,0.55); color: #cfe0f0; border: 1px solid rgba(160,200,240,0.5); }
+  .wpn-tmark.missile { width: 8px; height: 8px; margin: -4px 0 0 -4px; border-radius: 50%; border-color: #ffb060; background: rgba(255,150,60,0.5); }
+  .wpn-difficulty { font-size: 11px; padding: 4px 2px; border-radius: 6px; background: rgba(0,0,0,0.55); color: #ffe2b0; border: 1px solid rgba(255,200,120,0.5); }
+  /* v89: 演習モード（?mode=practice）: 自動航行・ワープ・星図・目的地・周回姿勢のボタンを出さない */
+  body.mode-practice .btn-space-map, body.mode-practice .btn-space-autopilot, body.mode-practice .btn-space-warp,
+  body.mode-practice .btn-space-orbit-att, body.mode-practice .space-target-select, body.mode-practice .space-arrival-mode,
+  body.mode-practice .space-orbit-alt-wrap, body.mode-practice .space-nav-target, body.mode-practice .space-label-layer > .space-target-marker,
+  body.mode-practice .space-label-layer > .space-target-arrow, body.mode-practice .side-menu-destination { display: none !important; }
+  .wpn-lock { background: rgba(255,180,70,0.22); border-color: rgba(255,200,120,0.6); color: #ffe2b0; }
+  .st-indep { color: #ff9a2e; }
+  .wpn-chip.st-indep { background: rgba(140,70,10,0.45); }
+  .wpn-practice.active { background: rgba(255,170,60,0.3); border-color: rgba(255,200,120,0.8); color: #fff; }
+  .wpn-focus { background: rgba(255,60,40,0.18); }
+  .wpn-focus.active { background: rgba(255,70,40,0.55); border-color: rgba(255,150,120,0.95); color: #fff; }
+  body.clean-view .wpn-tmarks { display: none !important; }
+  .wpn-inset { position: fixed; z-index: 2; border: 1px solid rgba(255,240,160,0.45); border-radius: 4px; pointer-events: auto; box-sizing: border-box; cursor: move; touch-action: none; }
+  /* v89: 右下の角をドラッグして大きさを変える */
+  .wpn-inset-resize { position: absolute; right: -1px; bottom: -1px; width: 22px; height: 22px; cursor: nwse-resize;
+    background: linear-gradient(135deg, transparent 50%, rgba(255,240,160,0.75) 50%); border-bottom-right-radius: 4px; }
+  /* v89: 目標のまとまりの文字は枠の上に */
+  .wpn-cluster .stm-text { top: auto; bottom: 100%; margin-top: 0; margin-bottom: 4px; }
+  .wpn-inset.free-look::after { content: '見ている方向 →奥'; }
+  .wpn-inset::after { content: '射撃方向 →奥'; position: absolute; left: 4px; top: 2px; font-size: 9px; color: rgba(255,240,160,0.7); }
+  /* v89: 砲塔ごとの照準マークと、下の番号（緑=撃てる・黄=旋回中・赤=装填中・灰=射線が当たる／寄せただけ・白灰=向けられない） */
+  .wpn-gunmarks { position: fixed; inset: 0; pointer-events: none; }
+  .wpn-gunmark {
+    position: absolute; width: 16px; height: 16px; margin: -8px 0 0 -8px;
+    border: 2px solid currentColor; border-radius: 50%; box-sizing: border-box;
+  }
+  .wpn-gunmark.small { width: 6px; height: 6px; margin: -3px 0 0 -3px; border: none; background: currentColor; box-shadow: 0 0 2px rgba(0,0,0,0.8); }
+  .wpn-gunmark span { position: absolute; left: 14px; top: -12px; font-size: 10px; font-weight: bold; text-shadow: 0 1px 2px #000; }
+  .wpn-chips {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start; gap: 3px; max-width: min(50vw, 620px); pointer-events: none;
+  }
+  .wpn-chipcol { pointer-events: auto; cursor: pointer; }
+  .wpn-chip.viewing { outline: 2px solid #fff; outline-offset: 1px;
+  }
+  .wpn-chip {
+    min-width: 22px; height: 22px; padding: 0 4px; box-sizing: border-box; border-radius: 5px;
+    font-size: 12px; font-weight: bold; line-height: 20px; text-align: center;
+    border: 1px solid currentColor; background: rgba(0,0,0,0.45);
+  }
+  .wpn-chipcol { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .wpn-bars { display: flex; gap: 2px; height: 18px; align-items: stretch; }
+  /* v89: 砲身ごとの装填の棒。砲身の状態の色で、装填の済んだ割合だけ下から伸びる（地は暗い色） */
+  .wpn-bar { position: relative; width: 5px; background: rgba(255,255,255,0.12); border-radius: 1px; overflow: hidden; }
+  .wpn-bar-fill { position: absolute; left: 0; right: 0; bottom: 0; height: calc(var(--k, 100) * 1%); background: currentColor; }
+  .wpn-bar.st-none { background: rgba(0,0,0,0.6); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12); }
+  .st-ready { color: #3dff6e; }
+  .st-moving { color: #ffd84a; }
+  .st-reload { color: #ff4a3a; }
+  .st-blocked { color: #f2f4f6; }
+  .st-near { color: #8a9099; }
+  /* v89: 指向不可は濃いグレー（射線が当たる・寄せただけの砲の灰色と分ける） */
+  .st-none { color: #24272c; }
+  .wpn-chip.st-none { color: #6a7079; border-color: #24272c; background: rgba(0,0,0,0.75); }
+  .wpn-gunmark.st-none span { color: #6a7079; }
+  .wpn-chip.st-ready { background: rgba(30,120,50,0.45); }
+  .wpn-chip.st-reload { background: rgba(130,30,20,0.45); }
+  body.clean-view .wpn-gunmarks, body.clean-view .wpn-chips { display: none !important; }
+
   .hud-camera-controls {
     position: fixed;
+    z-index: 31; /* v89: 航行のメニューなどに隠れないように */
     top: 56px;
     right: 12px;
     display: flex;
@@ -301,7 +673,13 @@
     display: flex;
     align-items: flex-start;
     z-index: 20;
+    /* v85: 入れ物そのものはタップを受けない。閉じていても入れ物の箱（タブ＋隠れた
+       パネルの幅・高さ）が残っていて、小さな画面ではその下のスロットルレバーや
+       ロールボタン・スティックがさわれなかった。タブと開いたパネルだけが受ける */
+    pointer-events: none;
   }
+  #hud-root > .hud-side-menu { pointer-events: none; }
+  .side-menu-tab { pointer-events: auto; }
   .side-menu-tab {
     width: 36px;
     height: 56px;
@@ -325,12 +703,17 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    transform: translateX(-100%);
-    transition: transform 0.2s ease;
+    /* v83: 閉じているときは、タブの分（36px）も含めて画面の外へ出して隠す
+       （以前は -100% だけずらしていたため、パネルの右端がタブの下に見えていた） */
+    transform: translateX(calc(-100% - 40px));
+    visibility: hidden;
+    transition: transform 0.2s ease, visibility 0s linear 0.2s;
     pointer-events: none;
   }
   .hud-side-menu.is-open .side-menu-panel {
     transform: translateX(0);
+    visibility: visible;
+    transition: transform 0.2s ease, visibility 0s linear 0s;
     pointer-events: auto;
   }
   .side-menu-section-title {
@@ -380,6 +763,515 @@
     color: #dfefff;
     font-size: 12px;
   }
+
+  /* -----------------------------------------------------------
+     v83: スマホなど小さな画面のレイアウト
+     （幅700px以下＝縦持ち、高さ500px以下＝横持ち）。上部の航法パネル・
+     右上のボタン・デバッグ表示、下部の操縦系が重ならないよう並べ直し、
+     少し小さくする。デバッグ表示はタップで畳める（最初は畳んだ状態）。
+  ----------------------------------------------------------- */
+  @media (max-width: 700px), (max-height: 500px) {
+    .hud-debug-panel {
+      font-size: 10px;
+      line-height: 1.4;
+      padding: 5px 8px;
+      pointer-events: auto;
+      max-width: min(270px, 52vw);
+    }
+    body.hud-debug-collapsed .hud-debug-panel { max-height: 14px; line-height: 14px; overflow: hidden; }
+    body.hud-debug-collapsed .hud-docking-log-controls { display: none; }
+    .hud-settings-link, .btn-approach-guides-toggle, .btn-camera-mode { padding: 6px 9px; font-size: 11px; }
+    .hud-top-right-col { left: auto; gap: 6px; }
+    .hud-top-right-row { gap: 6px; }
+    .hud-docking-log-controls button { font-size: 10px !important; padding: 3px 6px !important; }
+  }
+  @media (max-width: 700px) and (min-height: 501px) {
+    .space-nav-panel, .space-nav-panel.is-compact {
+      left: 6px !important;
+      right: 6px !important;
+      transform: none !important;
+      width: auto !important;
+      max-width: none !important;
+      top: 6px;
+    }
+    .hud-top-right-col { top: 76px; right: 6px; max-width: calc(100vw - 12px); }
+    .hud-camera-controls { top: 150px; right: 6px; }
+    .hud-debug-panel { top: 76px; left: 6px; max-width: calc(100vw - 200px); }
+    .hud-docking-log-controls { top: auto; bottom: 236px; right: 6px; }
+    .hud-side-menu { top: 210px; }
+    .throttle-lever { left: 12px; bottom: 24px; width: 52px; height: 150px; }
+    .btn-lever-mode { left: 12px; bottom: 178px; width: 52px; }
+    .btn-roll-left, .btn-roll-right { left: 72px; width: 52px; height: 38px; }
+    .btn-roll-left { bottom: 70px; }
+    .btn-roll-right { bottom: 24px; }
+    .stick-move { left: 134px; bottom: 24px; width: 88px; height: 88px; }
+    .stick-look { right: 12px; bottom: 24px; width: 88px; height: 88px; }
+    .btn-boost { right: 12px; bottom: 124px; width: 88px; }
+  }
+  @media (max-height: 500px) {
+    .hud-top-right-col { top: 4px; right: 6px; max-width: 30vw; }
+    .hud-camera-controls { top: 92px; right: 6px; }
+    .hud-debug-panel { top: 4px; left: 6px; max-width: 28vw; }
+    .hud-docking-log-controls { top: auto; bottom: 150px; right: 6px; }
+    .hud-side-menu { top: 52px; }
+    .side-menu-panel { max-height: calc(100vh - 64px); overflow-y: auto; }
+    .throttle-lever { left: 12px; bottom: 22px; width: 48px; height: 118px; }
+    .btn-lever-mode { left: 12px; bottom: 144px; width: 48px; height: 16px; line-height: 14px; }
+    .btn-roll-left, .btn-roll-right { left: 68px; width: 52px; height: 36px; }
+    .btn-roll-left { bottom: 66px; }
+    .btn-roll-right { bottom: 22px; }
+    .stick-move { left: 132px; bottom: 18px; width: 86px; height: 86px; }
+    .stick-look { right: 16px; bottom: 18px; width: 86px; height: 86px; }
+    .btn-boost { right: 16px; bottom: 114px; width: 86px; height: 34px; }
+  }
+
+  /* -----------------------------------------------------------
+     v77: 宇宙航行HUD（17-space-hud.js）
+  ----------------------------------------------------------- */
+  .space-nav-panel {
+    position: fixed;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(540px, calc(100vw - 24px));
+    padding: 6px 10px 8px;
+    background: rgba(0, 8, 20, 0.55);
+    border: 1px solid rgba(108, 195, 255, 0.35);
+    border-radius: 8px;
+    color: #cfe8ff;
+    font-size: 12px;
+    z-index: 30;
+    box-sizing: border-box;
+  }
+  .space-nav-line {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.5;
+  }
+  .space-nav-target { color: #ffd9a0; }
+  .space-nav-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .space-nav-buttons button,
+  .space-nav-buttons select {
+    padding: 5px 9px;
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(108,195,255,0.45);
+    border-radius: 6px;
+    color: #dfefff;
+    font-size: 12px;
+  }
+  .space-nav-buttons select { max-width: 170px; }
+  /* v85: 自動航行の到着のしかた・軌道の高度 */
+  .space-nav-buttons .space-arrival-mode { max-width: 110px; }
+  .space-orbit-alt-wrap { display: inline-flex; align-items: center; gap: 3px; color: #9fd8ff; font-size: 11px; }
+  .space-orbit-alt {
+    width: 92px; padding: 5px 6px; background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(108,195,255,0.4); border-radius: 6px; color: #dfefff; font-size: 12px;
+  }
+  /* 画面幅が中くらい（iPadなど）: 左上のデバッグ表示と重ならないよう右へ寄せる */
+  @media (max-width: 1150px) {
+    .space-nav-panel {
+      left: auto;
+      right: max(12px, calc(50% - 300px));
+      transform: none;
+      width: min(500px, calc(100vw - 330px));
+    }
+    .space-nav-buttons select { max-width: 120px; }
+  }
+  /* コンパクト表示（スマホ・▴ボタン）: 1行の状態表示とアイコンボタンだけ */
+  .space-nav-panel.is-compact {
+    width: auto;
+    max-width: calc(100vw - 16px);
+    left: max(50%, 300px);
+    right: auto;
+    transform: translateX(-50%);
+    padding: 4px 6px 5px;
+    font-size: 11px;
+  }
+  .space-nav-panel.is-compact .space-nav-location,
+  .space-nav-panel.is-compact .space-nav-target,
+  .space-nav-panel.is-compact .space-target-select,
+  .space-nav-panel.is-compact .space-arrival-mode,
+  .space-nav-panel.is-compact .space-orbit-alt-wrap,
+  .space-nav-panel.is-compact .snb-text { display: none; }
+  .space-nav-panel.is-compact .space-nav-buttons { margin-top: 3px; gap: 4px; flex-wrap: nowrap; }
+  .space-nav-panel.is-compact .space-nav-buttons button { padding: 4px 7px; }
+  @media (max-width: 600px) {
+    .space-nav-panel.is-compact { left: 50%; }
+  }
+  .space-nav-buttons button.is-on {
+    background: rgba(255,170,51,0.25);
+    border-color: rgba(255,190,90,0.8);
+    color: #ffe9c4;
+  }
+  .space-nav-buttons button.is-off { color: rgba(255,255,255,0.4); }
+
+  #hud-root > .space-label-layer,
+  #hud-root > .space-warning {
+    pointer-events: none;
+  }
+  .space-label-layer {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    z-index: 5;
+  }
+  .space-label {
+    position: absolute;
+    left: 0;
+    top: 0;
+    font-size: 11px;
+    color: rgba(200, 225, 255, 0.85);
+    text-shadow: 0 0 3px #000, 0 0 2px #000;
+    white-space: nowrap;
+    display: none;
+  }
+  .space-label-star { color: #ffe7a8; }
+  .space-label-moon { color: rgba(190, 200, 215, 0.8); font-size: 10px; }
+  .space-label-dwarf, .space-label-asteroid, .space-label-comet { color: rgba(220, 200, 170, 0.8); font-size: 10px; }
+  .space-label.is-target { color: #ffcf7a; font-weight: bold; }
+  .space-target-marker {
+    position: absolute;
+    left: 0;
+    top: 0;
+    display: none;
+  }
+  .stm-corner {
+    position: absolute;
+    width: 8px;
+    height: 8px;
+    border-color: #ffb547;
+    border-style: solid;
+    border-width: 0;
+  }
+  .stm-corner.tl { left: 0; top: 0; border-left-width: 2px; border-top-width: 2px; }
+  .stm-corner.tr { right: 0; top: 0; border-right-width: 2px; border-top-width: 2px; }
+  .stm-corner.bl { left: 0; bottom: 0; border-left-width: 2px; border-bottom-width: 2px; }
+  .stm-corner.br { right: 0; bottom: 0; border-right-width: 2px; border-bottom-width: 2px; }
+  .stm-text {
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin-top: 4px;
+    font-size: 11px;
+    color: #ffcf7a;
+    text-shadow: 0 0 3px #000;
+    white-space: nowrap;
+  }
+  .space-target-arrow {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 20px;
+    height: 20px;
+    line-height: 20px;
+    text-align: center;
+    color: #ffb547;
+    font-size: 18px;
+    text-shadow: 0 0 4px #000;
+    display: none;
+  }
+  .space-warning {
+    position: fixed;
+    top: 40%;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 8px 14px;
+    background: rgba(80, 10, 0, 0.6);
+    border: 1px solid rgba(255, 120, 80, 0.7);
+    border-radius: 6px;
+    color: #ffd2c4;
+    font-size: 13px;
+    display: none;
+    z-index: 40;
+  }
+  .space-credits {
+    position: fixed;
+    left: 8px;
+    bottom: 4px;
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.32);
+    z-index: 9999;
+    pointer-events: none;
+    white-space: nowrap;
+    max-width: calc(100vw - 120px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .space-credits a { color: rgba(170, 210, 255, 0.6); pointer-events: auto; }
+  .space-credits-dialog {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+  }
+  .space-credits-body {
+    max-width: min(560px, calc(100vw - 32px));
+    max-height: 80vh;
+    overflow-y: auto;
+    padding: 16px 20px;
+    background: #0b1626;
+    border: 1px solid rgba(108, 195, 255, 0.4);
+    border-radius: 10px;
+    color: #dfefff;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .space-credits-body h3 { margin: 0 0 8px; font-size: 15px; }
+  .space-credits-body ul { padding-left: 18px; margin: 0 0 12px; }
+  .space-credits-close {
+    padding: 6px 16px;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(108,195,255,0.5);
+    border-radius: 6px;
+    color: #dfefff;
+  }
+
+  /* -----------------------------------------------------------
+     v77: 星図（19-star-map.js）
+  ----------------------------------------------------------- */
+  body.map-open #hud-root { display: none; }
+  .star-map-root {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: none;
+    touch-action: none;
+    cursor: grab;
+  }
+  .star-map-header {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    right: 8px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: #dfefff;
+    font-size: 13px;
+    pointer-events: none;
+  }
+  .star-map-header > * { pointer-events: auto; }
+  .star-map-title { font-size: 16px; font-weight: bold; text-shadow: 0 0 4px #000; }
+  .star-map-scale { color: rgba(200, 225, 255, 0.75); text-shadow: 0 0 3px #000; flex: 1; }
+  .star-map-close,
+  .star-map-presets button,
+  .star-map-time button,
+  .smi-actions button {
+    padding: 6px 10px;
+    background: rgba(0, 10, 25, 0.6);
+    border: 1px solid rgba(108, 195, 255, 0.45);
+    border-radius: 6px;
+    color: #dfefff;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .star-map-presets {
+    position: absolute;
+    top: 44px;
+    left: 8px;
+    right: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .star-map-time {
+    position: absolute;
+    bottom: 22px;
+    left: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    color: #cfe8ff;
+    font-size: 12px;
+    max-width: calc(100vw - 16px);
+  }
+  .star-map-date { text-shadow: 0 0 3px #000; margin-right: 4px; }
+  .star-map-time button.is-on { background: rgba(255, 170, 51, 0.3); border-color: rgba(255, 190, 90, 0.8); }
+  .star-map-labels { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+  .sm-label {
+    position: absolute;
+    left: 0;
+    top: 0;
+    font-size: 11px;
+    color: rgba(205, 225, 255, 0.9);
+    text-shadow: 0 0 3px #000, 0 0 2px #000;
+    white-space: nowrap;
+    pointer-events: auto;
+    cursor: pointer;
+    padding: 2px 3px;
+    display: none;
+  }
+  .sm-label::before {
+    content: '';
+    position: absolute;
+    left: -6px;
+    top: 8px;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: currentColor;
+    opacity: 0.8;
+  }
+  .sm-label.sm-star { color: #ffe39a; font-weight: bold; }
+  .sm-label.sm-planet { color: #cfe3ff; font-size: 12px; }
+  .sm-label.sm-moon { color: rgba(185, 200, 220, 0.85); font-size: 10px; }
+  .sm-label.sm-dwarf, .sm-label.sm-asteroid, .sm-label.sm-comet { color: rgba(225, 205, 175, 0.9); font-size: 10px; }
+  .sm-label.sm-starname { color: rgba(255, 236, 200, 0.85); font-size: 10px; }
+  .sm-label.sm-arm { color: rgba(170, 200, 255, 0.9); font-size: 12px; }
+  .sm-label.sm-gc { color: #ffd38a; font-size: 12px; }
+  .sm-label.sm-galaxy { color: #e7d4ff; font-size: 12px; }
+  .sm-label.sm-ship { color: #7dffa8; font-weight: bold; }
+  .sm-label.sm-home { color: #7dffa8; }
+  .sm-label.sm-region { color: rgba(255, 214, 160, 0.85); font-size: 11px; font-style: italic; }
+  .sm-label.is-selected { color: #fff; background: rgba(60, 120, 200, 0.45); border-radius: 4px; }
+  .sm-label.is-target { color: #ffcf7a; }
+  .star-map-info {
+    position: absolute;
+    right: 8px;
+    bottom: 22px;
+    width: min(340px, calc(100vw - 16px));
+    max-height: 50vh;
+    overflow-y: auto;
+    padding: 10px 12px;
+    background: rgba(0, 10, 25, 0.78);
+    border: 1px solid rgba(108, 195, 255, 0.45);
+    border-radius: 8px;
+    color: #dfefff;
+    font-size: 12px;
+    line-height: 1.6;
+    cursor: default;
+    box-sizing: border-box;
+  }
+  .star-map-legend {
+    position: absolute;
+    left: 8px;
+    bottom: 60px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    max-width: min(560px, calc(100vw - 16px));
+    font-size: 10px;
+    color: rgba(225, 235, 255, 0.8);
+    text-shadow: 0 0 3px #000;
+    pointer-events: none;
+  }
+  .sml-item { white-space: nowrap; }
+  .sml-item i {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    margin-right: 4px;
+    vertical-align: 0;
+  }
+  .smi-title { font-size: 16px; font-weight: bold; }
+  .smi-en { font-size: 11px; color: rgba(200, 220, 255, 0.6); font-weight: normal; }
+  .smi-type { color: #ffd9a0; margin-bottom: 4px; }
+  .smi-desc { margin-top: 6px; color: rgba(225, 235, 255, 0.85); }
+  .smi-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .star-map-hint {
+    position: absolute;
+    bottom: 4px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.4);
+    white-space: nowrap;
+    pointer-events: none;
+  }
+  @media (max-width: 700px) {
+    .star-map-info { bottom: 70px; }
+    .star-map-hint { display: none; }
+    .star-map-legend { bottom: 96px; }
+  }
+  /* v88: ダブルタップで、操作画面・目印をすべて隠し、艦と星と空だけにする（CleanView） */
+  body.clean-view > *:not(canvas):not(.clean-view-tools):not(.star-map-root) { display: none !important; }
+  .clean-view-tools { display: none; position: fixed; right: 14px; bottom: 14px; z-index: 50; gap: 10px; }
+  body.clean-view .clean-view-tools { display: flex; }
+  .clean-view-tools button {
+    width: 46px; height: 46px; border-radius: 23px; border: 1px solid rgba(255,255,255,0.35);
+    background: rgba(10, 20, 40, 0.45); color: #fff; font-size: 20px; line-height: 1; padding: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .clean-view-tools button:active { background: rgba(80, 120, 200, 0.6); }
+  .clean-view-flash { position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none; z-index: 60; transition: opacity 0.35s; }
+  .clean-view-toast {
+    position: fixed; left: 50%; bottom: 74px; transform: translateX(-50%); z-index: 61; display: none;
+    background: rgba(10, 20, 40, 0.75); color: #fff; font-size: 13px; padding: 6px 12px; border-radius: 14px;
+  }
+
+  /* -----------------------------------------------------------
+     v89: 画面のボタンの整理。上の航法メニューと視点のボタン以外（デバッグ情報・表示の切り替え・ログ・設定・
+     飛行支援・目的地）は、左上の小さな「☰」で開く1つのサイドメニューにしまう
+  ----------------------------------------------------------- */
+  .hud-side-menu, #hud-root > .hud-side-menu { top: 8px !important; left: 8px; z-index: 30; }
+  .side-menu-tab {
+    width: 34px; height: 34px; border-radius: 8px;
+    border: 1px solid rgba(108,195,255,0.45); font-size: 15px; line-height: 1;
+  }
+  .side-menu-panel {
+    position: absolute; top: 40px; left: 0;
+    width: 270px; max-height: calc(100vh - 180px) !important; margin-left: 0;
+    border-radius: 10px; border: 1px solid rgba(108,195,255,0.4);
+    transform: translateX(calc(-100% - 20px));
+  }
+  .side-menu-display { display: flex; flex-direction: column; gap: 6px; }
+  .side-menu-display .btn-approach-guides-toggle { text-align: left; padding: 7px 10px; font-size: 12px; }
+  .side-menu-panel .hud-debug-panel {
+    position: static; pointer-events: auto; max-width: none; max-height: none !important;
+    font-size: 11px; line-height: 1.5; padding: 6px 8px; overflow: visible !important;
+  }
+  .side-menu-log { display: flex; gap: 6px; }
+  .side-menu-log .hud-docking-log-controls { position: static !important; display: flex !important; gap: 6px; width: 100%; z-index: auto; }
+  .side-menu-log .hud-docking-log-controls button { flex: 1; font-size: 12px !important; padding: 7px 8px !important; text-align: center; }
+  .side-menu-panel { box-sizing: border-box; }
+  .side-menu-log button { flex: 1; text-align: center; }
+  .side-menu-panel .hud-settings-link { text-align: center; margin-top: 8px; }
+  .hud-camera-controls { top: 8px !important; right: 8px !important; }
+  @media (max-width: 700px) and (min-height: 501px) {
+    .space-nav-panel, .space-nav-panel.is-compact { left: 48px !important; }
+    .hud-camera-controls { top: 84px !important; }
+    .side-menu-panel { width: min(270px, calc(100vw - 24px)); }
+  }
+  @media (max-height: 500px) {
+    .side-menu-panel { max-height: calc(100vh - 60px) !important; }
+  }
+
+  /* v89: iPad・iPhone でホーム画面から開くと（black-translucent）、画面のいちばん上の時計・電池のバーの下まで描かれ、
+     上のメニューが隠れていた。画面の端の安全な余白（env(safe-area-inset-*)。Android・パソコン・ブラウザでは 0）だけずらす */
+  :root {
+    --sat: env(safe-area-inset-top, 0px);
+    --sal: env(safe-area-inset-left, 0px);
+    --sar: env(safe-area-inset-right, 0px);
+    --sab: env(safe-area-inset-bottom, 0px);
+  }
+  .hud-side-menu, #hud-root > .hud-side-menu { top: calc(8px + var(--sat)) !important; left: calc(8px + var(--sal) + var(--wcl, 0px)); }
+  .side-menu-panel { max-height: calc(100vh - 180px - var(--sat)) !important; }
+  .space-nav-panel, .space-nav-panel.is-compact { top: calc(8px + var(--sat)) !important; }
+  .hud-camera-controls { top: calc(8px + var(--sat)) !important; right: calc(8px + var(--sar)) !important; }
+  .star-map-header { top: calc(8px + var(--sat)); left: calc(8px + var(--sal) + var(--wcl, 0px)); right: calc(8px + var(--sar)); }
+  .wpn-hint { top: calc(152px + var(--sat)); }
+  .wpn-chips { bottom: calc(26px + var(--sab)); }
+  /* v89: 武装のボタン・番号も、姿勢の図（z-index 2）より上で押せるように */
+  .weapon-controls, .wpn-chips { z-index: 4; }
+  @media (max-width: 700px) and (min-height: 501px) {
+    .space-nav-panel, .space-nav-panel.is-compact { top: calc(6px + var(--sat)) !important; left: calc(48px + var(--sal) + var(--wcl, 0px)) !important; }
+    .hud-camera-controls { top: calc(84px + var(--sat)) !important; }
+  }
+  @media (max-height: 500px) {
+    .side-menu-panel { max-height: calc(100vh - 60px - var(--sat) - var(--sab)) !important; }
+  }
 </style>
 </head>
 <body>
@@ -387,10 +1279,15 @@
 <div id="hud-root"></div>
 <div id="version-label"></div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/MTLLoader.js"></script>
+<script src="lib/three/three.min.js"></script>
+<script src="lib/three/GLTFLoader.js"></script>
+<script src="lib/three/OBJLoader.js"></script>
+<script src="lib/three/MTLLoader.js"></script>
+<!-- v84: 光のにじみ（ブルーム）。26-post-fx.js -->
+<script src="lib/three/CopyShader.js"></script>
+<script src="lib/three/LuminosityHighPassShader.js"></script>
+<script src="lib/three/EffectComposer.js"></script>
+<script src="lib/three/UnrealBloomPass.js"></script>
 
 <script src="01-state-and-config.js"></script>
 <script src="02-input.js"></script>
@@ -402,6 +1299,25 @@
 <script src="08-camera.js"></script>
 <script src="10-docking-platform.js"></script>
 <script src="11-approach-visualizer.js"></script>
+<!-- v77: 実在の宇宙（太陽系・星空・天の川） -->
+<script src="data/star-catalog.js"></script>
+<script src="13-astro-core.js"></script>
+<script src="14-solar-system.js"></script>
+<script src="28-deep-space.js"></script>
+<script src="29-weapons.js"></script>
+<script src="30-planetfall.js"></script>
+<script src="31-viewpoints.js"></script>
+<script src="32-voyage.js"></script>
+<script src="15-universe-render.js"></script>
+<script src="16-navigation.js"></script>
+<script src="17-space-hud.js"></script>
+<script src="18-galaxy.js"></script>
+<script src="19-star-map.js"></script>
+<script src="20-small-bodies.js"></script>
+<script src="21-ship-design.js"></script>
+<script src="27-engine-plumes.js"></script>
+<script src="23-collision.js"></script>
+<script src="26-post-fx.js"></script>
 
 <script>
 // =============================================================
@@ -413,7 +1329,9 @@ let clock;
 
 function initScene() {
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x000005);
+  // v77: 背景は宇宙（Universe）側で描くため、ローカルシーンには背景色を
+  // 設定しない（Three.jsは背景色があると描画のたびに画面を塗りつぶしてしまう）。
+  scene.background = null;
 
   camera = new THREE.PerspectiveCamera(
     60, window.innerWidth / window.innerHeight, 0.1, 100000
@@ -422,26 +1340,28 @@ function initScene() {
   renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  // 宇宙（星空・天体）→ 艦などのローカルシーン、の順に重ねて描くため自動クリアを切る
+  renderer.autoClear = false;
+  renderer.setClearColor(0x000000, 1);
   document.body.appendChild(renderer.domElement);
+  CleanView.init(renderer.domElement); // v88: ダブルタップで艦と星と空だけに
+  Weapons.init(scene, renderer.domElement); // v89: 武装（照準・砲塔の旋回・射撃）
+  Planetfall.init(scene); // v89: 大気圏への突入・着陸・着水
+  Viewpoints.init(renderer.domElement); // v89: 艦内の視点（1人称・見張り台・船橋）
+  Voyage.init(); // v89: 定期航路（客船の航海）と航海中の出来事
 
-  // 簡易的な星空（背景の目印。本格的なワープ演出は後続バージョンで拡張）
-  const starGeo = new THREE.BufferGeometry();
-  const starCount = 4000;
-  const positions = new Float32Array(starCount * 3);
-  for (let i = 0; i < starCount; i++) {
-    positions[i * 3 + 0] = (Math.random() - 0.5) * 20000;
-    positions[i * 3 + 1] = (Math.random() - 0.5) * 20000;
-    positions[i * 3 + 2] = (Math.random() - 0.5) * 20000;
-  }
-  starGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  const starMat = new THREE.PointsMaterial({ color: 0xffffff, size: 1.2 });
-  scene.add(new THREE.Points(starGeo, starMat));
-
-  const ambient = new THREE.AmbientLight(0x334455, 0.6);
-  scene.add(ambient);
-  const sun = new THREE.DirectionalLight(0xffffff, 1.2);
-  sun.position.set(500, 300, 200);
-  scene.add(sun);
+  // v77: 以前はランダムな点を並べた簡易的な星空と固定の照明だったが、
+  // 実在の星表・天の川・太陽系の天体（15-universe-render.js）に置き換えた。
+  // 照明も太陽の実際の方向から当たる（地球の影に入れば暗くなる）。
+  SimClock.resetToNow();
+  SolarSystem.init();
+  const maxTex = renderer.capabilities.maxTextureSize >= 8192 ? '4k' : '2k';
+  // 銀河系モデルの点の数（タッチ端末は控えめに。?galaxyPoints=N で上書き可）
+  const isTouch = (navigator.maxTouchPoints || 0) > 0;
+  const gpParam = parseInt(new URLSearchParams(location.search).get('galaxyPoints'), 10);
+  const galaxyPoints = Number.isFinite(gpParam) ? gpParam : (isTouch ? 50000 : 90000);
+  Universe.init(renderer, { maxTexture: maxTex, galaxyPoints });
+  Universe.initLocalLights(scene);
 
   window.addEventListener('resize', onResize);
 }
@@ -450,6 +1370,7 @@ function onResize() {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  PostFx.setSize(renderer);
 }
 
 // v01時点では仮の箱メッシュ。実艦モデル(GLB/OBJ)は艦船建造画面
@@ -483,15 +1404,127 @@ function createPlaceholderShipMesh(classKey) {
 // -------------------------------------------------------------
 function createShipVisualRoot(classKey) {
   const root = new THREE.Group();
+  // v78: 自作の艦は重心が船体の中心からずれることがあるため、見た目全体を
+  // 「重心 → 船体の中心」のぶんずらす中間ノードを挟む（艦種プリセットは原点のまま）。
+  const designOffset = new THREE.Group();
+  root.add(designOffset);
+
   const placeholder = createPlaceholderShipMesh(classKey);
-  root.add(placeholder);
+  designOffset.add(placeholder);
 
   const correction = new THREE.Group();
-  root.add(correction);
+  designOffset.add(correction);
 
+  root.userData.designOffset = designOffset;
   root.userData.placeholderMesh = placeholder;
   root.userData.correctionGroup = correction;
   return root;
+}
+
+// v79: 艦の見た目（仮の箱・読み込んだモデル）が変わったら、当たり判定の形を作り直す
+function refreshShipCollisionShape(root) {
+  if (typeof Collision === 'undefined' || typeof computeCollisionShape !== 'function') return;
+  try {
+    Collision.setShipShape(computeCollisionShape(root, root, 48));
+  } catch (err) {
+    console.warn('艦の当たり判定の作成に失敗しました。', err);
+  }
+}
+
+// v78: 保存されたモデルデータ（GLB/OBJ）からThree.jsのオブジェクトを作る。
+// GLBのdata URLは、iPadで巨大なdata URLをfetchすると失敗する問題（v67）を
+// 避けるため、atobで直接デコードする（dataUrlToArrayBuffer）。
+function parseShipModelData(data) {
+  return new Promise((resolve, reject) => {
+    try {
+      if (data.format === 'glb') {
+        const buf = dataUrlToArrayBuffer(data.glbDataUrl);
+        const manager = new THREE.LoadingManager();
+        const loader = new THREE.GLTFLoader(manager);
+        loader.textureLoader = new THREE.TextureLoader(manager);
+        // v84: 光る面の強さ（ブルーム用）を反映（01-state-and-config.js applyEmissiveStrength）
+        loader.parse(buf, '', (gltf) => { applyEmissiveStrength(gltf.scene); resolve(gltf.scene); }, reject);
+      } else if (data.format === 'obj') {
+        let materials = null;
+        if (data.mtlText) {
+          const texMap = data.textures || {};
+          const manager = new THREE.LoadingManager();
+          manager.setURLModifier((url) => {
+            const baseName = url.split('/').pop().split('\\').pop();
+            return texMap[baseName] || url;
+          });
+          materials = new THREE.MTLLoader(manager).parse(data.mtlText, '');
+          materials.preload();
+        }
+        const objLoader = new THREE.OBJLoader();
+        if (materials) objLoader.setMaterials(materials);
+        resolve(objLoader.parse(data.objText));
+      } else {
+        reject(new Error(`未対応のモデル形式: ${data.format}`));
+      }
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+// -------------------------------------------------------------
+// v78: 自作の艦（21-ship-design.js）を反映する。物理パラメータは即座に、
+// 見た目（船体モデル）は読み込みが終わりしだい差し替える。
+// -------------------------------------------------------------
+async function applyShipDesignInGame(ship, root, design) {
+  if (typeof Weapons !== 'undefined') Weapons.detach();
+  if (typeof Viewpoints !== 'undefined') Viewpoints.setDesign(design); // v89: 艦内の視点
+  const spec = applyShipDesignToShip(ship, design);
+  const c = spec.cog;
+  root.userData.designOffset.position.set(-c.x, -c.y, -c.z);
+
+  // 接舷面: 船体の中心は重心から -cog のところにある
+  ship.dockingFace = design.dockingFace || null;
+  ship.dockingFaceBoxHalfExtents = { x: spec.dims.x / 2, y: spec.dims.y / 2, z: spec.dims.z / 2 };
+  ship.dockingFaceBoxCenter = { x: -c.x, y: -c.y, z: -c.z };
+
+  // 見た目の大きさに合わせてカメラ・噴射の表現を調整
+  if (typeof CameraSystem !== 'undefined' && CameraSystem.setShipSize) CameraSystem.setShipSize(spec.size);
+  ship.fxScale = Math.max(1, spec.size / 8);
+
+  // 仮の箱を設計の寸法に作り直す（モデルがあれば読み込み後に消す）
+  const old = root.userData.placeholderMesh;
+  if (old) {
+    root.userData.designOffset.remove(old);
+    old.geometry.dispose();
+  }
+  const box = new THREE.Mesh(
+    new THREE.BoxGeometry(spec.dims.x, spec.dims.y, spec.dims.z),
+    new THREE.MeshStandardMaterial({ color: 0x6688aa, metalness: 0.4, roughness: 0.5 })
+  );
+  root.userData.designOffset.add(box);
+  root.userData.placeholderMesh = box;
+  refreshShipCollisionShape(root);
+
+  if (!design.hull.hasModel) return;
+  const data = await loadShipDesignModel(design.id);
+  if (!data) return;
+  try {
+    const obj = await parseShipModelData(data);
+    const corr = root.userData.correctionGroup;
+    const h = design.hull;
+    const toRad = (d) => (d * Math.PI) / 180;
+    corr.rotation.set(toRad(h.rotationDeg.x), toRad(h.rotationDeg.y), toRad(h.rotationDeg.z));
+    corr.scale.setScalar(h.scale);
+    corr.position.set(h.offset.x, h.offset.y, h.offset.z);
+    corr.add(obj);
+    // v89: ボーンで動く部品が、艦の座標が大きいときにブレないように（29-weapons.js）
+    if (typeof stabilizeSkinnedMeshes === 'function') stabilizeSkinnedMeshes(obj);
+    // v89: モデルの中の砲塔・射撃レーダーを動かせるようにする（29-weapons.js）
+    if (typeof Weapons !== 'undefined') Weapons.attach(obj, design);
+    root.userData.designOffset.remove(box);
+    box.geometry.dispose();
+    root.userData.placeholderMesh = null;
+    refreshShipCollisionShape(root);
+  } catch (err) {
+    console.warn(`艦の設計「${design.name}」のモデル読み込みに失敗しました。仮の船体のままにします。`, err);
+  }
 }
 
 // v61: 第3引数shipは、モデル読み込み完了後に接舷面(dockingFace)情報を
@@ -518,11 +1551,13 @@ async function loadSavedShipModelInto(root, classKey, ship) {
     // 読み込みが成功した時点で初めて箱を消す。読み込み失敗時は
     // 箱のまま操縦できる状態を維持し、無操作の艦にならないようにする
     const placeholder = root.userData.placeholderMesh;
-    if (placeholder) {
-      root.remove(placeholder);
+    if (placeholder && placeholder.parent) {
+      placeholder.parent.remove(placeholder);
     }
+    if (typeof stabilizeSkinnedMeshes === 'function') stabilizeSkinnedMeshes(loadedObject); // v89
     root.userData.correctionGroup.add(loadedObject);
     applyAdjust(root.userData.correctionGroup);
+    refreshShipCollisionShape(root);
 
     // v61: 接舷面(dockingFace)が保存されていれば艦の状態へ反映する。
     // バウンディングボックスは補正後(rotation/scale/offset適用後)の
@@ -541,44 +1576,10 @@ async function loadSavedShipModelInto(root, classKey, ship) {
     }
   };
 
+  // v78: GLB/OBJの読み込みは parseShipModelData に共通化（GLBはfetchを
+  // 使わずに読み込むので、iPadで巨大なモデルが読めない問題も避けられる）
   try {
-    if (saved.format === 'glb') {
-      fetch(saved.glbDataUrl)
-        .then((r) => r.arrayBuffer())
-        .then((buf) => {
-          const manager = new THREE.LoadingManager();
-          const loader = new THREE.GLTFLoader(manager);
-          loader.textureLoader = new THREE.TextureLoader(manager);
-          loader.parse(buf, '', (gltf) => onLoaded(gltf.scene), (err) => {
-            console.warn(`艦モデル(${classKey})のGLB読み込みに失敗しました。仮メッシュのままにします。`, err);
-          });
-        })
-        .catch((err) => console.warn(`艦モデル(${classKey})のGLB読み込みに失敗しました。仮メッシュのままにします。`, err));
-    } else if (saved.format === 'obj') {
-      const finish = (materials) => {
-        const objLoader = new THREE.OBJLoader();
-        if (materials) {
-          materials.preload();
-          objLoader.setMaterials(materials);
-        }
-        const objGroup = objLoader.parse(saved.objText);
-        onLoaded(objGroup);
-      };
-
-      if (!saved.mtlText) {
-        finish(null);
-      } else {
-        const texMap = saved.textures || {};
-        const manager = new THREE.LoadingManager();
-        manager.setURLModifier((url) => {
-          const baseName = url.split('/').pop().split('\\').pop();
-          return texMap[baseName] || url;
-        });
-        const mtlLoader = new THREE.MTLLoader(manager);
-        const materials = mtlLoader.parse(saved.mtlText, '');
-        finish(materials);
-      }
-    }
+    onLoaded(await parseShipModelData(saved));
   } catch (err) {
     console.warn(`艦モデル(${classKey})の読み込みに失敗しました。仮メッシュのままにします。`, err);
   }
@@ -601,7 +1602,23 @@ function initGame() {
   // v61: 接舷面(dockingFace)情報をshipへ反映するため、モデル読み込みを
   // 開始する前にship自体を生成しておく（生成順を入れ替え）。
   const ship = ShipController.spawnPlayerShip(shipClass, mesh, { x: 0, y: 0, z: 0 });
-  loadSavedShipModelInto(mesh, shipClass, ship);
+  // v78: 自作の艦（設計）が選ばれていればそれを使う。読み込みは非同期なので、
+  // それまでは艦種プリセットのまま（停止中なので切り替わっても影響はない）。
+  refreshShipCollisionShape(mesh); // 仮の箱（モデルを読み込んだら作り直す）
+  const designId = params.get('design') || persisted.shipDesignId;
+  if (params.get('design')) savePersistedSettings({ shipDesignId: designId });
+  if (designId) {
+    loadShipDesign(designId).then((design) => {
+      if (design) applyShipDesignInGame(ship, mesh, design);
+      else loadSavedShipModelInto(mesh, shipClass, ship);
+    });
+  } else {
+    loadSavedShipModelInto(mesh, shipClass, ship);
+  }
+
+  // v77: 母港（地球の高度2,000km）を基準にした座標系を用意する。
+  // 艦・ポートのローカル座標は従来どおりで、その原点が地球周回軌道上にある。
+  Navigation.init();
 
   const capParam = params.get('speedCapMode');
   const effectiveCapMode =
@@ -630,9 +1647,17 @@ function initGame() {
   State.settings.showApproachGuides = persisted.showApproachGuides ?? true;
   // v41: 予定航路の線の表示/非表示。showApproachGuidesとは別トグル。
   State.settings.showRouteLine = persisted.showRouteLine ?? true;
+  State.settings.leverMode = persisted.leverMode === 'thrust' ? 'thrust' : 'speed'; // v89: レバーの意味（レバーの上の小さなボタンで切り替え）
   // v08: RCS最大出力の主機推力に対する上限比率。settings.htmlのみで
   // 変更する運用（ゲーム内HUDには専用UIを設けない）。
   State.settings.rcsThrustCapRatio = persisted.rcsThrustCapRatio ?? 1.0;
+  // v84: 光のにじみ（ブルーム）。settings.html で切り替える（?bloom=0/1 で上書き可）
+  const bloomParam = params.get('bloom');
+  State.settings.bloomEnabled = bloomParam !== null ? bloomParam === '1' : (persisted.bloomEnabled ?? true);
+  // v85: 天体の重力（settings.html で切り替える。?gravity=0/1 で上書き可）
+  const gravityParam = params.get('gravity');
+  State.settings.gravityEnabled = gravityParam !== null ? gravityParam === '1' : (persisted.gravityEnabled ?? true);
+  PostFx.init(renderer, State.settings.bloomEnabled);
 
   // v08: 入港（オートドッキング）目的地の復元。settings.htmlを
   // 経由せず、HUDの「ここを目的地として保存」ボタンで設定・
@@ -651,6 +1676,8 @@ function initGame() {
     autoDampingEnabled: State.settings.autoDampingEnabled,
     retroDampingEnabled: State.settings.retroDampingEnabled,
     rcsThrustCapRatio: State.settings.rcsThrustCapRatio,
+    bloomEnabled: State.settings.bloomEnabled,
+    gravityEnabled: State.settings.gravityEnabled,
     showApproachGuides: State.settings.showApproachGuides,
     showRouteLine: State.settings.showRouteLine,
   });
@@ -661,6 +1688,7 @@ function initGame() {
   // querySelectorが要素を見つけられずタッチ入力が一切バインドされない
   // （バグとして報告：「タッチ操作が効かない」）
   HUD.init(hudRoot);
+  SpaceHud.init(hudRoot);
   InputSystem.init(hudRoot);
   EngineFx.init(scene);
   CameraSystem.init(renderer.domElement);
@@ -668,18 +1696,170 @@ function initGame() {
   ApproachVisualizer.init(scene);
 }
 
+// v88: 1フレームの処理でエラーが起きたら、その内容を残し、一度だけ読み込み直す（更新の直後に古いファイルと
+// 新しいファイルが混ざったとき用。2回目からは読み込み直さず、続けて動かす）
+// -------------------------------------------------------------
+// v88: ダブルタップ（ダブルクリック）で操作画面・目印をすべて隠し、艦と星と空だけを見せる。
+// そのときだけ出る📷で、画面の3D（艦・星・空）だけをそのまま画像に保存する（ボタンなどは写らない）。
+// -------------------------------------------------------------
+const CleanView = {
+  on: false,
+  _shotPending: false,
+  init(canvas) {
+    const tools = document.createElement('div');
+    tools.className = 'clean-view-tools';
+    tools.innerHTML = '<button type="button" class="cv-shot" title="スクリーンショット">📷</button><button type="button" class="cv-exit" title="元に戻す（ダブルタップでも戻れます）">✕</button>';
+    document.body.appendChild(tools);
+    tools.querySelector('.cv-shot').addEventListener('click', (e) => { e.stopPropagation(); this._shotPending = true; });
+    tools.querySelector('.cv-exit').addEventListener('click', (e) => { e.stopPropagation(); this.set(false); });
+    this._flash = document.createElement('div');
+    this._flash.className = 'clean-view-flash';
+    document.body.appendChild(this._flash);
+    this._toast = document.createElement('div');
+    this._toast.className = 'clean-view-toast';
+    document.body.appendChild(this._toast);
+    canvas.addEventListener('dblclick', () => this.toggle());
+    // タッチのダブルタップ（短く・あまり動かさない2回のタップ）
+    let last = 0, lastX = 0, lastY = 0, start = null;
+    canvas.addEventListener('touchstart', (e) => {
+      start = e.touches.length === 1 ? { t: performance.now(), x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+    }, { passive: true });
+    canvas.addEventListener('touchend', (e) => {
+      if (!start || e.touches.length > 0) { start = null; return; }
+      const t = e.changedTouches[0];
+      const now = performance.now();
+      const short = now - start.t < 300 && Math.hypot(t.clientX - start.x, t.clientY - start.y) < 15;
+      start = null;
+      if (!short) { last = 0; return; }
+      if (now - last < 350 && Math.hypot(t.clientX - lastX, t.clientY - lastY) < 40) { last = 0; this.toggle(); }
+      else { last = now; lastX = t.clientX; lastY = t.clientY; }
+    }, { passive: true });
+  },
+  toggle() { this.set(!this.on); },
+  set(on) {
+    if (on && typeof StarMap !== 'undefined' && StarMap.isOpen()) return;
+    this.on = !!on;
+    State.cleanView = this.on;
+    document.body.classList.toggle('clean-view', this.on);
+  },
+  // 描画の直後に呼ぶ（そのフレームの絵をそのまま画像にする）
+  afterRender(canvas) {
+    if (!this._shotPending) return;
+    this._shotPending = false;
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    const name = `space-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.png`;
+    canvas.toBlob(async (blob) => {
+      if (!blob) { this._say('画像にできませんでした'); return; }
+      this._flash.style.transition = 'none';
+      this._flash.style.opacity = '0.6';
+      requestAnimationFrame(() => { this._flash.style.transition = 'opacity 0.35s'; this._flash.style.opacity = '0'; });
+      // 端末の「共有」が使えれば写真アプリ等へ、使えなければファイルとして保存
+      const file = typeof File !== 'undefined' ? new File([blob], name, { type: 'image/png' }) : null;
+      if (file && navigator.canShare && navigator.canShare({ files: [file] }) && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+        try { await navigator.share({ files: [file] }); return; } catch (e) { if (e && e.name === 'AbortError') return; }
+      }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+      this._say(`保存しました（${name}）`);
+    }, 'image/png');
+  },
+  _say(text) {
+    this._toast.textContent = text;
+    this._toast.style.display = 'block';
+    clearTimeout(this._toastTimer);
+    this._toastTimer = setTimeout(() => { this._toast.style.display = 'none'; }, 2200);
+  },
+};
+
 function animate() {
   requestAnimationFrame(animate);
+  try {
+    animateFrame();
+  } catch (e) {
+    console.error('フレームの処理でエラーが起きました', e);
+    let tried = false;
+    try { tried = sessionStorage.getItem('spaceSimReloaded') === GAME_VERSION; } catch (e2) { /* ignore */ }
+    if (!tried) {
+      try { sessionStorage.setItem('spaceSimReloaded', GAME_VERSION); } catch (e2) { /* ignore */ }
+      location.reload();
+    }
+  }
+}
+
+function animateFrame() {
   const dt = Math.min(clock.getDelta(), 0.05); // タブ切り替え等の大ジャンプ対策
 
-  ShipController.update(dt);
-  EngineFx.update(dt);
-  CameraSystem.update(camera);
+  // v85: 星図で時間を早送り（・一時停止）している間は、艦も同じ速さで動かす
+  const shipTimeScale = StarMap.isOpen() ? SimClock.timeScale : 1;
+  // v89: 時間の倍速（航行のメニューのバー）。ワープ・内空航行では 16-navigation.js stepWarp が倍速の時間で進む（姿勢はふつうの時間）。
+  //   通常航行では、ふつうの時間の刻みのまま、物理を何回も進める（刻みを大きくすると、操縦・姿勢の制御が行き過ぎて進路がぶれる）
+  const tScale = shipTimeScale === 1 && !(typeof PRACTICE_MODE !== 'undefined' && PRACTICE_MODE) && !Navigation.timeScalePause ? Math.max(1, Navigation.timeScale || 1) : 1;
+  const subN = tScale > 1 && !Navigation.isWarping() ? Math.min(Math.round(tScale), Navigation.TIME_NORMAL_MAX) : 1;
+  for (let si = 0; si < subN; si++) {
+    const warpNow = Navigation.isWarping();
+    const simMul = warpNow && tScale > 1 ? (Navigation.lastTimeMul || 1) : 1;
+    // v77: 宇宙の時刻を進め、太陽系の天体の位置・自転を更新してから艦を動かす
+    SimClock.update(dt * simMul);
+    SolarSystem.update(SimClock.jd);
+    Navigation.updateFrames(); // v85: 母港の軌道の位置・天体の速度
+    if (!(tScale > 1)) Navigation.lastTimeMul = 1;
+    if (shipTimeScale === 1) ShipController.update(dt);
+    else ShipController.updateTimeScaled(dt * shipTimeScale);
+    if (shipTimeScale === 1) { Planetfall.update(dt); Planetfall.noteMotion(dt); } // v89: 大気の抵抗・接地（地表のガードより先に）
+    Navigation.postUpdate();
+    // v85: postUpdate は原点の付け替え（母港以外で原点から20km離れるたび）や地表からの
+    // 押し戻しで艦の位置を書き換える。艦のメッシュを合わせ直さないと、その1フレームだけ
+    // 艦が古い位置（20km先）に描かれ、速いほど頻繁に艦が点滅して見えていた
+    if (State.ship) ShipController._syncMesh(State.ship);
+    // v89: 定期航路（ダイヤ・乗り心地・出来事）。艦の時間で進める（出来事の選ぶ時間は、ふつうの時間）
+    const shipDt = Navigation.isWarping() ? dt * (tScale > 1 ? (Navigation.lastTimeMul || 1) : 1) : dt;
+    Voyage.update(shipDt, dt / subN);
+    if (Navigation.isWarping() && si === 0 && subN > 1) break; // 途中でワープに入ったら、倍速はワープの側で
+  }
+  Weapons.update(dt); // v89: 砲塔・射撃レーダーを狙う向きへ、弾・レーザーを動かす
+  EngineFx.update(dt, camera, renderer);
+  if (!Weapons.updateCamera(camera) && !Viewpoints.updateCamera(camera, dt)) CameraSystem.update(camera); // v89: 照準の視点・艦内の視点
+  Weapons.preRender(camera); // v89: 被弾の跡（船体のシェーダーへ渡す）
+  Planetfall.preRender(camera, dt); // v89: 空・霞・地面／海面
   DockingPlatform.update();
   ApproachVisualizer.update();
 
+  // 宇宙の視点（カメラの宇宙座標・向き）を渡して、星空と天体を更新。
+  // 星図を開いている間は星図のカメラで描く。
+  const mapOpen = StarMap.isOpen();
+  if (mapOpen) StarMap.update(dt);
+  else Universe.setView(Navigation.buildView(camera));
+  Universe.update(window.innerWidth, window.innerHeight, renderer.getPixelRatio());
+  if (State.ship) {
+    Universe.updateLocalLights(Navigation.frame.rotT, Navigation.shipUniverse(), State.ship.position);
+    const fwd = Astro.mat3MulVec(Navigation.frame.rot, rotateVecByQuat({ x: 0, y: 0, z: -1 }, State.ship.quaternion));
+    Universe.setWarpEffect(Navigation.isWarping() ? Navigation.warp.speed : 0, fwd, dt);
+  }
+
   HUD.update();
-  renderer.render(scene, camera);
+  SpaceHud.update();
+
+  if (mapOpen) {
+    renderer.setRenderTarget(null);
+    renderer.clear();
+    Universe.render(renderer);
+    StarMap.postRender();
+  } else {
+    // v84: ブルームが有効なら画面外に描いてから、明るい部分をにじませて画面へ（26-post-fx.js）
+    PostFx.render(renderer, () => {
+      renderer.clear();
+      Universe.render(renderer);
+      renderer.clearDepth();
+      renderer.render(scene, camera);
+    });
+  }
+  if (!mapOpen) Weapons.renderInset(renderer); // v89: 照準の視点の小さな艦の図
+  CleanView.afterRender(renderer.domElement); // v88: スクリーンショット（描画の直後に）
 }
 
 initScene();
@@ -691,6 +1871,7 @@ clock = new THREE.Clock();
 // でも同じ要素id・定数を使えば流用できる。
 const versionLabelEl = document.getElementById('version-label');
 if (versionLabelEl) versionLabelEl.textContent = GAME_VERSION;
+document.title = `宇宙船シミュレーター ${GAME_VERSION}`;
 
 animate();
 </script>

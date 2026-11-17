@@ -5,7 +5,27 @@
 
 // v27: 画面右下のバージョン表示・<title>で共通して使うバージョン名。
 // リリースのたびにここだけ書き換えれば全画面に反映される。
-const GAME_VERSION = 'v76';
+// v77: 表記を「0.000.000.000」形式に変更（CHANGELOG.md「バージョン番号の
+// 付け方」参照）。左から メジャー.機能バージョン.修正番号.ビルド番号。
+// 機能バージョンは従来の vNN の番号（v77 → 077）。
+const GAME_VERSION = '0.089.000.080';
+
+// v83: iPad・iPhone の Safari は viewport の user-scalable=no を無視し、2本指の
+// ジェスチャーでページ全体を拡大・縮小してしまう（3Dビューのピンチズームと
+// 取り合いになり「ズームがうまくいかない」）。3Dビューのある画面で呼んで止める。
+function preventPageGestureZoom() {
+  if (typeof document === 'undefined') return;
+  for (const type of ['gesturestart', 'gesturechange', 'gestureend']) {
+    document.addEventListener(type, (e) => e.preventDefault(), { passive: false });
+  }
+  // ダブルタップでの拡大も止める
+  let lastTouchEnd = 0;
+  document.addEventListener('touchend', (e) => {
+    const now = Date.now();
+    if (now - lastTouchEnd < 320 && e.target && e.target.tagName === 'CANVAS') e.preventDefault();
+    lastTouchEnd = now;
+  }, { passive: false });
+}
 
 // -------------------------------------------------------------
 // 速度制限モード
@@ -360,12 +380,15 @@ const SETTINGS_STORAGE_KEY = 'spaceSimSettings';
 
 const DEFAULT_PERSISTED_SETTINGS = {
   shipClass: 'rocket',
+  // v78: 自作の艦（21-ship-design.js の設計ID）。nullなら shipClass の艦種プリセット
+  shipDesignId: null,
   speedCapMode: null, // null = 艦プリセットのデフォルトに従う（オーバーライドなし）
   showDebugHud: true,
   autoDampingEnabled: true, // 自動姿勢制動（回転ダンピングのみ、v10で並進制動から分離）
   retroDampingEnabled: true, // v10: 並進制動（逆噴射でのX/Y速度キャンセル）専用トグル
   cameraMode: 'chase', // 'chase'（追従）| 'orbit'（自由視点）
   rcsThrustCapRatio: 1.0, // v08: RCS最大出力の主機推力に対する上限比率（1.0=無制限）
+  leverMode: 'speed', // v89: スロットルレバーの意味 'speed'（最高速度に対する速さの割合）| 'thrust'（機関の出力の割合）
   showApproachGuides: true, // v40: 進入軸・目的地ゲートの可視化表示/非表示
   showRouteLine: true, // v41: 予定航路の線の表示/非表示（showApproachGuidesとは独立）。v42: 自動航行の航跡線もこのフラグで一括表示/非表示
 };
@@ -923,16 +946,20 @@ const DOCKING_FACE_AXES = {
 //     （面選択による90度単位の回転）に、u/v軸まわりのtilt角を
 //     追加合成したもの。
 // 戻り値: { position: {x,y,z}, quaternion: {x,y,z,w} }（いずれも艦ローカル）
-function computeDockingFaceLocalTransform(dockingFace, halfExtents) {
+// v78: center は船体のバウンディングボックス中心の艦ローカル座標（省略時は
+// 原点）。自作の艦（21-ship-design.js）では重心と船体の中心が一致しない
+// ことがあるため、面の位置をその分ずらす。
+function computeDockingFaceLocalTransform(dockingFace, halfExtents, center) {
   const axisDef = DOCKING_FACE_AXES[dockingFace.axis] || DOCKING_FACE_AXES.nz;
   const n = axisDef.normal;
   const u = axisDef.u;
   const v = axisDef.v;
 
+  const c0 = center || { x: 0, y: 0, z: 0 };
   const faceCenter = {
-    x: n.x * halfExtents.x,
-    y: n.y * halfExtents.y,
-    z: n.z * halfExtents.z,
+    x: c0.x + n.x * halfExtents.x,
+    y: c0.y + n.y * halfExtents.y,
+    z: c0.z + n.z * halfExtents.z,
   };
   const offsetU = dockingFace.offsetU || 0;
   const offsetV = dockingFace.offsetV || 0;
@@ -986,7 +1013,7 @@ function computeEffectiveShipDockingTarget(dockingTarget, ship) {
   if (!dockingFace || !dockingTarget) return dockingTarget;
 
   const halfExtents = ship.dockingFaceBoxHalfExtents || { x: 0, y: 0, z: 0 };
-  const faceLocal = computeDockingFaceLocalTransform(dockingFace, halfExtents);
+  const faceLocal = computeDockingFaceLocalTransform(dockingFace, halfExtents, ship.dockingFaceBoxCenter);
 
   // 港での艦の最終姿勢: 「艦ローカル姿勢 * faceLocal.quaternion」が
   // dockingTarget.quaternionに一致するような艦ローカル姿勢を求める。
@@ -1017,286 +1044,425 @@ function computeEffectiveShipDockingTarget(dockingTarget, ship) {
 }
 
 // =============================================================
-// v76: 衝突判定用の「区間分割バウンディングボックス」計算
+// v79: 当たり判定の形（ボクセル化した直方体の集まり）
 //
-// 逆走進入防止（新機能）で、艦・ポートそれぞれの「大雑把な形状
-// マスク」として使う。精密な衝突形状ではなく、細長いロケット型・
-// 太い戦艦型といった見た目の違いをある程度反映した近似形状を
-// 安く得ることが目的。
+// v76で作りかけていた「区間分割バウンディングボックス」（前後方向・左右方向に
+// 輪切りにして、各区間の上下の範囲を箱にする方式）は、格納庫のように中が
+// 空いたポート（床と天井がある）だと、床から天井までが1つの箱になって中に
+// 入れなくなるため、方式を改めた。
 //
-// 手法: 対象オブジェクトのローカルZ軸（前後方向）をSEGMENT_COUNT個の
-// 等間隔区間に分割し、各区間に頂点が1つでも入るメッシュについて、
-// その区間内に入る頂点だけを対象にX/Y方向の境界（min/max）を求める。
-// 結果、各区間ごとに1つの直方体（ローカル座標系のAABB、区間の前後端
-// をZ方向の境界とする）ができる。「艦の先端が細く、本体が太い」等の
-// 概形が、区間ごとに幅・高さが変わる階段状の形で近似される。
+// 手法:
+//   1) root 配下のメッシュの三角形を frame の座標系で集め、最大辺を
+//      resolution 分割する立方体の格子（ボクセル）を用意する。
+//   2) 各三角形の上に点を細かく打って、三角形が通るマス（表面）に印を付ける。
+//   3) 格子の外側（余白）から、印の無いマスを塗りつぶして「外」を求める。
+//      外に届かない空きマス（閉じた船体の内部）は中身ありとみなす。
+//      入口の開いた格納庫の中は外とつながっているので、中身なしのまま。
+//   4) 隣り合う中身ありのマスを、まとめられるだけ大きな直方体にまとめる。
 //
-// 09-ship-builder.js（艦モデル保存時）・12-port-builder.js（ポート
-// モデル保存時）の両方から呼ばれ、結果を保存データに含めることで、
-// プレイ中（13-collision.js）は全頂点走査をせずこの事前計算結果を
-// そのまま使う。
+// 艦船建造画面・ドッキングポート設定画面の「当たり判定を表示」と、ゲーム中の
+// 艦とポートの衝突判定（23-collision.js）で使う。
 //
-// object3d: 対象のTHREE.Object3D（Group等の階層で良い。内部の全
-//           メッシュを走査する）。object3d自身のローカル座標系
-//           （= object3dの親から見た変換より内側）を基準とする。
-// 戻り値: 区間ボックスの配列（前から順、object3dに頂点が1つも
-//         無ければ空配列）。各要素は
-//         { zMin, zMax, xMin, xMax, yMin, yMax }
-//         （すべてobject3dのローカル座標系の値）。
-function computeSegmentedBoundsFromObject3D(object3d, segmentCount) {
-  const count = segmentCount || 8;
-  if (!object3d) return [];
+// 戻り値: {
+//   cell,                       // マスの1辺の長さ
+//   boxes: [{ min:{x,y,z}, max:{x,y,z} }],  // frame の座標系の直方体
+//   bounds: { min, max },       // 全体の範囲
+// } | null（三角形が無い）
+// =============================================================
+//
+// v84: 「ドッキングポートが狭くて一部の船が入れない」の修正。表面が通るマスを
+// 丸ごと中身ありにしていたため、薄い壁でも1マスぶん（大きなポートを40分割すると
+// 約67m）太り、入口の両側が狭まって大きな艦が入れなかった。
+//   - 表面のマスは、実際に表面の点があった範囲（マスの中のどこからどこまで）を
+//     覚えておき、直方体をその範囲までぴったり縮める（薄い壁は最低限の厚みだけ残す）。
+//   - マスの細かさは、resolution（最大辺の分割数）の代わりに opts で決められる:
+//       opts.resolution: 最大辺の分割数
+//       opts.minCell:    マスの1辺の下限（艦の太さの1/4など）
+//       opts.maxCells:   マスの総数の上限（メモリと時間の上限。初期値 400万）
+function computeCollisionShape(root, frame, resolutionOrOpts) {
+  const opts = typeof resolutionOrOpts === 'object' && resolutionOrOpts ? resolutionOrOpts : { resolution: resolutionOrOpts };
+  const tri = collectCollisionTriangles(root, frame);
+  return tri ? voxelizeCollisionTriangles(tri, opts) : null;
+}
 
-  // object3d自身のワールド行列の逆行列。各メッシュのワールド頂点座標を
-  // object3dローカル座標系へ変換するのに使う（object3d配下のメッシュは
-  // 個々に独自の回転・オフセットを持ちうるため、単純にmesh.geometryの
-  // 生の頂点座標を使うのではなく、必ずワールド座標経由でobject3d
-  // ローカルへ変換する）。
-  // v76-fix1: 全体のZ範囲もTHREE.Box3().setFromObject()（ワールド座標系
-  // で計算される）ではなく、ここで頂点を集計する際に同時にローカル
-  // 座標系で求める。setFromObject()を使うと、object3d自身がワールド上
-  // で移動・回転している場合にzMin/zMaxがワールド座標の値になって
-  // しまい、区間ごとの幅・高さ自体は正しくてもz座標の絶対値がずれる
-  // 不具合があった（Three.js実測で確認済み）。
-  object3d.updateWorldMatrix(true, true);
-  const toLocal = new THREE.Matrix4().copy(object3d.matrixWorld).invert();
-
-  let zMin = Infinity;
-  let zMax = -Infinity;
-  const localPoints = [];
+// 当たり判定用に、root 配下のメッシュの三角形を frame の座標系で集める（9個ずつ x,y,z×3）
+function collectCollisionTriangles(root, frame) {
+  if (!root) return null;
+  root.updateWorldMatrix(true, true);
+  frame.updateWorldMatrix(true, false);
+  const toFrame = new THREE.Matrix4().copy(frame.matrixWorld).invert();
+  const m = new THREE.Matrix4();
   const v = new THREE.Vector3();
-
-  object3d.traverse((node) => {
-    if (!node.isMesh || !node.geometry) return;
-    const geo = node.geometry;
-    const posAttr = geo.attributes && geo.attributes.position;
-    if (!posAttr) return;
-
-    const localToObject3d = new THREE.Matrix4().multiplyMatrices(toLocal, node.matrixWorld);
-
-    for (let i = 0; i < posAttr.count; i++) {
-      v.fromBufferAttribute(posAttr, i);
-      v.applyMatrix4(localToObject3d);
-      localPoints.push({ x: v.x, y: v.y, z: v.z });
-      if (v.z < zMin) zMin = v.z;
-      if (v.z > zMax) zMax = v.z;
+  // 三角形の頂点（frame の座標系）。大きなモデルでも配列の伸長が重くならないよう、先に数える
+  let triCount = 0;
+  root.traverse((node) => {
+    if (!node.isMesh || !node.geometry || !node.visible) return;
+    const pos = node.geometry.attributes && node.geometry.attributes.position;
+    if (!pos) return;
+    const idx = node.geometry.index;
+    triCount += Math.floor((idx ? idx.count : pos.count) / 3);
+  });
+  if (!triCount) return null;
+  const tri = new Float32Array(triCount * 9);
+  let tp = 0;
+  root.traverse((node) => {
+    if (!node.isMesh || !node.geometry || !node.visible) return;
+    const pos = node.geometry.attributes && node.geometry.attributes.position;
+    if (!pos) return;
+    m.multiplyMatrices(toFrame, node.matrixWorld);
+    const e = m.elements;
+    const idx = node.geometry.index;
+    const count = Math.floor((idx ? idx.count : pos.count) / 3) * 3;
+    // v84: 数百万の三角形でも速いよう、配列を直接読む（ふつうの位置属性の場合）
+    const fast = !pos.isInterleavedBufferAttribute && pos.itemSize === 3 && !pos.normalized && pos.array;
+    const P = fast ? pos.array : null;
+    const I = idx ? idx.array : null;
+    for (let i = 0; i < count; i++) {
+      const k = I ? I[i] : i;
+      let x, y, z;
+      if (P) { x = P[k * 3]; y = P[k * 3 + 1]; z = P[k * 3 + 2]; } else { v.fromBufferAttribute(pos, k); x = v.x; y = v.y; z = v.z; }
+      tri[tp++] = e[0] * x + e[4] * y + e[8] * z + e[12];
+      tri[tp++] = e[1] * x + e[5] * y + e[9] * z + e[13];
+      tri[tp++] = e[2] * x + e[6] * y + e[10] * z + e[14];
     }
   });
+  return tri;
+}
 
-  if (localPoints.length === 0) return [];
+// 三角形（Float32Array、9個ずつ）から当たり判定の形を作る。THREE を使わないので
+// Web Worker の中でも動く（computeCollisionShapeAsync）。
+function voxelizeCollisionTriangles(tri, opts) {
+  const res = opts.resolution || 32;
+  const tp = tri.length;
+  if (tp < 9) return null;
 
-  const zSpan = zMax - zMin;
-  // 全長がほぼ0（点や平面）の場合は区間分割の意味が無いので、
-  // 全体を1個の箱として返す。
-  if (zSpan < 1e-6) {
-    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
-    for (const p of localPoints) {
-      if (p.x < xMin) xMin = p.x;
-      if (p.x > xMax) xMax = p.x;
-      if (p.y < yMin) yMin = p.y;
-      if (p.y > yMax) yMax = p.y;
+  let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < tp; i += 3) {
+    if (tri[i] < minX) minX = tri[i]; if (tri[i] > maxX) maxX = tri[i];
+    if (tri[i + 1] < minY) minY = tri[i + 1]; if (tri[i + 1] > maxY) maxY = tri[i + 1];
+    if (tri[i + 2] < minZ) minZ = tri[i + 2]; if (tri[i + 2] > maxZ) maxZ = tri[i + 2];
+  }
+  const span = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 1e-6);
+  let cell = Math.max(span / res, opts.minCell || 0);
+  // マスの総数の上限
+  const maxCells = opts.maxCells || 4e6;
+  const volCells = ((maxX - minX) / cell + 3) * ((maxY - minY) / cell + 3) * ((maxZ - minZ) / cell + 3);
+  if (volCells > maxCells) cell *= Math.cbrt(volCells / maxCells) * 1.02;
+  // 外側に1マスずつ余白を取る（塗りつぶしの起点）
+  const ox = minX - cell, oy = minY - cell, oz = minZ - cell;
+  const nx = Math.ceil((maxX - minX) / cell) + 3;
+  const ny = Math.ceil((maxY - minY) / cell) + 3;
+  const nz = Math.ceil((maxZ - minZ) / cell) + 3;
+  const N = nx * ny * nz;
+  const at = (x, y, z) => (z * ny + y) * nx + x;
+  const SURF = 1, OUT = 2;
+  const grid = new Uint8Array(N);
+  // 表面のマスごとの、実際の表面の点の範囲（minX,minY,minZ,maxX,maxY,maxZ）
+  const slotOf = new Map();
+  let sb = new Float32Array(6 * 4096);
+  let slots = 0;
+  let lastK = -1, lastS = 0;
+
+  // 2) 三角形の上に、マスの半分以下の間隔で点を打って表面のマスに印を付ける
+  // 点は必ず範囲内にあるが、座標変換の丸め誤差でわずかに外へはみ出すと
+  // 余白のマスに印が付き、外からの塗りつぶしが始められなくなる（艦やポートの
+  // 中が全部「中身あり」になる）ため、余白には印を付けない。
+  const mark = (x, y, z) => {
+    const ix = Math.min(nx - 2, Math.max(1, Math.floor((x - ox) / cell)));
+    const iy = Math.min(ny - 2, Math.max(1, Math.floor((y - oy) / cell)));
+    const iz = Math.min(nz - 2, Math.max(1, Math.floor((z - oz) / cell)));
+    const k = at(ix, iy, iz);
+    let s;
+    if (k === lastK) {
+      s = lastS;
+    } else {
+      s = slotOf.get(k);
+      if (s === undefined) {
+        grid[k] = SURF;
+        s = slots++;
+        if (s * 6 + 6 > sb.length) { const nb = new Float32Array(sb.length * 2); nb.set(sb); sb = nb; }
+        const o = s * 6;
+        sb[o] = x; sb[o + 1] = y; sb[o + 2] = z; sb[o + 3] = x; sb[o + 4] = y; sb[o + 5] = z;
+        slotOf.set(k, s);
+      }
+      lastK = k; lastS = s;
     }
-    return [{ zMin, zMax, xMin, xMax, yMin, yMax }];
-  }
-
-  // 区間ごとの集計用バケツ
-  const buckets = [];
-  for (let i = 0; i < count; i++) {
-    buckets.push({
-      zMin: zMin + (zSpan * i) / count,
-      zMax: zMin + (zSpan * (i + 1)) / count,
-      xMin: Infinity, xMax: -Infinity,
-      yMin: Infinity, yMax: -Infinity,
-      hasPoint: false,
-    });
-  }
-
-  for (const p of localPoints) {
-    // pはこれでobject3dローカル座標系になっている。所属する区間を
-    // 求める（末尾の浮動小数誤差でcountを超えないようclampする）。
-    let idx = Math.floor(((p.z - zMin) / zSpan) * count);
-    if (idx < 0) idx = 0;
-    if (idx >= count) idx = count - 1;
-
-    const b = buckets[idx];
-    b.hasPoint = true;
-    if (p.x < b.xMin) b.xMin = p.x;
-    if (p.x > b.xMax) b.xMax = p.x;
-    if (p.y < b.yMin) b.yMin = p.y;
-    if (p.y > b.yMax) b.yMax = p.y;
-  }
-
-  // 頂点が1つも入らなかった区間（極端に薄い/歪なモデルで起こりうる）
-  // は、前後の隣接区間のX/Y範囲を借りて埋める（穴を作らないため）。
-  for (let i = 0; i < buckets.length; i++) {
-    if (buckets[i].hasPoint) continue;
-    // 直前の有効区間を探す。無ければ直後を探す。
-    let src = null;
-    for (let j = i - 1; j >= 0; j--) {
-      if (buckets[j].hasPoint) { src = buckets[j]; break; }
-    }
-    if (!src) {
-      for (let j = i + 1; j < buckets.length; j++) {
-        if (buckets[j].hasPoint) { src = buckets[j]; break; }
+    const o = s * 6;
+    if (x < sb[o]) sb[o] = x; if (x > sb[o + 3]) sb[o + 3] = x;
+    if (y < sb[o + 1]) sb[o + 1] = y; if (y > sb[o + 4]) sb[o + 4] = y;
+    if (z < sb[o + 2]) sb[o + 2] = z; if (z > sb[o + 5]) sb[o + 5] = z;
+  };
+  const step = cell * 0.5;
+  for (let i = 0; i < tp; i += 9) {
+    const ax = tri[i], ay = tri[i + 1], az = tri[i + 2];
+    const bx = tri[i + 3], by = tri[i + 4], bz = tri[i + 5];
+    const cx = tri[i + 6], cy = tri[i + 7], cz = tri[i + 8];
+    const longest = Math.max(Math.hypot(bx - ax, by - ay, bz - az), Math.hypot(cx - bx, cy - by, cz - bz), Math.hypot(ax - cx, ay - cy, az - cz));
+    const n = Math.min(1200, Math.max(1, Math.ceil(longest / step)));
+    for (let a = 0; a <= n; a++) {
+      for (let b = 0; b <= n - a; b++) {
+        const u = a / n, w = b / n, t = 1 - u - w;
+        mark(ax * t + bx * u + cx * w, ay * t + by * u + cy * w, az * t + bz * u + cz * w);
       }
     }
-    if (src) {
-      buckets[i].xMin = src.xMin;
-      buckets[i].xMax = src.xMax;
-      buckets[i].yMin = src.yMin;
-      buckets[i].yMax = src.yMax;
-    } else {
-      // 全区間が空（起こらないはずだが安全側）
-      buckets[i].xMin = buckets[i].xMax = 0;
-      buckets[i].yMin = buckets[i].yMax = 0;
-    }
   }
 
-  return buckets.map((b) => ({
-    zMin: b.zMin, zMax: b.zMax,
-    xMin: b.xMin, xMax: b.xMax,
-    yMin: b.yMin, yMax: b.yMax,
-  }));
+  // 3) 余白（必ず空）から、表面でないマスを塗りつぶして「外」にする
+  const queue = new Int32Array(N);
+  let qh = 0, qt = 0;
+  grid[0] = OUT;
+  queue[qt++] = 0;
+  const nxy = nx * ny;
+  while (qh < qt) {
+    const k = queue[qh++];
+    const x = k % nx, y = Math.floor(k / nx) % ny, z = Math.floor(k / nxy);
+    if (x > 0 && grid[k - 1] === 0) { grid[k - 1] = OUT; queue[qt++] = k - 1; }
+    if (x < nx - 1 && grid[k + 1] === 0) { grid[k + 1] = OUT; queue[qt++] = k + 1; }
+    if (y > 0 && grid[k - nx] === 0) { grid[k - nx] = OUT; queue[qt++] = k - nx; }
+    if (y < ny - 1 && grid[k + nx] === 0) { grid[k + nx] = OUT; queue[qt++] = k + nx; }
+    if (z > 0 && grid[k - nxy] === 0) { grid[k - nxy] = OUT; queue[qt++] = k - nxy; }
+    if (z < nz - 1 && grid[k + nxy] === 0) { grid[k + nxy] = OUT; queue[qt++] = k + nxy; }
+  }
+
+  // 4) 中身ありのマス（表面、または外に届かない空きマス）を、X→Y→Zの順に
+  //    伸ばせるだけ伸ばした直方体にまとめる。直方体の範囲は、表面のマスでは
+  //    実際の表面の点の範囲、中身のマスではマス全体を合わせたもの。
+  const solidAt = (k) => grid[k] !== OUT;
+  const used = new Uint8Array(N);
+  const boxes = [];
+  const minThick = cell * 0.2; // 薄い壁にも最低限の厚みを残す
+  for (let z = 0; z < nz; z++) {
+    for (let y = 0; y < ny; y++) {
+      for (let x = 0; x < nx; x++) {
+        const k0 = at(x, y, z);
+        if (!solidAt(k0) || used[k0]) continue;
+        let x1 = x;
+        while (x1 + 1 < nx && solidAt(at(x1 + 1, y, z)) && !used[at(x1 + 1, y, z)]) x1++;
+        let y1 = y;
+        grow_y: while (y1 + 1 < ny) {
+          for (let xx = x; xx <= x1; xx++) {
+            const k = at(xx, y1 + 1, z);
+            if (!solidAt(k) || used[k]) break grow_y;
+          }
+          y1++;
+        }
+        let z1 = z;
+        grow_z: while (z1 + 1 < nz) {
+          for (let yy = y; yy <= y1; yy++) {
+            for (let xx = x; xx <= x1; xx++) {
+              const k = at(xx, yy, z1 + 1);
+              if (!solidAt(k) || used[k]) break grow_z;
+            }
+          }
+          z1++;
+        }
+        let bx0 = Infinity, by0 = Infinity, bz0 = Infinity, bx1 = -Infinity, by1 = -Infinity, bz1 = -Infinity;
+        for (let zz = z; zz <= z1; zz++) {
+          for (let yy = y; yy <= y1; yy++) {
+            for (let xx = x; xx <= x1; xx++) {
+              const k = at(xx, yy, zz);
+              used[k] = 1;
+              const s = grid[k] === SURF ? slotOf.get(k) : undefined;
+              if (s !== undefined) {
+                const o = s * 6;
+                if (sb[o] < bx0) bx0 = sb[o]; if (sb[o + 3] > bx1) bx1 = sb[o + 3];
+                if (sb[o + 1] < by0) by0 = sb[o + 1]; if (sb[o + 4] > by1) by1 = sb[o + 4];
+                if (sb[o + 2] < bz0) bz0 = sb[o + 2]; if (sb[o + 5] > bz1) bz1 = sb[o + 5];
+              } else {
+                const cx0 = ox + xx * cell, cy0 = oy + yy * cell, cz0 = oz + zz * cell;
+                if (cx0 < bx0) bx0 = cx0; if (cx0 + cell > bx1) bx1 = cx0 + cell;
+                if (cy0 < by0) by0 = cy0; if (cy0 + cell > by1) by1 = cy0 + cell;
+                if (cz0 < bz0) bz0 = cz0; if (cz0 + cell > bz1) bz1 = cz0 + cell;
+              }
+            }
+          }
+        }
+        const thick = (lo, hi) => {
+          if (hi - lo >= minThick) return [lo, hi];
+          const c = (lo + hi) / 2;
+          return [c - minThick / 2, c + minThick / 2];
+        };
+        const [X0, X1] = thick(bx0, bx1), [Y0, Y1] = thick(by0, by1), [Z0, Z1] = thick(bz0, bz1);
+        boxes.push({ min: { x: X0, y: Y0, z: Z0 }, max: { x: X1, y: Y1, z: Z1 } });
+      }
+    }
+  }
+  return {
+    cell,
+    boxes,
+    bounds: { min: { x: minX, y: minY, z: minZ }, max: { x: maxX, y: maxY, z: maxZ } },
+  };
 }
 
-// v76: シリアライズ用の軽量ヘルパー。computeSegmentedBoundsFromObject3D
-// の戻り値（{zMin,zMax,xMin,xMax,yMin,yMax}の配列）は既にプレーンな
-// オブジェクトのみで構成されているためJSON.stringifyにそのまま渡せるが、
-// 呼び出し側での意図を明確にするための薄いラッパーとして用意する。
-// computeCrossSegmentedBoundsFromObject3Dの戻り値（同じ形のオブジェクト
-// の配列）にもそのまま使える。
-function serializeSegmentedBounds(segments) {
-  return (segments || []).map((s) => ({
-    zMin: s.zMin, zMax: s.zMax,
-    xMin: s.xMin, xMax: s.xMax,
-    yMin: s.yMin, yMax: s.yMax,
-  }));
-}
-
-// v76: computeSegmentedBoundsFromObject3D（Z軸単独の8区間）を拡張し、
-// Z軸とX軸（Y軸周りに90度回した軸＝艦の左右方向）の両方で輪切りにし、
-// その交差（Z区間×X区間の格子セル）に実際に頂点が入るものだけを箱と
-// して残す。Z軸だけでは表現できない左右非対称な形状（片側に張り出した
-// ウイングなど）を、より艦の形状にタイトにフィットした形で近似する
-// のが目的。
-//
-// 頂点が1つも入らない格子セルは単純に除外する（隣接セルからの補完は
-// 行わない。単一軸方式で行っていた「隣接区間から埋める」処理は、
-// 格子状になると「隣接」の定義自体が曖昧になるため。モデルの形状に
-// よっては結果に穴が空きうる点に注意）。
-//
-// object3d: 対象のTHREE.Object3D（Group等の階層で良い）。
-// zSegmentCount / xSegmentCount: 各軸の分割数（デフォルト8）。
-// 戻り値: セルの配列（最大 zSegmentCount * xSegmentCount 個、実際は
-//         モデル形状に応じてそれより少ない）。各要素は
-//         { zMin, zMax, xMin, xMax, yMin, yMax }
-//         （すべてobject3dのローカル座標系の値）。
-function computeCrossSegmentedBoundsFromObject3D(object3d, zSegmentCount, xSegmentCount) {
-  const zCount = zSegmentCount || 8;
-  const xCount = xSegmentCount || 8;
-  if (!object3d) return [];
-
-  // object3d自身のワールド行列の逆行列。computeSegmentedBoundsFromObject3D
-  // と同じ理由（v76-fix1参照）で、全頂点をobject3dローカル座標系へ変換
-  // した上で min/max・格子分けを行う。
-  object3d.updateWorldMatrix(true, true);
-  const toLocal = new THREE.Matrix4().copy(object3d.matrixWorld).invert();
-
-  let zMin = Infinity, zMax = -Infinity;
-  let xMin = Infinity, xMax = -Infinity;
-  const localPoints = [];
-  const v = new THREE.Vector3();
-
-  object3d.traverse((node) => {
-    if (!node.isMesh || !node.geometry) return;
-    const posAttr = node.geometry.attributes && node.geometry.attributes.position;
-    if (!posAttr) return;
-
-    const localToObject3d = new THREE.Matrix4().multiplyMatrices(toLocal, node.matrixWorld);
-
-    for (let i = 0; i < posAttr.count; i++) {
-      v.fromBufferAttribute(posAttr, i);
-      v.applyMatrix4(localToObject3d);
-      localPoints.push({ x: v.x, y: v.y, z: v.z });
-      if (v.z < zMin) zMin = v.z;
-      if (v.z > zMax) zMax = v.z;
-      if (v.x < xMin) xMin = v.x;
-      if (v.x > xMax) xMax = v.x;
+// v84: 大きなポート（三角形が数百万）の当たり判定は数秒かかるので、三角形を集めた
+// あとの計算を Web Worker で行い、画面が止まらないようにする。Worker が使えない
+// ときはその場で計算する。
+function computeCollisionShapeAsync(root, frame, opts) {
+  const tri = collectCollisionTriangles(root, frame);
+  if (!tri) return Promise.resolve(null);
+  if (typeof Worker === 'undefined' || typeof Blob === 'undefined' || typeof URL === 'undefined') {
+    return Promise.resolve(voxelizeCollisionTriangles(tri, opts));
+  }
+  return new Promise((resolve) => {
+    let worker, url;
+    const fallback = () => {
+      try { if (worker) worker.terminate(); } catch (e) { /* ignore */ }
+      if (url) URL.revokeObjectURL(url);
+      // 三角形の配列は Worker に引き渡してしまったので、集め直してその場で計算する
+      const again = collectCollisionTriangles(root, frame);
+      resolve(again ? voxelizeCollisionTriangles(again, opts) : null);
+    };
+    try {
+      const src = `${voxelizeCollisionTriangles.toString()}\nonmessage = (e) => { postMessage(voxelizeCollisionTriangles(e.data.tri, e.data.opts)); };`;
+      url = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
+      worker = new Worker(url);
+      worker.onmessage = (e) => { worker.terminate(); URL.revokeObjectURL(url); resolve(e.data); };
+      worker.onerror = (e) => { if (e && e.preventDefault) e.preventDefault(); fallback(); };
+      // 三角形の配列は Worker に引き渡す（数十MBあるのでコピーしない）
+      worker.postMessage({ tri, opts }, [tri.buffer]);
+    } catch (e) {
+      fallback();
     }
   });
+}
 
-  if (localPoints.length === 0) return [];
+// v84: ポートの当たり判定のマスの細かさ。乗っている艦の細い方の太さの1/4を目安に
+// （艦が通れる隙間をつぶさないように）、マスの総数は上限（400万）で抑える。
+function portCollisionShapeOptions(ship) {
+  let cross = 3;
+  if (ship && ship.hullDims) cross = Math.min(ship.hullDims.x, ship.hullDims.y);
+  else if (ship && ship.size) cross = ship.size * 0.3;
+  return { resolution: 1024, minCell: Math.max(0.25, cross / 4), maxCells: 4e6 };
+}
 
-  const zSpan = zMax - zMin;
-  const xSpan = xMax - xMin;
-  // v76: 全長に対して幅の方が大きいモデルや、元モデルの向きが90度
-  // ズレている等、Z軸・X軸のどちらが「長辺」になるかはモデルによって
-  // 変わる。固定でZ軸だけ細かく分割すると、実際に長く伸びている方が
-  // X軸だった場合に粗いままになってしまうため、実際のスパン
-  // （zSpan/xSpan）を比較し、長い方の軸だけ分割数を2倍（8→16）にする。
-  // 差がわずかな場合はどちらを選んでも粗さの体感差はほぼ無いはずなので、
-  // 特別な閾値は設けずMath.max/Math.minの比較のみで決める。
-  let zBaseCount = zCount;
-  let xBaseCount = xCount;
-  if (zSpan > xSpan) {
-    zBaseCount = zCount * 2;
-  } else if (xSpan > zSpan) {
-    xBaseCount = xCount * 2;
+// 当たり判定の形を、確認用の線（直方体の辺）として表示するオブジェクトを作る
+function buildCollisionShapeDebugObject(shape, color) {
+  const group = new THREE.Group();
+  if (!shape) return group;
+  const pts = [];
+  for (const b of shape.boxes) {
+    const { min: a, max: c } = b;
+    const corners = [
+      [a.x, a.y, a.z], [c.x, a.y, a.z], [c.x, c.y, a.z], [a.x, c.y, a.z],
+      [a.x, a.y, c.z], [c.x, a.y, c.z], [c.x, c.y, c.z], [a.x, c.y, c.z],
+    ];
+    const edges = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]];
+    for (const [i, j] of edges) pts.push(...corners[i], ...corners[j]);
   }
-  // どちらかの幅がほぼ0（板状・平面的なモデル）の場合、その軸は
-  // 分割の意味が無いため1区間として扱う。
-  const effectiveZCount = zSpan < 1e-6 ? 1 : zBaseCount;
-  const effectiveXCount = xSpan < 1e-6 ? 1 : xBaseCount;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+  const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: color || 0xff8833, transparent: true, opacity: 0.75 }));
+  group.add(lines);
+  return group;
+}
 
-  // セルをMapで管理（キー: "zIdx,xIdx"）。頂点が実際に入ったセルだけが
-  // 生成されるため、空セルを後から除外する処理は不要（生成しない）。
-  const cells = new Map();
+// =============================================================
+// v84: 光る面（放射＝emissive）の扱い
+// =============================================================
 
-  for (const p of localPoints) {
-    let zIdx = effectiveZCount === 1
-      ? 0
-      : Math.floor(((p.z - zMin) / zSpan) * effectiveZCount);
-    if (zIdx < 0) zIdx = 0;
-    if (zIdx >= effectiveZCount) zIdx = effectiveZCount - 1;
-
-    let xIdx = effectiveXCount === 1
-      ? 0
-      : Math.floor(((p.x - xMin) / xSpan) * effectiveXCount);
-    if (xIdx < 0) xIdx = 0;
-    if (xIdx >= effectiveXCount) xIdx = effectiveXCount - 1;
-
-    const key = zIdx + ',' + xIdx;
-    let cell = cells.get(key);
-    if (!cell) {
-      cell = {
-        zMin: zMin + (zSpan * zIdx) / effectiveZCount,
-        zMax: zSpan < 1e-6 ? zMax : zMin + (zSpan * (zIdx + 1)) / effectiveZCount,
-        xMin: xMin + (xSpan * xIdx) / effectiveXCount,
-        xMax: xSpan < 1e-6 ? xMax : xMin + (xSpan * (xIdx + 1)) / effectiveXCount,
-        yMin: Infinity, yMax: -Infinity,
-      };
-      cells.set(key, cell);
+// GLB の「放射の強さ」（KHR_materials_emissive_strength。Blender の放射の強さ）を
+// 反映する。Three.js r128 の GLTFLoader はこの拡張を読まず、強さ1のまま（ブルームの
+// しきい値に届かない）になるので、強さに応じて明るくする（強さ10で約2.7倍、30で約3.5倍。
+// そのままの倍率では画面が白く飛ぶので対数で弱める）。強さの指定がない光る面も、
+// はっきり光らせている（放射の色が明るい）ものは少し明るくして、ブルームがかかるようにする。
+function applyEmissiveStrength(root) {
+  if (!root) return;
+  const done = new Set();
+  root.traverse((node) => {
+    if (!node.isMesh || !node.material) return;
+    for (const m of Array.isArray(node.material) ? node.material : [node.material]) {
+      if (!m || done.has(m) || !m.emissive) continue;
+      done.add(m);
+      const ext = m.userData && m.userData.gltfExtensions && m.userData.gltfExtensions.KHR_materials_emissive_strength;
+      const strength = ext && Number(ext.emissiveStrength) > 0 ? Number(ext.emissiveStrength) : 1;
+      const peak = Math.max(m.emissive.r, m.emissive.g, m.emissive.b);
+      if (peak <= 0) continue;
+      m.userData.emissiveStrength = strength;
+      if (strength > 1) m.emissiveIntensity = 1 + 0.5 * Math.log2(strength);
+      else if (peak >= 0.5 && !m.emissiveMap) m.emissiveIntensity = 2;
     }
-    if (p.y < cell.yMin) cell.yMin = p.y;
-    if (p.y > cell.yMax) cell.yMax = p.y;
+  });
+}
+
+// 光る面を、近いもの同士（一辺 cell の格子）でまとめて「光源の候補」の一覧にする。
+// 座標は frame（ポートのグループなど）の座標系。各候補: 中心・広がり（半径）・面積・色
+// （放射の色×強さで重み付けした平均）・明るさ（面積×強さ）。
+function collectEmissiveLightClusters(root, frame, opts) {
+  const cell = Math.max(1e-3, (opts && opts.cell) || 50);
+  frame.updateWorldMatrix(true, false);
+  root.updateWorldMatrix(true, true);
+  const inv = new THREE.Matrix4().copy(frame.matrixWorld).invert();
+  const m = new THREE.Matrix4();
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+  const ab = new THREE.Vector3(), ac = new THREE.Vector3();
+  const cells = new Map();
+  root.traverse((node) => {
+    if (!node.isMesh || !node.geometry || !node.visible) return;
+    const pos = node.geometry.attributes && node.geometry.attributes.position;
+    if (!pos) return;
+    const mats = Array.isArray(node.material) ? node.material : [node.material];
+    const groups = node.geometry.groups && node.geometry.groups.length && Array.isArray(node.material)
+      ? node.geometry.groups : [{ start: 0, count: Infinity, materialIndex: 0 }];
+    m.multiplyMatrices(inv, node.matrixWorld);
+    const idx = node.geometry.index;
+    const total = idx ? idx.count : pos.count;
+    for (const g of groups) {
+      const mat = mats[g.materialIndex || 0];
+      if (!mat || !mat.emissive || !mat.userData || !(mat.userData.emissiveStrength > 0)) continue;
+      const e = mat.emissive;
+      const power = mat.userData.emissiveStrength * Math.max(e.r, e.g, e.b);
+      const end = Math.min(total, g.start + g.count);
+      for (let i = g.start; i + 2 < end; i += 3) {
+        const i0 = idx ? idx.getX(i) : i, i1 = idx ? idx.getX(i + 1) : i + 1, i2 = idx ? idx.getX(i + 2) : i + 2;
+        a.fromBufferAttribute(pos, i0).applyMatrix4(m);
+        b.fromBufferAttribute(pos, i1).applyMatrix4(m);
+        c.fromBufferAttribute(pos, i2).applyMatrix4(m);
+        const area = ab.subVectors(b, a).cross(ac.subVectors(c, a)).length() / 2;
+        if (!(area > 0)) continue;
+        const cx = (a.x + b.x + c.x) / 3, cy = (a.y + b.y + c.y) / 3, cz = (a.z + b.z + c.z) / 3;
+        const key = `${Math.floor(cx / cell)},${Math.floor(cy / cell)},${Math.floor(cz / cell)}`;
+        let k = cells.get(key);
+        if (!k) {
+          k = { w: 0, x: 0, y: 0, z: 0, area: 0, power: 0, r: 0, g: 0, b: 0, min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+          cells.set(key, k);
+        }
+        const w = area * power;
+        k.w += w; k.area += area; k.power += w;
+        k.x += cx * w; k.y += cy * w; k.z += cz * w;
+        k.r += e.r * w; k.g += e.g * w; k.b += e.b * w;
+        k.min[0] = Math.min(k.min[0], cx); k.min[1] = Math.min(k.min[1], cy); k.min[2] = Math.min(k.min[2], cz);
+        k.max[0] = Math.max(k.max[0], cx); k.max[1] = Math.max(k.max[1], cy); k.max[2] = Math.max(k.max[2], cz);
+      }
+    }
+  });
+  const out = [];
+  for (const k of cells.values()) {
+    if (!(k.w > 0)) continue;
+    const peak = Math.max(k.r, k.g, k.b) || 1;
+    out.push({
+      position: { x: k.x / k.w, y: k.y / k.w, z: k.z / k.w },
+      radius: Math.hypot(k.max[0] - k.min[0], k.max[1] - k.min[1], k.max[2] - k.min[2]) / 2,
+      area: k.area,
+      power: k.power,
+      color: { r: k.r / peak, g: k.g / peak, b: k.b / peak },
+    });
   }
-
-  return Array.from(cells.values());
+  return out;
 }
 
-// v76: モデル未設定時（簡易ゲート表示のみ・GLB/OBJ未読み込み）の
-// フォールバック用に、固定寸法から単一区間の「区間分割ボックス」を
-// 生成する（配列の要素数は常に1）。halfExtentsはローカル座標系の
-// 半寸法{x,y,z}（中心が原点である前提。10-docking-platform.jsの
-// ゲート・艦のcorrectionGroup原点はどちらもこの前提を満たす）。
-function makeFallbackSegmentedBounds(halfExtents) {
-  const hx = (halfExtents && halfExtents.x) || 0;
-  const hy = (halfExtents && halfExtents.y) || 0;
-  const hz = (halfExtents && halfExtents.z) || 0;
-  return [{
-    zMin: -hz, zMax: hz,
-    xMin: -hx, xMax: hx,
-    yMin: -hy, yMax: hy,
-  }];
+// 映り込む周りの景色（環境マップ）が無いと、金属の面は光をほとんど返さず真っ黒に
+// なる（Blender では周りの景色や光る面が映り込むので見える）。そういう面は金属らしさを
+// maxMetalness までに抑え、太陽や光る面の光（点光源）で照らされて見えるようにする。
+function softenMetalsWithoutEnvironment(root, maxMetalness) {
+  if (!root) return;
+  const cap = maxMetalness ?? 0.5;
+  root.traverse((node) => {
+    if (!node.isMesh || !node.material) return;
+    for (const m of Array.isArray(node.material) ? node.material : [node.material]) {
+      if (!m || !m.isMeshStandardMaterial || m.envMap || !(m.metalness > cap)) continue;
+      if (m.userData.originalMetalness === undefined) m.userData.originalMetalness = m.metalness;
+      m.metalness = cap;
+      m.needsUpdate = true;
+    }
+  });
 }
-

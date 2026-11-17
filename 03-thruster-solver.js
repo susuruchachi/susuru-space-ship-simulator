@@ -109,7 +109,12 @@ const ThrusterSolver = {
   // 両方の呼び出しで正の比率を得ることはまず無く（roll専用スラス
   // ターはforce/pitchYawのarmを持たない設計）、単純な加算で安全に
   // 合成できる。念のため合算後は1.0でクランプする。
-  solve(ship, desiredForce, desiredTorque) {
+  solve(ship, desiredForce, desiredTorque, opts) {
+    // v78: 自作の艦は、重心まわりの力・トルクの釣り合いを解く配分方式
+    // （21-ship-design.js ShipAllocator）を使う。艦種プリセットは従来どおり。
+    if (ship && ship.allocation === 'balanced' && typeof ShipAllocator !== 'undefined') {
+      return ShipAllocator.solve(ship, desiredForce, desiredTorque, opts);
+    }
     const pitchYawTorque = { x: desiredTorque.x, y: desiredTorque.y, z: 0 };
     const rollTorque = { x: 0, y: 0, z: desiredTorque.z };
 
@@ -332,6 +337,17 @@ const ThrusterSolver = {
   //   切りたい」という使い分けができなかったための対応。
   // -----------------------------------------------------------
   ROTATION_INPUT_DEADZONE: 0.02, // これ未満の合計入力量は「入力なし」とみなす
+  // v83: 回転入力を「目標の角速度」として追従するときの応答時間 [s]
+  ROTATION_RATE_RESPONSE_TIME: 0.12,
+
+  // v83: 速度の誤差がこれ以上で全開にする、という比例制御のしきい値を、
+  // 「その向きに全開で1フレーム（dt）吹かしたときの速度変化」の1.5倍より
+  // 小さくしない。主エンジンが極端に強い自作の艦で、目標速度の前後を
+  // 行き来して速度が振動するのを防ぐ（プリセットの艦は従来どおり）。
+  _deadbeatFullError(ship, dirLocal, fullError, dt) {
+    if (!ship || ship.allocation !== 'balanced' || typeof ShipAllocator === 'undefined' || !(dt > 0)) return fullError;
+    return Math.max(fullError, ShipAllocator.maxAccelAlong(ship, dirLocal) * dt * 1.5);
+  },
   AUTO_DAMPING_MIN_ANGULAR_SPEED: 0.01, // これ未満の角速度は制動不要（無限収束を防ぐ）
   // v09: 艦種依存のオーバーシュート/振り切れ不具合対応のため、固定閾値の
   // 比例制動は_computeOvershootSafeBrakeTorque()に置き換えて廃止した。
@@ -380,6 +396,9 @@ const ThrusterSolver = {
   // キャッシュして毎フレームの再計算を避ける。
   // -----------------------------------------------------------
   _estimateMaxAngularAccel(ship) {
+    if (ship.allocation === 'balanced' && typeof ShipAllocator !== 'undefined') {
+      return ShipAllocator.estimateMaxAngularAccel(ship);
+    }
     if (ship._maxAngularAccelCache && ship._maxAngularAccelCacheThrusters === ship.thrusters) {
       return ship._maxAngularAccelCache;
     }
@@ -422,6 +441,9 @@ const ThrusterSolver = {
   // 参照）。回転側の_estimateMaxAngularAccel()と対になる並進版。
   // -----------------------------------------------------------
   _estimateMaxLinearDecel(ship) {
+    if (ship.allocation === 'balanced' && typeof ShipAllocator !== 'undefined') {
+      return ShipAllocator.estimateMaxLinearDecel(ship);
+    }
     if (ship._maxLinearDecelCache && ship._maxLinearDecelCacheThrusters === ship.thrusters) {
       return ship._maxLinearDecelCache;
     }
@@ -467,6 +489,9 @@ const ThrusterSolver = {
   // 出力を食い合うことも多いSAFETY_FACTORはZ軸より保守的にしてある。
   // -----------------------------------------------------------
   _estimateMaxLateralDecel(ship) {
+    if (ship.allocation === 'balanced' && typeof ShipAllocator !== 'undefined') {
+      return ShipAllocator.estimateMaxLateralDecel(ship);
+    }
     if (ship._maxLateralDecelCache && ship._maxLateralDecelCacheThrusters === ship.thrusters) {
       return ship._maxLateralDecelCache;
     }
@@ -742,7 +767,8 @@ const ThrusterSolver = {
     const autoDockingOn = ship && ship.autoDockingEnabled && State.dockingTarget;
 
     if (autoDockingOn) {
-      return this._buildDesiredForAutoDocking(input, ship, dt);
+      // v87: なめらかな自動入港（_buildDesiredForSmoothDocking）。SMOOTH_DOCKING を false にすると従来の方式
+      return this.SMOOTH_DOCKING ? this._buildDesiredForSmoothDocking(ship, dt) : this._buildDesiredForAutoDocking(input, ship, dt);
     }
 
     // v58: 手動操船中もログに1行残す（要望「ログに…手動操船のステータスを
@@ -796,11 +822,32 @@ const ThrusterSolver = {
     //     時はboostMult倍）。現在のローカルZ速度との差分を比例制御で
     //     埋め、目標に近づくほど推力を弱める。shipが無い場合（テスト等）
     //     は従来通りスロットル値をそのまま推力として使う後方互換。
-    if (ship) {
-      const targetZSpeed = -input.thrustForward * ship.maxSpeed * boostMult;
+    // v85: 母港以外で重力があるときは、スロットル = 推力の割合（速度を保つ補助は使わない。
+    // 補助が速度を0へ戻そうとすると、重力で回っている軌道が壊れるため）
+    const newtonian = typeof Navigation !== 'undefined' && Navigation.newtonianFlight && Navigation.newtonianFlight();
+    // v89: レバーの意味（'speed' 速度 / 'thrust' 出力）。母港の外の「速度」モードは、速度の基準ができてから
+    const refV = newtonian && typeof ShipController !== 'undefined' ? ShipController.refV : null;
+    const speedMode = !!ship && !input.thrustIsForce && !(typeof State !== 'undefined' && State.settings && State.settings.leverMode === 'thrust') && (!newtonian || !!refV);
+    const relVel = ship ? (refV ? { x: ship.velocity.x - refV.x, y: ship.velocity.y - refV.y, z: ship.velocity.z - refV.z } : ship.velocity) : null;
+    // v88: 母港からの出港（16-navigation.js departureInput）: 決めた速さで前進する（スロットルの位置は使わない）
+    const holdFwd = ship && Number.isFinite(input.holdForwardSpeed) ? input.holdForwardSpeed : null;
+    if (holdFwd !== null) {
       const localVelForZ = rotateVecByQuat(ship.velocity, conjugateQuat(ship.quaternion));
+      const zError = -holdFwd - localVelForZ.z;
+      const fullErr = this._deadbeatFullError(ship, { x: 0, y: 0, z: Math.sign(zError) || 1 }, 5, dt);
+      desiredForce.z = Math.sign(zError) * Math.min(1, Math.abs(zError) / fullErr);
+    } else if (ship && (!Number.isFinite(ship.maxSpeed) || !speedMode)) {
+      // v85: 最高速度が無制限の艦は、スロットル = 推力の割合（離せば慣性で進み続ける）
+      // v89: レバーの「出力」モード（HUD のレバーの上のボタン）も同じ
+      desiredForce.z = clamp(-input.thrustForward * boostMult, -1, 1);
+    } else if (ship) {
+      // v89: レバーの「速度」モード: スロットル = 最高速度に対する前進の速さの割合。母港の外では、速度の基準
+      //   （重力に任せて落ちていく点・地表の速度。05-ship-controller.js refV）に対する速さで合わせる（軌道は壊さない）
+      const targetZSpeed = -input.thrustForward * ship.maxSpeed * boostMult;
+      const localVelForZ = rotateVecByQuat(relVel, conjugateQuat(ship.quaternion));
       const zError = targetZSpeed - localVelForZ.z;
-      const thrustStrength = Math.min(1, Math.abs(zError) / this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR);
+      const fullErr = this._deadbeatFullError(ship, { x: 0, y: 0, z: Math.sign(zError) || 1 }, this.FORWARD_VELOCITY_FULL_THROTTLE_ERROR, dt);
+      const thrustStrength = Math.min(1, Math.abs(zError) / fullErr);
       desiredForce.z = Math.sign(zError) * thrustStrength;
     } else {
       desiredForce.z = -input.thrustForward * boostMult;
@@ -814,15 +861,18 @@ const ThrusterSolver = {
     const hasStrafeXInput = Math.abs(input.thrustStrafeX) >= this.STRAFE_INPUT_DEADZONE;
     const hasStrafeYInput = Math.abs(input.thrustStrafeY) >= this.STRAFE_INPUT_DEADZONE;
 
-    if (retroDampingOn && ship && (!hasStrafeXInput || !hasStrafeYInput)) {
-      const localVel = rotateVecByQuat(ship.velocity, conjugateQuat(ship.quaternion));
+    // v89: 母港の外でも、レバーが「速度」モードなら、速度の基準に対する横滑りを打ち消す
+    if (retroDampingOn && ship && (!newtonian || (speedMode && refV)) && (!hasStrafeXInput || !hasStrafeYInput)) {
+      const localVel = rotateVecByQuat(relVel, conjugateQuat(ship.quaternion));
 
       if (!hasStrafeXInput && Math.abs(localVel.x) > this.STRAFE_DAMPING_MIN_SPEED) {
-        const brakeStrength = Math.min(1, Math.abs(localVel.x) / this.STRAFE_DAMPING_FULL_BRAKE_SPEED);
+        const fullX = this._deadbeatFullError(ship, { x: -Math.sign(localVel.x), y: 0, z: 0 }, this.STRAFE_DAMPING_FULL_BRAKE_SPEED, dt);
+        const brakeStrength = Math.min(1, Math.abs(localVel.x) / fullX);
         desiredForce.x = -Math.sign(localVel.x) * brakeStrength;
       }
       if (!hasStrafeYInput && Math.abs(localVel.y) > this.STRAFE_DAMPING_MIN_SPEED) {
-        const brakeStrength = Math.min(1, Math.abs(localVel.y) / this.STRAFE_DAMPING_FULL_BRAKE_SPEED);
+        const fullY = this._deadbeatFullError(ship, { x: 0, y: -Math.sign(localVel.y), z: 0 }, this.STRAFE_DAMPING_FULL_BRAKE_SPEED, dt);
+        const brakeStrength = Math.min(1, Math.abs(localVel.y) / fullY);
         desiredForce.y = -Math.sign(localVel.y) * brakeStrength;
       }
     }
@@ -837,7 +887,31 @@ const ThrusterSolver = {
     const rotationInputMagnitude =
       Math.abs(input.rotatePitch) + Math.abs(input.rotateYaw) + Math.abs(input.rotateRoll);
 
-    const hasNoRotationInput = rotationInputMagnitude < this.ROTATION_INPUT_DEADZONE;
+    // v85: 周回中の姿勢合わせ（16-navigation.js）は、ごく小さな回り方でも入力として扱う
+    // v86: 重力場機関の境界面の復元（05-ship-controller.js GravityDrive.adjustInput の rateCommand）も同じ。
+    // 小さな値を「回す力」のまま使うと、今の回転を押し続けて、揺れが収まらなくなっていた
+    const hasNoRotationInput = rotationInputMagnitude < this.ROTATION_INPUT_DEADZONE && !input.attitudeHold && !input.rateCommand;
+
+    // v83: 回転入力は「目標の角速度」（入力 × 最大角速度）として扱い、今の角速度との
+    // 差に応じたトルクを要求する。従来は入力のぶんのトルクを要求し続けていたため、
+    // 最大角速度に達したあとも姿勢スラスターが噴射し続け、その副作用の力で艦が
+    // 少しずつ加減速していた（「姿勢制御のスラスターで加減速しちゃう」）。
+    // 入力していない軸は角速度を0に戻す向きになる。
+    if (ship && !hasNoRotationInput) {
+      const maxA = this._estimateMaxAngularAccel(ship);
+      const w = ship.angularVelocity;
+      const tau = this.ROTATION_RATE_RESPONSE_TIME;
+      const cmd = (inp, wi, a) => {
+        const v = clamp(inp || 0, -1, 1);
+        if (!(a > 0)) return v;
+        return clamp((v * ship.maxAngularSpeed - wi) / (a * tau), -1, 1);
+      };
+      desiredTorque = {
+        x: cmd(input.rotatePitch, w.x, maxA.x),
+        y: cmd(input.rotateYaw, w.y, maxA.y),
+        z: cmd(input.rotateRoll, w.z, maxA.z),
+      };
+    }
 
     // 自動姿勢制動（ダンピング）: v06で進行方向整列トルクは廃止した
     // ため、ここは角速度打ち消しのみを行うシンプルな形に戻った。
@@ -845,7 +919,10 @@ const ThrusterSolver = {
     // 宇宙空間では角速度がそのまま残り続け「延々と回り続ける」体感
     // になるため、回転入力が実質ゼロの間はship.angularVelocityを
     // 打ち消す方向のトルク要求を代わりに発生させる。
-    if (autoDampingOn && hasNoRotationInput) {
+    // v85: 重力場機関の艦は、境界面の復元力・横揺れ（05-ship-controller.js GravityDrive）が
+    // 姿勢を受け持つので、自動の回転止めはしない（揺れの折り返しで止めてしまうため）
+    const boundaryHolds = ship && ship.gravityDrive && ship.boundaryQuat && !ship.autoDockingEnabled;
+    if (autoDampingOn && hasNoRotationInput && !boundaryHolds) {
       const angSpeed = vecLength(ship.angularVelocity);
       if (angSpeed > this.AUTO_DAMPING_MIN_ANGULAR_SPEED) {
         // v09: 艦の実際の制動能力（慣性・スラスター配置から概算した
@@ -858,7 +935,8 @@ const ThrusterSolver = {
       }
     }
 
-    return { desiredForce, desiredTorque };
+    // v84: 手動操縦の前進は主エンジンだけで出す（ShipAllocator.solve の opts）
+    return { desiredForce, desiredTorque, manualThrottle: true };
   },
 
   // =============================================================
@@ -1749,6 +1827,189 @@ const ThrusterSolver = {
   // メインエントリ: 自動ドッキング用のdesiredForce/desiredTorqueを
   // 組み立てる。
   // =============================================================
+  // =============================================================
+  // v87: なめらかな自動入港（要望「入港はもっと早くスムーズにしたい」）
+  //
+  // 従来の方式（_buildDesiredForAutoDocking）は、距離の区切り（800・500・300・250・200）ごとに
+  // 一度止まって姿勢・軸を合わせ直す作りで、区切りの前後で何度も止まったり戻ったりして
+  // 時間がかかっていた（巡洋艦で約250秒のうち、約110秒は距離250付近での行き来）。
+  // この方式は止まらずに進み続ける:
+  //   - 到着点の手前に、奥ほど細くなる円錐（進入路）を考える。横ずれの許容は
+  //     トンネル（残り CONE_INNER 以内）で R0 + K_IN·s、その外で外へ広がる（s = 進入軸に沿った残りの距離）
+  //   - 円錐の中: 進入軸に沿って「残りの距離で止まり切れる速さ」で進みつつ、横ずれを直す
+  //     （横ずれが許容に近いほど前へ進む速さを落とし、許容の1.5倍で前進を止めて横だけ直す）
+  //   - 円錐の外: 進入軸上の入口（到着点の手前 ENTRY_DIST）へ向かう。港の奥側にいて、まっすぐ
+  //     向かうと港に近づきすぎるときは、港の横（CLEAR_RADIUS の外）を回る
+  //   - 姿勢は、円錐の中では入港の姿勢へ、遠くでは進む向きへ（主エンジンで進む）
+  //   - 速さ・姿勢の誤差は、艦が出せる加速度・角加速度の範囲で、なめらかに詰める
+  //   - 到着点で、ずれ・速さ・姿勢の誤差が十分小さくなったら固定する（入港）
+  // フェーズの名前（HUD・当たり判定・進入路の表示が使う）: approach / return_to_axis（円錐の外）、
+  // final_approach（円錐の中）、tunnel（円錐の中で残り CONE_INNER 以内）、docked
+  // =============================================================
+  SMOOTH_DOCKING: true,
+  SD: {
+    BRAKE_MARGIN: 0.6,   // 減速に使う加速度 = 艦が出せる値 × この値（余裕）
+    MAX_SPEED: 120,      // [m/s]
+    VEL_TIME: 0.6,       // 速度の誤差を詰める時間 [s]
+    LIN_GAIN: 0.6,       // 近くでは「残りの距離 × この値」までの速さ [1/s]（最後の詰め）
+    LAT_MAX: 40,         // 横ずれを直す速さの上限 [m/s]
+    CONE_INNER: 200,     // トンネル（横ずれの許容が狭い区間）の長さ [m]
+    CONE_R0: 0.5,        // 到着点での横ずれの許容 [m]
+    CONE_K_IN: 0.015,    // トンネル内の許容の広がり（200 m で 3.5 m）
+    CONE_K_OUT: 0.35,    // トンネルの外の許容の広がり
+    ENTRY_DIST: 350,     // 円錐の外から向かう、進入軸上の入口（到着点から手前へ）[m]
+    CLEAR_RADIUS: 260,   // 奥側から回り込むときに、到着点から離しておく半径 [m]
+    FACE_TRAVEL_DIST: 600, // 円錐の外で、行き先がこれより遠ければ機首を進む向きへ
+    ANG_GAIN: 1.2,       // 姿勢の誤差 → 回る速さ [1/s]
+    ANG_MAX: 0.35,       // 回る速さの上限 [rad/s]
+    ANG_TIME: 0.3,       // 回る速さの誤差を詰める時間 [s]
+    LOCK_DIST: 0.3, LOCK_SPEED: 0.3, LOCK_ANGLE_DEG: 0.3, LOCK_ANG_SPEED: 0.01,
+  },
+
+  _sdConeAllow(s) {
+    const C = this.SD;
+    if (s <= C.CONE_INNER) return C.CONE_R0 + C.CONE_K_IN * Math.max(0, s);
+    return C.CONE_R0 + C.CONE_K_IN * C.CONE_INNER + C.CONE_K_OUT * (s - C.CONE_INNER);
+  },
+
+  _buildDesiredForSmoothDocking(ship, dt) {
+    const C = this.SD;
+    const target = computeEffectiveShipDockingTarget(State.dockingTarget, ship);
+    const P = target.position;
+    const none = () => ({ desiredForce: { x: 0, y: 0, z: 0 }, desiredTorque: { x: 0, y: 0, z: 0 } });
+    const axis = vecNormalize(rotateVecByQuat({ x: 0, y: 0, z: -1 }, target.quaternion)); // 入港の向き（艦首）
+    const toP = { x: P.x - ship.position.x, y: P.y - ship.position.y, z: P.z - ship.position.z };
+    const dist = vecLength(toP);
+    const prev = ship._dockingPhase;
+    if (prev === 'docked' && dist < this.DOCKED_STATE_DISTANCE_EPSILON) return none();
+
+    const s = vecDot(toP, axis); // 進入軸に沿った残りの距離（手前側が正）
+    const latVec = { x: toP.x - axis.x * s, y: toP.y - axis.y * s, z: toP.z - axis.z * s }; // 艦 → 進入軸
+    const L = vecLength(latVec);
+
+    // 姿勢の誤差（入港の姿勢に対して）
+    const attErr = (qd) => {
+      let qe = multiplyQuat(conjugateQuat(ship.quaternion), qd);
+      if (qe.w < 0) qe = { x: -qe.x, y: -qe.y, z: -qe.z, w: -qe.w };
+      const sv = Math.hypot(qe.x, qe.y, qe.z);
+      return { ang: 2 * Math.atan2(sv, qe.w), axis: sv > 1e-12 ? { x: qe.x / sv, y: qe.y / sv, z: qe.z / sv } : { x: 0, y: 0, z: 0 } };
+    };
+    const finalErr = attErr(target.quaternion);
+
+    // 入港: 十分近く、止まっていて、姿勢も合っている
+    if (dist < C.LOCK_DIST && vecLength(ship.velocity) < C.LOCK_SPEED
+      && finalErr.ang < (C.LOCK_ANGLE_DEG * Math.PI) / 180 && vecLength(ship.angularVelocity) < C.LOCK_ANG_SPEED) {
+      this._lockShipAtTarget(ship, target);
+      return none();
+    }
+
+    // 艦が出せる加速度（自動ドッキングの上限込み）
+    const al = ShipAllocator.prepare(ship);
+    const lim = ShipAllocator._dockingLimits(ship);
+    const cap = (row, sign) => {
+      let c = sign >= 0 ? al.capPos[row] : al.capNeg[row];
+      if (lim) c = Math.min(c, lim[row]);
+      return c;
+    };
+    const m = ship.mass;
+    const aAlong = Math.max(0.02, (cap(2, 1) / m) * C.BRAKE_MARGIN); // 機首を前に向けたまま減速（後ろ向きの力）
+    const aLat = Math.max(0.02, (Math.min(cap(0, 1), cap(0, -1), cap(1, 1), cap(1, -1)) / m) * C.BRAKE_MARGIN);
+    const aAny = Math.min(aAlong, aLat);
+    const vCap = Math.min(C.MAX_SPEED, Number.isFinite(ship.maxSpeed) ? ship.maxSpeed : Infinity);
+
+    // 円錐の中か（出入りにゆとりを持たせる）
+    const allow = this._sdConeAllow(Math.max(0, s));
+    const wasIn = prev === 'final_approach' || prev === 'tunnel';
+    const inCone = wasIn ? (s > -2 && L <= allow * 3 + 10) : (s >= 0 && L <= allow);
+
+    let vDes, phase, qDes = target.quaternion;
+    if (inCone) {
+      const latDir = L > 1e-9 ? vecScale(latVec, 1 / L) : { x: 0, y: 0, z: 0 };
+      const vLat = Math.min(C.LAT_MAX, vCap, Math.sqrt(2 * aLat * L), C.LIN_GAIN * L);
+      const g = clamp(1.5 - L / allow, 0, 1);
+      const sp = Math.max(0, s);
+      const vAlong = Math.min(vCap, Math.sqrt(2 * aAlong * sp), C.LIN_GAIN * sp + 0.02) * g * (s > 0 ? 1 : 0);
+      vDes = { x: axis.x * vAlong + latDir.x * vLat, y: axis.y * vAlong + latDir.y * vLat, z: axis.z * vAlong + latDir.z * vLat };
+      if (s < 0) { // 少し行き過ぎた: 戻る
+        const back = Math.min(C.LIN_GAIN * -s, Math.sqrt(2 * aAlong * -s));
+        vDes.x -= axis.x * back; vDes.y -= axis.y * back; vDes.z -= axis.z * back;
+      }
+      phase = s <= C.CONE_INNER ? 'tunnel' : 'final_approach';
+    } else {
+      // 入口（進入軸上、到着点の手前 ENTRY_DIST）へ。港に近づきすぎるなら横を回る
+      const E = { x: P.x - axis.x * C.ENTRY_DIST, y: P.y - axis.y * C.ENTRY_DIST, z: P.z - axis.z * C.ENTRY_DIST };
+      let goal = E, extra = 0;
+      phase = 'approach';
+      const d = { x: E.x - ship.position.x, y: E.y - ship.position.y, z: E.z - ship.position.z };
+      const dl2 = vecDot(d, d);
+      if (dl2 > 1e-6) {
+        const t = clamp(-vecDot({ x: ship.position.x - P.x, y: ship.position.y - P.y, z: ship.position.z - P.z }, d) / dl2, 0, 1);
+        const c = { x: ship.position.x + d.x * t - P.x, y: ship.position.y + d.y * t - P.y, z: ship.position.z + d.z * t - P.z };
+        const miss = vecLength(c);
+        if (t > 0 && t < 1 && miss < C.CLEAR_RADIUS) {
+          let n = miss > 1 ? vecScale(c, 1 / miss) : (L > 1e-6 ? vecScale(latVec, -1 / L) : vecNormalize(vecCross(axis, Math.abs(axis.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 })));
+          const V = { x: P.x + n.x * C.CLEAR_RADIUS * 1.3, y: P.y + n.y * C.CLEAR_RADIUS * 1.3, z: P.z + n.z * C.CLEAR_RADIUS * 1.3 };
+          extra = Math.hypot(E.x - V.x, E.y - V.y, E.z - V.z);
+          goal = V;
+          phase = 'return_to_axis';
+        }
+      }
+      const g = { x: goal.x - ship.position.x, y: goal.y - ship.position.y, z: goal.z - ship.position.z };
+      const gl = vecLength(g);
+      const sp = Math.min(vCap, Math.sqrt(2 * aAny * (gl + extra)), C.LIN_GAIN * (gl + extra) + 0.5);
+      vDes = gl > 1e-6 ? vecScale(g, sp / gl) : { x: 0, y: 0, z: 0 };
+      // 遠いうちは機首を進む向きへ（主エンジンで進む）
+      if (gl + extra > C.FACE_TRAVEL_DIST && gl > 1e-6) {
+        const up = rotateVecByQuat({ x: 0, y: 1, z: 0 }, target.quaternion);
+        const q = this._sdLookQuat(vecScale(g, 1 / gl), up);
+        if (q) qDes = q;
+      }
+    }
+
+    // 並進: 目標の速度との差を VEL_TIME で詰める加速度 → 各軸の出せる力に対する割合
+    const acc = { x: (vDes.x - ship.velocity.x) / C.VEL_TIME, y: (vDes.y - ship.velocity.y) / C.VEL_TIME, z: (vDes.z - ship.velocity.z) / C.VEL_TIME };
+    const accL = rotateVecByQuat(acc, conjugateQuat(ship.quaternion));
+    const desiredForce = { x: 0, y: 0, z: 0 };
+    ['x', 'y', 'z'].forEach((k, i) => {
+      const F = accL[k] * m;
+      const c = cap(i, F);
+      desiredForce[k] = c > 0 ? clamp(F / c, -1, 1) : 0;
+    });
+
+    // 回転: 姿勢の誤差に応じた回る速さ（止まり切れる速さまで）との差を ANG_TIME で詰める
+    const e = qDes === target.quaternion ? finalErr : attErr(qDes);
+    const alpha = this._estimateMaxAngularAccel(ship);
+    const aMin = Math.max(1e-6, Math.min(alpha.x, alpha.y, alpha.z));
+    const wMag = Math.min(C.ANG_MAX, ship.maxAngularSpeed, Math.sqrt(2 * aMin * C.BRAKE_MARGIN * e.ang), C.ANG_GAIN * e.ang);
+    const w = ship.angularVelocity;
+    const desiredTorque = {
+      x: alpha.x > 0 ? clamp((e.axis.x * wMag - w.x) / (C.ANG_TIME * alpha.x), -1, 1) : 0,
+      y: alpha.y > 0 ? clamp((e.axis.y * wMag - w.y) / (C.ANG_TIME * alpha.y), -1, 1) : 0,
+      z: alpha.z > 0 ? clamp((e.axis.z * wMag - w.z) / (C.ANG_TIME * alpha.z), -1, 1) : 0,
+    };
+
+    ship._dockingPhase = phase;
+    return { desiredForce, desiredTorque };
+  },
+
+  // 機首（-Z）を fwd へ、上（+Y）をできるだけ up へ向ける姿勢
+  _sdLookQuat(fwd, up) {
+    const f = vecNormalize(fwd);
+    let r = vecCross(f, up);
+    if (vecLength(r) < 1e-6) r = vecCross(f, Math.abs(f.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 });
+    r = vecNormalize(r);
+    const u = vecCross(r, f);
+    // 回転行列（列: 右 r, 上 u, 後ろ -f）→ クォータニオン
+    const m00 = r.x, m01 = u.x, m02 = -f.x, m10 = r.y, m11 = u.y, m12 = -f.y, m20 = r.z, m21 = u.z, m22 = -f.z;
+    const tr = m00 + m11 + m22;
+    let q;
+    if (tr > 0) { const S = Math.sqrt(tr + 1) * 2; q = { w: 0.25 * S, x: (m21 - m12) / S, y: (m02 - m20) / S, z: (m10 - m01) / S }; }
+    else if (m00 > m11 && m00 > m22) { const S = Math.sqrt(1 + m00 - m11 - m22) * 2; q = { w: (m21 - m12) / S, x: 0.25 * S, y: (m01 + m10) / S, z: (m02 + m20) / S }; }
+    else if (m11 > m22) { const S = Math.sqrt(1 + m11 - m00 - m22) * 2; q = { w: (m02 - m20) / S, x: (m01 + m10) / S, y: 0.25 * S, z: (m12 + m21) / S }; }
+    else { const S = Math.sqrt(1 + m22 - m00 - m11) * 2; q = { w: (m10 - m01) / S, x: (m02 + m20) / S, y: (m12 + m21) / S, z: 0.25 * S }; }
+    return normalizeQuat(q);
+  },
+
   _buildDesiredForAutoDocking(input, ship, dt) {
     // v61: State.dockingTargetは「艦の接舷面(dockingFace)が最終的に
     // 一致すべき港側の位置・姿勢」を表す。艦に接舷面が設定されている
